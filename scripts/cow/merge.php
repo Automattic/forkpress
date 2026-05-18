@@ -10130,9 +10130,10 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
             ];
         };
 
+        $mime_select = isset($post_columns['post_mime_type']) ? 'p.post_mime_type' : "''";
         $stmt = cow_merge_prepare_checked(
             $db,
-            "SELECT p.ID, p.post_title,
+            "SELECT p.ID, p.post_title, $mime_select AS post_mime_type,
                     (SELECT f.meta_value FROM wp_postmeta f WHERE f.post_id = p.ID AND f.meta_key = '_wp_attached_file' ORDER BY f.meta_id DESC LIMIT 1) AS attached_file,
                     (SELECT m.meta_value FROM wp_postmeta m WHERE m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata' ORDER BY m.meta_id DESC LIMIT 1) AS attachment_metadata
              FROM wp_posts p
@@ -10144,6 +10145,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
         while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             $attachment_id = (int)$row['ID'];
             $post_title = (string)$row['post_title'];
+            $post_mime_type = is_string($row['post_mime_type'] ?? null) ? strtolower((string)$row['post_mime_type']) : '';
             $attached_file_raw = is_string($row['attached_file'] ?? null) ? (string)$row['attached_file'] : '';
             $attached_path = cow_merge_wordpress_upload_relative_path($attached_file_raw);
             if ($attached_path === null) {
@@ -10196,6 +10198,13 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
 
             $metadata_raw = is_string($row['attachment_metadata'] ?? null) ? (string)$row['attachment_metadata'] : '';
             if ($metadata_raw === '') {
+                if (str_starts_with($post_mime_type, 'image/')) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-missing', 'image attachment is missing _wp_attachment_metadata', [
+                        'field' => '_wp_attachment_metadata',
+                        'attached_file' => $attached_file_raw,
+                        'post_mime_type' => $post_mime_type,
+                    ], [$attached_path]);
+                }
                 continue;
             }
             $metadata = @unserialize($metadata_raw, ['allowed_classes' => false]);

@@ -3571,6 +3571,14 @@ try {
             smoke_insert_post($db, (int)$row['page_id'], (string)$row['title'], (string)$row['content'], 'page', (string)$row['slug']);
             smoke_insert_post($db, (int)$row['attachment_id'], basename((string)$row['file']), '', 'attachment', str_replace(['.', '/'], '-', basename((string)$row['file'])), 'inherit', (int)$row['page_id'], (string)$row['mime'], $guid);
             smoke_insert_postmeta($db, (int)$row['meta_id'], (int)$row['attachment_id'], '_wp_attached_file', (string)$row['file']);
+            if (str_starts_with((string)$row['mime'], 'image/')) {
+                smoke_insert_postmeta($db, (int)$row['meta_id'] + 100, (int)$row['attachment_id'], '_wp_attachment_metadata', serialize([
+                    'file' => (string)$row['file'],
+                    'width' => 1200,
+                    'height' => 800,
+                    'sizes' => [],
+                ]));
+            }
             smoke_write_file((string)$row['root'] . '/wp-content/uploads/' . $row['file'], (string)$row['bytes']);
         }
         $db->close();
@@ -3595,6 +3603,10 @@ try {
         assert_same(smoke_scalar($media_refs_target, 'SELECT post_type FROM wp_posts WHERE ID = ' . (int)$row['attachment_id']), 'attachment', "merged target includes $owner core/{$row['block']} attachment row");
         assert_same((int)smoke_scalar($media_refs_target, 'SELECT post_parent FROM wp_posts WHERE ID = ' . (int)$row['attachment_id']), (int)$row['page_id'], "merged target keeps $owner core/{$row['block']} attachment parent page");
         assert_same(smoke_scalar($media_refs_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = " . (int)$row['attachment_id'] . " AND meta_key = '_wp_attached_file'"), (string)$row['file'], "merged target includes $owner core/{$row['block']} attached-file metadata");
+        if (str_starts_with((string)$row['mime'], 'image/')) {
+            $attachment_metadata = unserialize((string)smoke_scalar($media_refs_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = " . (int)$row['attachment_id'] . " AND meta_key = '_wp_attachment_metadata'"), ['allowed_classes' => false]);
+            assert_same($attachment_metadata['file'] ?? null, (string)$row['file'], "merged target includes $owner core/{$row['block']} attachment metadata");
+        }
         assert_same(file_get_contents($media_refs_target_root . '/wp-content/uploads/' . $row['file']), (string)$row['bytes'], "merged target includes $owner core/{$row['block']} upload file");
     }
     $source_media_ref_files = array_values(array_map(
@@ -3613,7 +3625,7 @@ try {
     );
     assert_same(
         (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_postmeta' AND decision = 'source-applied'"),
-        3,
+        4,
         'page-plus-audio-cover-video smoke merge audits source attachment metadata inserts'
     );
     assert_same(
@@ -3623,7 +3635,7 @@ try {
     );
     assert_same(
         (int)smoke_scalar($media_refs_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
-        9,
+        10,
         'page-plus-audio-cover-video smoke merge audits target DB graph inserts'
     );
     assert_same(

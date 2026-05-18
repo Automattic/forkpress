@@ -97,6 +97,9 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress attachment upload validator now records review
   conflicts when a safe `_wp_attachment_metadata.file` path disagrees with the
   safe `_wp_attached_file` path for the same attachment.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when an image attachment has a safe `_wp_attached_file` upload path
+  but no `_wp_attachment_metadata` row.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |

@@ -382,12 +382,13 @@ function create_wp_attachment_upload_metadata_db(string $path): void {
         post_content TEXT NOT NULL DEFAULT '',
         post_status TEXT NOT NULL DEFAULT 'publish',
         post_type TEXT NOT NULL DEFAULT 'post',
+        post_mime_type TEXT NOT NULL DEFAULT '',
         post_name TEXT NOT NULL DEFAULT '',
         guid TEXT NOT NULL DEFAULT ''
     )");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
-    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
-        (63, 'Attachment with generated files', '', 'inherit', 'attachment', 'generated-attachment', 'wp-content/uploads/2026/05/generated-image.jpg')");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES
+        (63, 'Attachment with generated files', '', 'inherit', 'attachment', 'image/jpeg', 'generated-attachment', 'wp-content/uploads/2026/05/generated-image.jpg')");
     $metadata = serialize([
         'file' => '2026/05/generated-image.jpg',
         'width' => 1200,
@@ -2826,7 +2827,7 @@ PHP);
     $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
     $stmt->bindValue(':metadata', serialize($metadata_array), SQLITE3_TEXT);
     $stmt->execute();
-    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES ('Source duplicate upload owner', '', 'inherit', 'attachment', 'source-duplicate-upload-owner', 'wp-content/uploads/2026/05/generated-image.jpg')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source duplicate upload owner', '', 'inherit', 'attachment', 'image/jpeg', 'source-duplicate-upload-owner', 'wp-content/uploads/2026/05/generated-image.jpg')");
     $duplicate_upload_attachment_id = (int)$db->lastInsertRowID();
     $duplicate_upload_metadata = serialize([
         'file' => '2026/05/generated-image.jpg',
@@ -2838,7 +2839,7 @@ PHP);
     $stmt->bindValue(':post_id', $duplicate_upload_attachment_id, SQLITE3_INTEGER);
     $stmt->bindValue(':metadata', $duplicate_upload_metadata, SQLITE3_TEXT);
     $stmt->execute();
-    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES ('Source metadata file drift', '', 'inherit', 'attachment', 'source-metadata-file-drift', 'wp-content/uploads/2026/05/metadata-drift-attached.jpg')");
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source metadata file drift', '', 'inherit', 'attachment', 'image/jpeg', 'source-metadata-file-drift', 'wp-content/uploads/2026/05/metadata-drift-attached.jpg')");
     $metadata_drift_attachment_id = (int)$db->lastInsertRowID();
     $metadata_drift_metadata = serialize([
         'file' => '2026/05/metadata-drift-metadata.jpg',
@@ -2849,6 +2850,12 @@ PHP);
     $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/metadata-drift-attached.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
     $stmt->bindValue(':post_id', $metadata_drift_attachment_id, SQLITE3_INTEGER);
     $stmt->bindValue(':metadata', $metadata_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/missing-metadata-image.jpg', 'missing metadata image bytes');
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source missing attachment metadata', '', 'inherit', 'attachment', 'image/jpeg', 'source-missing-attachment-metadata', 'wp-content/uploads/2026/05/missing-metadata-image.jpg')");
+    $missing_metadata_attachment_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/missing-metadata-image.jpg')");
+    $stmt->bindValue(':post_id', $missing_metadata_attachment_id, SQLITE3_INTEGER);
     $stmt->execute();
     $db->close();
 
@@ -2869,8 +2876,8 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 5 : 4;
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, non-regular-entry, duplicate-owner, and metadata-file-drift conflicts');
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 6 : 5;
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
@@ -2944,6 +2951,19 @@ PHP);
     assert_same($attachment_upload_metadata_drift_payload['candidate']['attached_file'] ?? null, '2026/05/metadata-drift-attached.jpg', 'built-in WordPress attachment upload metadata-file-drift audit includes the attached file');
     assert_same($attachment_upload_metadata_drift_payload['candidate']['metadata_file'] ?? null, '2026/05/metadata-drift-metadata.jpg', 'built-in WordPress attachment upload metadata-file-drift audit includes the metadata file');
     assert_same($attachment_upload_metadata_drift_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/metadata-drift-attached.jpg', 'wp-content/uploads/2026/05/metadata-drift-metadata.jpg'], 'built-in WordPress attachment upload metadata-file-drift audit exposes both upload path filters');
+
+    $attachment_upload_missing_metadata_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-metadata-missing',
+        'plugin_file' => 'wp-content/uploads/2026/05/missing-metadata-image.jpg',
+    ]);
+    assert_same(count($attachment_upload_missing_metadata_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects image attachments without attachment metadata');
+    $attachment_upload_missing_metadata_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_missing_metadata_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_missing_metadata_payload['candidate']['attachment_id'] ?? null, $missing_metadata_attachment_id, 'built-in WordPress attachment upload missing-metadata audit includes the attachment ID');
+    assert_same($attachment_upload_missing_metadata_payload['candidate']['attached_file'] ?? null, '2026/05/missing-metadata-image.jpg', 'built-in WordPress attachment upload missing-metadata audit includes the attached file');
+    assert_same($attachment_upload_missing_metadata_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/missing-metadata-image.jpg'], 'built-in WordPress attachment upload missing-metadata audit exposes the attached file filter');
 
     $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
     $existing_attachment_upload_source_root = $tmp . '/existing-attachment-upload-source';
