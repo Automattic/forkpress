@@ -10730,7 +10730,22 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'actual_filesize' => (int)filesize($size_absolute_path),
                     ], [$size_path]);
                 }
-                $declared_size_mime_type = array_key_exists('mime-type', $size) ? strtolower((string)$size['mime-type']) : null;
+                $declared_size_mime_type = null;
+                if (array_key_exists('mime-type', $size)) {
+                    if (!is_string($size['mime-type']) || trim($size['mime-type']) === '') {
+                        $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment generated-size MIME type is empty or not a string', [
+                            'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.mime-type',
+                            'role' => 'generated-size-mime-type',
+                            'size' => (string)$size_name,
+                            'attached_file' => $attached_file_raw,
+                            'generated_file' => (string)$size['file'],
+                            'mime_type' => is_scalar($size['mime-type']) || $size['mime-type'] === null ? $size['mime-type'] : get_debug_type($size['mime-type']),
+                            'value_type' => get_debug_type($size['mime-type']),
+                        ], [$size_path]);
+                    } else {
+                        $declared_size_mime_type = strtolower((string)$size['mime-type']);
+                    }
+                }
                 $expected_size_mime_type = cow_merge_wordpress_expected_upload_mime_type($size_path);
                 if ($declared_size_mime_type !== null && $expected_size_mime_type !== null && $declared_size_mime_type !== $expected_size_mime_type) {
                     $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-mime-drift', 'attachment generated-size MIME type does not match the generated file extension', [
@@ -10849,7 +10864,22 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'actual_filesize' => (int)filesize($backup_absolute_path),
                     ], [$backup_path]);
                 }
-                $declared_backup_mime_type = array_key_exists('mime-type', $backup) ? strtolower((string)$backup['mime-type']) : null;
+                $declared_backup_mime_type = null;
+                if (array_key_exists('mime-type', $backup)) {
+                    if (!is_string($backup['mime-type']) || trim($backup['mime-type']) === '') {
+                        $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment backup-size MIME type is empty or not a string', [
+                            'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.mime-type',
+                            'role' => 'backup-size-mime-type',
+                            'backup_size' => (string)$backup_name,
+                            'attached_file' => $attached_file_raw,
+                            'backup_file' => (string)$backup['file'],
+                            'mime_type' => is_scalar($backup['mime-type']) || $backup['mime-type'] === null ? $backup['mime-type'] : get_debug_type($backup['mime-type']),
+                            'value_type' => get_debug_type($backup['mime-type']),
+                        ], [$backup_path]);
+                    } else {
+                        $declared_backup_mime_type = strtolower((string)$backup['mime-type']);
+                    }
+                }
                 $expected_backup_mime_type = cow_merge_wordpress_expected_upload_mime_type($backup_path);
                 if ($declared_backup_mime_type !== null && $expected_backup_mime_type !== null && $declared_backup_mime_type !== $expected_backup_mime_type) {
                     $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-mime-drift', 'attachment backup-size MIME type does not match the backup file extension', [
