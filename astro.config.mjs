@@ -43,6 +43,7 @@ export default defineConfig({
 					label: 'Core workflows',
 					items: [
 						{ label: 'Branching', slug: 'docs/branching' },
+						{ label: 'Remote sites', slug: 'docs/remote-sites' },
 						{ label: 'Merging', slug: 'docs/merging' },
 						{ label: 'Plugin validator recipes', slug: 'docs/plugin-validator-recipes' },
 						{ label: 'Top plugin support', slug: 'docs/top-plugin-support' },
