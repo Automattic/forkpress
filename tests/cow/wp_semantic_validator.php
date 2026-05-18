@@ -77,6 +77,16 @@ function write_test_file(string $path, string $contents): void {
     file_put_contents($path, $contents);
 }
 
+function create_test_symlink(string $target, string $link): bool {
+    if (!is_dir(dirname($link))) {
+        mkdir(dirname($link), 0777, true);
+    }
+    if ((file_exists($link) || is_link($link)) && !unlink($link)) {
+        throw new RuntimeException("failed to replace test symlink: $link");
+    }
+    return @symlink($target, $link);
+}
+
 function open_db(string $path): SQLite3 {
     $db = new SQLite3($path);
     $db->busyTimeout(5000);
@@ -361,6 +371,54 @@ function create_wp_featured_media_db(string $path): void {
         (60, 'Featured media page', '<!-- wp:paragraph --><p>Featured media page</p><!-- /wp:paragraph -->', 'publish', 'page', 'featured-media-page', ''),
         (61, 'Featured attachment', '', 'inherit', 'attachment', 'featured-attachment', 'wp-content/uploads/2026/05/featured-image.jpg')");
     $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (6000, 60, '_thumbnail_id', '61')");
+    $db->close();
+}
+
+function create_wp_attachment_upload_metadata_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_mime_type TEXT NOT NULL DEFAULT '',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES
+        (63, 'Attachment with generated files', '', 'inherit', 'attachment', 'image/jpeg', 'generated-attachment', 'wp-content/uploads/2026/05/generated-image.jpg')");
+    $metadata = serialize([
+        'file' => '2026/05/generated-image.jpg',
+        'width' => 1200,
+        'height' => 800,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'generated-image-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+            'medium' => [
+                'file' => 'generated-image-300x200.jpg',
+                'width' => 300,
+                'height' => 200,
+            ],
+        ],
+        'original_image' => 'generated-image-original.jpg',
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'generated-image-backup.jpg',
+                'width' => 1200,
+                'height' => 800,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (6300, 63, '_wp_attached_file', '2026/05/generated-image.jpg'),
+        (6301, 63, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':metadata', $metadata, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
 }
 
@@ -789,6 +847,139 @@ function create_wp_option_reference_db(string $path): void {
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('sidebars_widgets', :value, 'yes')");
     $stmt->bindValue(':value', $sidebars_widgets, SQLITE3_TEXT);
     $stmt->execute();
+    $db->close();
+}
+
+function create_wp_scalar_option_owner_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (130, 'Target front page candidate', '<!-- wp:paragraph --><p>Front page</p><!-- /wp:paragraph -->', 'publish', 'page', 'target-front-page-candidate', ''),
+        (131, 'Target posts page candidate', '<!-- wp:paragraph --><p>Posts page</p><!-- /wp:paragraph -->', 'publish', 'page', 'target-posts-page-candidate', ''),
+        (132, 'Target site icon attachment', '', 'inherit', 'attachment', 'target-site-icon', 'wp-content/uploads/2026/05/site-icon.png')");
+    $db->exec("INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES
+        (1300, 'page_on_front', '0', 'yes'),
+        (1301, 'page_for_posts', '0', 'yes'),
+        (1302, 'site_icon', '0', 'yes')");
+    $db->close();
+}
+
+function create_wp_serialized_option_owner_reference_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_terms (
+        term_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        term_group INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_email TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec("CREATE TABLE wp_term_taxonomy (
+        term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        term_id INTEGER NOT NULL,
+        taxonomy TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        parent INTEGER NOT NULL DEFAULT 0,
+        count INTEGER NOT NULL DEFAULT 0
+    )");
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (140, 'Sticky post candidate', '<!-- wp:paragraph --><p>Sticky post</p><!-- /wp:paragraph -->', 'publish', 'post', 'sticky-post-candidate', ''),
+        (141, 'Pages widget candidate', '<!-- wp:paragraph --><p>Pages widget</p><!-- /wp:paragraph -->', 'publish', 'page', 'pages-widget-candidate', ''),
+        (142, 'Serialized media attachment', '', 'inherit', 'attachment', 'serialized-media-attachment', 'wp-content/uploads/2026/05/serialized-media.jpg'),
+        (145, 'Serialized content attachment', '', 'inherit', 'attachment', 'serialized-content-attachment', 'wp-content/uploads/2026/05/serialized-content.jpg')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES
+        (143, 'Serialized Menu', 'serialized-menu', 0)");
+    $db->exec("INSERT INTO wp_users (ID, user_login, user_email, display_name) VALUES
+        (144, 'serialized_widget_author', 'serialized-widget-author@example.test', 'Serialized Widget Author')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (1430, 143, 'nav_menu', '', 0, 0)");
+
+    $options = [
+        [1400, 'sticky_posts', serialize([140])],
+        [1401, 'theme_mods_forkpress_active', serialize([
+            'custom_logo' => 142,
+            'nav_menu_locations' => ['primary' => 143],
+            'forkpress_accent' => 'base',
+        ])],
+        [1402, 'widget_nav_menu', serialize([
+            2 => ['title' => 'Base menu widget', 'nav_menu' => 143],
+            '_multiwidget' => 1,
+        ])],
+        [1403, 'nav_menu_options', serialize(['auto_add' => [143]])],
+        [1404, 'widget_media_image', serialize([
+            3 => ['attachment_id' => 142, 'caption' => 'Base image widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1405, 'widget_media_audio', serialize([
+            4 => ['attachment_id' => 142, 'caption' => 'Base audio widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1406, 'widget_media_video', serialize([
+            5 => ['attachment_id' => 142, 'caption' => 'Base video widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1407, 'widget_media_gallery', serialize([
+            6 => ['ids' => [142], 'caption' => 'Base gallery widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1408, 'widget_pages', serialize([
+            7 => ['exclude' => '141', 'title' => 'Base pages widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1409, 'widget_block', serialize([
+            8 => ['content' => '<!-- wp:avatar {"userId":144} /-->', 'title' => 'Base block widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1410, 'widget_text', serialize([
+            9 => ['text' => '<!-- wp:image {"id":145} --><figure class="wp-block-image"><img class="wp-image-145"/></figure><!-- /wp:image -->', 'title' => 'Base text widget'],
+            '_multiwidget' => 1,
+        ])],
+        [1411, 'widget_custom_html', serialize([
+            10 => ['content' => '<!-- wp:gallery {"ids":[145]} --><figure class="wp-block-gallery"></figure><!-- /wp:gallery -->', 'title' => 'Base custom HTML widget'],
+            '_multiwidget' => 1,
+        ])],
+    ];
+    $stmt = $db->prepare('INSERT INTO wp_options (option_id, option_name, option_value, autoload) VALUES (:id, :name, :value, :autoload)');
+    foreach ($options as [$option_id, $option_name, $option_value]) {
+        $stmt->bindValue(':id', $option_id, SQLITE3_INTEGER);
+        $stmt->bindValue(':name', $option_name, SQLITE3_TEXT);
+        $stmt->bindValue(':value', $option_value, SQLITE3_TEXT);
+        $stmt->bindValue(':autoload', 'yes', SQLITE3_TEXT);
+        $stmt->execute();
+    }
     $db->close();
 }
 
@@ -1884,23 +2075,22 @@ PHP);
         $postmeta_target_root
     );
 
-    assert_same($postmeta_result['status'], 'completed_with_conflicts', 'WordPress postmeta validator holds missing post owners for review');
+    assert_same($postmeta_result['status'], 'completed_with_conflicts', 'WordPress postmeta owner delete with target-edited metadata stays reviewable');
     assert_same((int)($postmeta_result['plugin_validators'] ?? 0), 1, 'WordPress postmeta validator is discovered from mu-plugins during merge');
-    assert_same((int)($postmeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress postmeta validator records missing post owners for scalar and JSON metadata');
-    assert_same((int)scalar($postmeta_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 0, 'WordPress postmeta validator leaves the source post deletion staged for review');
+    assert_same((int)($postmeta_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress postmeta owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($postmeta_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 1, 'WordPress postmeta owner delete guard keeps the parent post before review');
     assert_same(scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 53'), 'Target postmeta still pointing at deleted post', 'WordPress postmeta validator preserves the target scalar postmeta edit');
     assert_same(scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 54'), '{"favorite":"target"}', 'WordPress postmeta validator preserves the target JSON postmeta edit');
 
     $postmeta_audit = cow_merge_audit_report($postmeta_metadata, (int)$postmeta_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-postmeta-missing-post',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($postmeta_audit['conflicts']), 2, 'WordPress postmeta validator exposes missing posts as plugin-scoped audit conflicts');
+    assert_same(count($postmeta_audit['conflicts']), 1, 'WordPress postmeta owner delete guard records one row constraint conflict');
     $postmeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $postmeta_audit['conflicts']));
-    assert_true(str_contains($postmeta_preview, '"missing_post_id":52'), 'WordPress postmeta audit includes the missing post ID');
-    assert_true(str_contains($postmeta_preview, '"field":"post_id"'), 'WordPress postmeta audit includes the stale field name');
-    assert_true(str_contains($postmeta_preview, '"meta_key":"_forkpress_meta_json"'), 'WordPress postmeta audit includes JSON metadata');
+    assert_true(str_contains($postmeta_preview, '52'), 'WordPress postmeta audit includes the guarded post ID');
+    $postmeta_blocker_reason = (string)scalar($postmeta_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($postmeta_blocker_reason, 'target has changed wp_postmeta rows'), 'WordPress postmeta audit explains the changed dependent metadata blocker');
 
     $usermeta_base_root = $tmp . '/usermeta-base';
     $usermeta_source_root = $tmp . '/usermeta-source';
@@ -1970,23 +2160,22 @@ PHP);
         $usermeta_target_root
     );
 
-    assert_same($usermeta_result['status'], 'completed_with_conflicts', 'WordPress usermeta validator holds missing user owners for review');
+    assert_same($usermeta_result['status'], 'completed_with_conflicts', 'WordPress usermeta owner delete with target-edited metadata stays reviewable');
     assert_same((int)($usermeta_result['plugin_validators'] ?? 0), 1, 'WordPress usermeta validator is discovered from mu-plugins during merge');
-    assert_same((int)($usermeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress usermeta validator records missing user owners for scalar and JSON metadata');
-    assert_same((int)scalar($usermeta_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 49'), 0, 'WordPress usermeta validator leaves the source user deletion staged for review');
+    assert_same((int)($usermeta_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress usermeta owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($usermeta_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 49'), 1, 'WordPress usermeta owner delete guard keeps the parent user before review');
     assert_same(scalar($usermeta_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 50'), 'Target user description still pointing at deleted user', 'WordPress usermeta validator preserves the target scalar usermeta edit');
     assert_same(scalar($usermeta_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 51'), '{"favorite":"target"}', 'WordPress usermeta validator preserves the target JSON usermeta edit');
 
     $usermeta_audit = cow_merge_audit_report($usermeta_metadata, (int)$usermeta_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-usermeta-missing-user',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($usermeta_audit['conflicts']), 2, 'WordPress usermeta validator exposes missing users as plugin-scoped audit conflicts');
+    assert_same(count($usermeta_audit['conflicts']), 1, 'WordPress usermeta owner delete guard records one row constraint conflict');
     $usermeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $usermeta_audit['conflicts']));
-    assert_true(str_contains($usermeta_preview, '"missing_user_id":49'), 'WordPress usermeta audit includes the missing user ID');
-    assert_true(str_contains($usermeta_preview, '"field":"user_id"'), 'WordPress usermeta audit includes the stale field name');
-    assert_true(str_contains($usermeta_preview, '"meta_key":"forkpress_profile_json"'), 'WordPress usermeta audit includes JSON metadata');
+    assert_true(str_contains($usermeta_preview, '49'), 'WordPress usermeta audit includes the guarded user ID');
+    $usermeta_blocker_reason = (string)scalar($usermeta_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_users' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($usermeta_blocker_reason, 'target has changed wp_usermeta rows'), 'WordPress usermeta audit explains the changed dependent metadata blocker');
 
     $menu_parent_base_root = $tmp . '/menu-parent-base';
     $menu_parent_source_root = $tmp . '/menu-parent-source';
@@ -2185,6 +2374,104 @@ PHP);
     assert_true(str_contains($menu_preview, '"menu_item_type":"taxonomy"'), 'WordPress menu-reference audit includes the taxonomy menu item type');
     assert_true(str_contains($menu_preview, '"object_type":"category"'), 'WordPress menu-reference audit includes the taxonomy object type');
 
+    $menu_guard_base_root = $tmp . '/menu-metadata-owner-guard-base';
+    $menu_guard_source_root = $tmp . '/menu-metadata-owner-guard-source';
+    $menu_guard_target_root = $tmp . '/menu-metadata-owner-guard-target';
+    $menu_guard_base = $menu_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $menu_guard_source = $menu_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $menu_guard_target = $menu_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $menu_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-metadata-owner-guard-metadata.sqlite';
+
+    mkdir($menu_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_menu_ref_db($menu_guard_base);
+    copy_tree_for_test($menu_guard_base_root, $menu_guard_source_root);
+    copy_tree_for_test($menu_guard_base_root, $menu_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($menu_guard_source, $menu_guard_metadata, 'feature-wp-menu-metadata-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($menu_guard_target, $menu_guard_metadata, 'main');
+
+    $db = open_db($menu_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 40');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 43');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 43');
+    $db->close();
+
+    $db = open_db($menu_guard_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = '40 ' WHERE post_id = 41 AND meta_key = '_menu_item_object_id'");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '43 ' WHERE post_id = 42 AND meta_key = '_menu_item_object_id'");
+    $db->close();
+
+    $menu_guard_result = cow_merge_branch_state(
+        $menu_guard_base,
+        $menu_guard_source,
+        $menu_guard_target,
+        $menu_guard_metadata,
+        'feature-wp-menu-metadata-owner-guard-source',
+        'main'
+    );
+
+    assert_same($menu_guard_result['status'], 'completed_with_conflicts', 'WordPress menu object metadata owner deletes with target-edited value refs stay reviewable');
+    assert_same((int)scalar($menu_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 40'), 1, 'WordPress menu object owner guard keeps the referenced page before review');
+    assert_same((int)scalar($menu_guard_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 43'), 1, 'WordPress menu object owner guard keeps the referenced term before review');
+    assert_same(scalar($menu_guard_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 41 AND meta_key = '_menu_item_object_id'"), '40 ', 'WordPress menu object owner guard preserves target-edited page menu metadata');
+    assert_same(scalar($menu_guard_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 42 AND meta_key = '_menu_item_object_id'"), '43 ', 'WordPress menu object owner guard preserves target-edited taxonomy menu metadata');
+
+    $menu_guard_audit = cow_merge_audit_report($menu_guard_metadata, (int)$menu_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($menu_guard_audit['conflicts']), 2, 'WordPress menu object owner guard records one row constraint per guarded object');
+    $menu_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $menu_guard_audit['conflicts']));
+    foreach (['40', '43'] as $needle) {
+        assert_true(str_contains($menu_guard_preview, $needle), 'WordPress menu object owner guard audit includes ' . $needle);
+    }
+    $menu_guard_reasons = (string)scalar($menu_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms') AND decision = 'target-wins'");
+    assert_true(str_contains($menu_guard_reasons, 'target has changed wp_postmeta rows'), 'WordPress menu object owner guard audit explains changed menu metadata blockers');
+
+    $menu_parent_guard_base_root = $tmp . '/menu-parent-metadata-owner-guard-base';
+    $menu_parent_guard_source_root = $tmp . '/menu-parent-metadata-owner-guard-source';
+    $menu_parent_guard_target_root = $tmp . '/menu-parent-metadata-owner-guard-target';
+    $menu_parent_guard_base = $menu_parent_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_guard_source = $menu_parent_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_guard_target = $menu_parent_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-parent-metadata-owner-guard-metadata.sqlite';
+
+    mkdir($menu_parent_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_menu_parent_reference_db($menu_parent_guard_base);
+    copy_tree_for_test($menu_parent_guard_base_root, $menu_parent_guard_source_root);
+    copy_tree_for_test($menu_parent_guard_base_root, $menu_parent_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($menu_parent_guard_source, $menu_parent_guard_metadata, 'feature-wp-menu-parent-metadata-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($menu_parent_guard_target, $menu_parent_guard_metadata, 'main');
+
+    $db = open_db($menu_parent_guard_source);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 47');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 47');
+    $db->close();
+
+    $db = open_db($menu_parent_guard_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = '47 ' WHERE post_id = 48 AND meta_key = '_menu_item_menu_item_parent'");
+    $db->close();
+
+    $menu_parent_guard_result = cow_merge_branch_state(
+        $menu_parent_guard_base,
+        $menu_parent_guard_source,
+        $menu_parent_guard_target,
+        $menu_parent_guard_metadata,
+        'feature-wp-menu-parent-metadata-owner-guard-source',
+        'main'
+    );
+
+    assert_same($menu_parent_guard_result['status'], 'completed_with_conflicts', 'WordPress menu-parent metadata owner delete with target-edited value refs stays reviewable');
+    assert_same((int)scalar($menu_parent_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 47'), 1, 'WordPress menu-parent owner guard keeps the referenced menu item before review');
+    assert_same(scalar($menu_parent_guard_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 48 AND meta_key = '_menu_item_menu_item_parent'"), '47 ', 'WordPress menu-parent owner guard preserves target-edited parent metadata');
+
+    $menu_parent_guard_audit = cow_merge_audit_report($menu_parent_guard_metadata, (int)$menu_parent_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($menu_parent_guard_audit['conflicts']), 1, 'WordPress menu-parent owner guard records one row constraint conflict');
+    $menu_parent_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $menu_parent_guard_audit['conflicts']));
+    assert_true(str_contains($menu_parent_guard_preview, '47'), 'WordPress menu-parent owner guard audit includes the guarded menu item ID');
+
     $featured_base_root = $tmp . '/featured-media-base';
     $featured_source_root = $tmp . '/featured-media-source';
     $featured_target_root = $tmp . '/featured-media-target';
@@ -2275,6 +2562,452 @@ PHP);
     $featured_preview = (string)($featured_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($featured_preview, '"missing_object_id":61'), 'WordPress featured image audit includes the missing attachment ID');
     assert_true(str_contains($featured_preview, '"field":"_thumbnail_id"'), 'WordPress featured image audit includes the thumbnail field');
+
+    $featured_guard_base_root = $tmp . '/featured-media-owner-guard-base';
+    $featured_guard_source_root = $tmp . '/featured-media-owner-guard-source';
+    $featured_guard_target_root = $tmp . '/featured-media-owner-guard-target';
+    $featured_guard_base = $featured_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $featured_guard_source = $featured_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $featured_guard_target = $featured_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $featured_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-featured-media-owner-guard-metadata.sqlite';
+
+    mkdir($featured_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_featured_media_db($featured_guard_base);
+    copy_tree_for_test($featured_guard_base_root, $featured_guard_source_root);
+    copy_tree_for_test($featured_guard_base_root, $featured_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($featured_guard_source, $featured_guard_metadata, 'feature-wp-featured-media-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($featured_guard_target, $featured_guard_metadata, 'main');
+
+    $db = open_db($featured_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 61');
+    $db->close();
+
+    $db = open_db($featured_guard_target);
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (62, 'Target page newly using featured image', '<!-- wp:paragraph --><p>Target featured page</p><!-- /wp:paragraph -->', 'publish', 'page', 'target-featured-page', '')");
+    $db->exec("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES (6001, 62, '_thumbnail_id', '61')");
+    $db->close();
+
+    $featured_guard_result = cow_merge_branch_state(
+        $featured_guard_base,
+        $featured_guard_source,
+        $featured_guard_target,
+        $featured_guard_metadata,
+        'feature-wp-featured-media-owner-guard-source',
+        'main'
+    );
+
+    assert_same($featured_guard_result['status'], 'completed_with_conflicts', 'WordPress featured-image owner delete with target-added thumbnail metadata stays reviewable');
+    assert_same((int)($featured_guard_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress featured-image owner guard prevents missing-thumbnail validator fallout');
+    assert_same((int)scalar($featured_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 61'), 1, 'WordPress featured-image owner guard keeps the referenced attachment before review');
+    assert_same(scalar($featured_guard_target, "SELECT meta_value FROM wp_postmeta WHERE meta_id = 6001"), '61', 'WordPress featured-image owner guard preserves target-added thumbnail metadata');
+
+    $featured_guard_audit = cow_merge_audit_report($featured_guard_metadata, (int)$featured_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($featured_guard_audit['conflicts']), 1, 'WordPress featured-image owner guard records one row constraint conflict');
+    $featured_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $featured_guard_audit['conflicts']));
+    assert_true(str_contains($featured_guard_preview, '61'), 'WordPress featured-image owner guard audit includes the guarded attachment ID');
+    $featured_guard_reason = (string)scalar($featured_guard_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($featured_guard_reason, 'target has changed wp_postmeta rows'), 'WordPress featured-image owner guard audit explains the changed thumbnail metadata blocker');
+
+    $scalar_option_guard_base_root = $tmp . '/scalar-option-owner-guard-base';
+    $scalar_option_guard_source_root = $tmp . '/scalar-option-owner-guard-source';
+    $scalar_option_guard_target_root = $tmp . '/scalar-option-owner-guard-target';
+    $scalar_option_guard_base = $scalar_option_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $scalar_option_guard_source = $scalar_option_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $scalar_option_guard_target = $scalar_option_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $scalar_option_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-scalar-option-owner-guard-metadata.sqlite';
+
+    mkdir($scalar_option_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_scalar_option_owner_reference_db($scalar_option_guard_base);
+    copy_tree_for_test($scalar_option_guard_base_root, $scalar_option_guard_source_root);
+    copy_tree_for_test($scalar_option_guard_base_root, $scalar_option_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($scalar_option_guard_source, $scalar_option_guard_metadata, 'feature-wp-scalar-option-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($scalar_option_guard_target, $scalar_option_guard_metadata, 'main');
+
+    $db = open_db($scalar_option_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID IN (130, 131, 132)');
+    $db->close();
+
+    $db = open_db($scalar_option_guard_target);
+    $db->exec("UPDATE wp_options SET option_value = '130' WHERE option_name = 'page_on_front'");
+    $db->exec("UPDATE wp_options SET option_value = '131' WHERE option_name = 'page_for_posts'");
+    $db->exec("UPDATE wp_options SET option_value = '132' WHERE option_name = 'site_icon'");
+    $db->close();
+
+    $scalar_option_guard_result = cow_merge_branch_state(
+        $scalar_option_guard_base,
+        $scalar_option_guard_source,
+        $scalar_option_guard_target,
+        $scalar_option_guard_metadata,
+        'feature-wp-scalar-option-owner-guard-source',
+        'main'
+    );
+
+    assert_same($scalar_option_guard_result['status'], 'completed_with_conflicts', 'WordPress scalar option owner deletes with target-edited option references stay reviewable');
+    assert_same((int)scalar($scalar_option_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (130, 131, 132)'), 3, 'WordPress scalar option owner guard keeps referenced pages and site icon before review');
+    assert_same(scalar($scalar_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_on_front'"), '130', 'WordPress scalar option owner guard preserves target front-page option edit');
+    assert_same(scalar($scalar_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'page_for_posts'"), '131', 'WordPress scalar option owner guard preserves target posts-page option edit');
+    assert_same(scalar($scalar_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'site_icon'"), '132', 'WordPress scalar option owner guard preserves target site-icon option edit');
+
+    $scalar_option_guard_audit = cow_merge_audit_report($scalar_option_guard_metadata, (int)$scalar_option_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($scalar_option_guard_audit['conflicts']), 3, 'WordPress scalar option owner guard records one row constraint per guarded option owner');
+    $scalar_option_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $scalar_option_guard_audit['conflicts']));
+    foreach (['130', '131', '132'] as $needle) {
+        assert_true(str_contains($scalar_option_guard_preview, $needle), 'WordPress scalar option owner guard audit includes ' . $needle);
+    }
+    $scalar_option_guard_reasons = (string)scalar($scalar_option_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins'");
+    assert_true(str_contains($scalar_option_guard_reasons, 'target has changed wp_options rows'), 'WordPress scalar option owner guard audit explains the changed option blockers');
+
+    $serialized_option_guard_base_root = $tmp . '/serialized-option-owner-guard-base';
+    $serialized_option_guard_source_root = $tmp . '/serialized-option-owner-guard-source';
+    $serialized_option_guard_target_root = $tmp . '/serialized-option-owner-guard-target';
+    $serialized_option_guard_base = $serialized_option_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $serialized_option_guard_source = $serialized_option_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $serialized_option_guard_target = $serialized_option_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $serialized_option_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-serialized-option-owner-guard-metadata.sqlite';
+
+    mkdir($serialized_option_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_serialized_option_owner_reference_db($serialized_option_guard_base);
+    copy_tree_for_test($serialized_option_guard_base_root, $serialized_option_guard_source_root);
+    copy_tree_for_test($serialized_option_guard_base_root, $serialized_option_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($serialized_option_guard_source, $serialized_option_guard_metadata, 'feature-wp-serialized-option-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($serialized_option_guard_target, $serialized_option_guard_metadata, 'main');
+
+    $db = open_db($serialized_option_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID IN (140, 141, 142, 145)');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 143');
+    $db->exec('DELETE FROM wp_users WHERE ID = 144');
+    $db->close();
+
+    $db = open_db($serialized_option_guard_target);
+    $set_option_value = function (string $option_name, string $option_value) use ($db): void {
+        $stmt = $db->prepare('UPDATE wp_options SET option_value = :value WHERE option_name = :name');
+        $stmt->bindValue(':value', $option_value, SQLITE3_TEXT);
+        $stmt->bindValue(':name', $option_name, SQLITE3_TEXT);
+        $stmt->execute();
+    };
+    $set_option_value('sticky_posts', serialize(['140']));
+    $set_option_value('theme_mods_forkpress_active', serialize([
+        'custom_logo' => 142,
+        'nav_menu_locations' => ['primary' => 143],
+        'forkpress_accent' => 'target',
+    ]));
+    $set_option_value('widget_nav_menu', serialize([
+        2 => ['title' => 'Target menu widget', 'nav_menu' => '143'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('nav_menu_options', serialize(['auto_add' => ['143']]));
+    $set_option_value('widget_media_image', serialize([
+        3 => ['attachment_id' => '142', 'caption' => 'Target image widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_media_audio', serialize([
+        4 => ['attachment_id' => 142, 'caption' => 'Target audio widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_media_video', serialize([
+        5 => ['attachment_id' => 142, 'caption' => 'Target video widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_media_gallery', serialize([
+        6 => ['ids' => '142', 'caption' => 'Target gallery widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_pages', serialize([
+        7 => ['exclude' => ['141'], 'title' => 'Target pages widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_block', serialize([
+        8 => ['content' => '<!-- wp:avatar {"userId":144} /-->', 'title' => 'Target block widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_text', serialize([
+        9 => ['text' => '<!-- wp:image {"id":145} --><figure class="wp-block-image"><img class="wp-image-145"/></figure><!-- /wp:image -->', 'title' => 'Target text widget'],
+        '_multiwidget' => 1,
+    ]));
+    $set_option_value('widget_custom_html', serialize([
+        10 => ['content' => '<!-- wp:gallery {"ids":[145]} --><figure class="wp-block-gallery"></figure><!-- /wp:gallery -->', 'title' => 'Target custom HTML widget'],
+        '_multiwidget' => 1,
+    ]));
+    $db->close();
+
+    $serialized_option_guard_result = cow_merge_branch_state(
+        $serialized_option_guard_base,
+        $serialized_option_guard_source,
+        $serialized_option_guard_target,
+        $serialized_option_guard_metadata,
+        'feature-wp-serialized-option-owner-guard-source',
+        'main'
+    );
+
+    assert_same($serialized_option_guard_result['status'], 'completed_with_conflicts', 'WordPress serialized option owner deletes with target-edited references stay reviewable');
+    assert_same((int)scalar($serialized_option_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (140, 141, 142, 145)'), 4, 'WordPress serialized option owner guard keeps referenced posts before review');
+    assert_same((int)scalar($serialized_option_guard_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 143'), 1, 'WordPress serialized option owner guard keeps referenced nav menu term before review');
+    assert_same((int)scalar($serialized_option_guard_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 144'), 1, 'WordPress serialized option owner guard keeps referenced widget user before review');
+
+    $target_theme_mods = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'"), ['allowed_classes' => false]);
+    $target_gallery_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_media_gallery'"), ['allowed_classes' => false]);
+    $target_pages_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_pages'"), ['allowed_classes' => false]);
+    $target_block_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_block'"), ['allowed_classes' => false]);
+    $target_text_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_text'"), ['allowed_classes' => false]);
+    $target_custom_html_widget = unserialize((string)scalar($serialized_option_guard_target, "SELECT option_value FROM wp_options WHERE option_name = 'widget_custom_html'"), ['allowed_classes' => false]);
+    assert_same($target_theme_mods['forkpress_accent'] ?? null, 'target', 'WordPress serialized option owner guard preserves target theme-mod edit');
+    assert_same($target_gallery_widget[6]['caption'] ?? null, 'Target gallery widget', 'WordPress serialized option owner guard preserves target media gallery edit');
+    assert_same($target_pages_widget[7]['title'] ?? null, 'Target pages widget', 'WordPress serialized option owner guard preserves target pages widget edit');
+    assert_same($target_block_widget[8]['title'] ?? null, 'Target block widget', 'WordPress serialized option owner guard preserves target block widget edit');
+    assert_same($target_text_widget[9]['title'] ?? null, 'Target text widget', 'WordPress serialized option owner guard preserves target text widget edit');
+    assert_same($target_custom_html_widget[10]['title'] ?? null, 'Target custom HTML widget', 'WordPress serialized option owner guard preserves target custom HTML widget edit');
+
+    $serialized_option_guard_audit = cow_merge_audit_report($serialized_option_guard_metadata, (int)$serialized_option_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($serialized_option_guard_audit['conflicts']), 6, 'WordPress serialized option owner guard records one row constraint per guarded owner');
+    $serialized_option_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $serialized_option_guard_audit['conflicts']));
+    foreach (['140', '141', '142', '143', '144', '145'] as $needle) {
+        assert_true(str_contains($serialized_option_guard_preview, $needle), 'WordPress serialized option owner guard audit includes ' . $needle);
+    }
+    $serialized_option_guard_reasons = (string)scalar($serialized_option_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE decision = 'target-wins'");
+    assert_true(str_contains($serialized_option_guard_reasons, 'target has changed wp_options rows'), 'WordPress serialized option owner guard audit explains the changed option blockers');
+
+    $attachment_upload_base_root = $tmp . '/attachment-upload-base';
+    $attachment_upload_source_root = $tmp . '/attachment-upload-source';
+    $attachment_upload_target_root = $tmp . '/attachment-upload-target';
+    $attachment_upload_base = $attachment_upload_base_root . '/wp-content/database/.ht.sqlite';
+    $attachment_upload_source = $attachment_upload_source_root . '/wp-content/database/.ht.sqlite';
+    $attachment_upload_target = $attachment_upload_target_root . '/wp-content/database/.ht.sqlite';
+    $attachment_upload_metadata = $tmp . '/.forkpress/cow/merge/wp-attachment-upload-validator-metadata.sqlite';
+    $attachment_upload_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-attachment-upload-validator.json';
+
+    mkdir($attachment_upload_base_root . '/wp-content/database', 0777, true);
+    create_wp_attachment_upload_metadata_db($attachment_upload_base);
+    foreach ([
+        'generated-image.jpg',
+        'generated-image-150x150.jpg',
+        'generated-image-300x200.jpg',
+        'generated-image-original.jpg',
+        'generated-image-backup.jpg',
+    ] as $filename) {
+        write_test_file($attachment_upload_base_root . '/wp-content/uploads/2026/05/' . $filename, $filename . ' bytes');
+    }
+    copy_tree_for_test($attachment_upload_base_root, $attachment_upload_source_root);
+    copy_tree_for_test($attachment_upload_base_root, $attachment_upload_target_root);
+    cow_merge_capture_file_base($attachment_upload_base_root, $attachment_upload_file_base);
+    cow_merge_allocate_autoincrement_bands($attachment_upload_source, $attachment_upload_metadata, 'feature-wp-attachment-upload-source');
+    cow_merge_allocate_autoincrement_bands($attachment_upload_target, $attachment_upload_metadata, 'main');
+
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/metadata-drift-attached.jpg', 'metadata drift attached bytes');
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/metadata-drift-metadata.jpg', 'metadata drift metadata bytes');
+    unlink($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg');
+    $has_attachment_upload_symlink = create_test_symlink(
+        'generated-image.jpg',
+        $attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-symlink.jpg'
+    );
+    $db = open_db($attachment_upload_source);
+    $metadata_value = (string)$db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
+    $metadata_array = unserialize($metadata_value, ['allowed_classes' => false]);
+    $metadata_array['sizes']['escaped-managed-db'] = [
+        'file' => '../../../../database/.ht.sqlite',
+        'width' => 64,
+        'height' => 64,
+    ];
+    if ($has_attachment_upload_symlink) {
+        $metadata_array['sizes']['symlinked-generated'] = [
+            'file' => 'generated-image-symlink.jpg',
+            'width' => 64,
+            'height' => 64,
+        ];
+    }
+    $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
+    $stmt->bindValue(':metadata', serialize($metadata_array), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source duplicate upload owner', '', 'inherit', 'attachment', 'image/jpeg', 'source-duplicate-upload-owner', 'wp-content/uploads/2026/05/generated-image.jpg')");
+    $duplicate_upload_attachment_id = (int)$db->lastInsertRowID();
+    $duplicate_upload_metadata = serialize([
+        'file' => '2026/05/generated-image.jpg',
+        'width' => 1200,
+        'height' => 800,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/generated-image.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $duplicate_upload_attachment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':metadata', $duplicate_upload_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source metadata file drift', '', 'inherit', 'attachment', 'image/jpeg', 'source-metadata-file-drift', 'wp-content/uploads/2026/05/metadata-drift-attached.jpg')");
+    $metadata_drift_attachment_id = (int)$db->lastInsertRowID();
+    $metadata_drift_metadata = serialize([
+        'file' => '2026/05/metadata-drift-metadata.jpg',
+        'width' => 800,
+        'height' => 600,
+        'sizes' => [],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/metadata-drift-attached.jpg'), (:post_id, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':post_id', $metadata_drift_attachment_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':metadata', $metadata_drift_metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/missing-metadata-image.jpg', 'missing metadata image bytes');
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source missing attachment metadata', '', 'inherit', 'attachment', 'image/jpeg', 'source-missing-attachment-metadata', 'wp-content/uploads/2026/05/missing-metadata-image.jpg')");
+    $missing_metadata_attachment_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (:post_id, '_wp_attached_file', '2026/05/missing-metadata-image.jpg')");
+    $stmt->bindValue(':post_id', $missing_metadata_attachment_id, SQLITE3_INTEGER);
+    $stmt->execute();
+    $db->close();
+
+    $db = open_db($attachment_upload_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target attachment keeps generated metadata' WHERE ID = 63");
+    $db->close();
+
+    $attachment_upload_result = cow_merge_branch_state(
+        $attachment_upload_base,
+        $attachment_upload_source,
+        $attachment_upload_target,
+        $attachment_upload_metadata,
+        'feature-wp-attachment-upload-source',
+        'main',
+        $attachment_upload_file_base,
+        $attachment_upload_source_root,
+        $attachment_upload_target_root
+    );
+
+    assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 6 : 5;
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records generated-file, unsafe-path, non-regular-entry, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
+    assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
+    assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
+    assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
+    assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-300x200.jpg'), 'built-in WordPress attachment upload validator preserves unrelated generated files');
+    assert_same(scalar($attachment_upload_target, 'SELECT post_title FROM wp_posts WHERE ID = 63'), 'Target attachment keeps generated metadata', 'built-in WordPress attachment upload validator preserves the target attachment edit');
+
+    $attachment_upload_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-missing-file',
+        'plugin_file' => 'wp-content/uploads/2026/05/generated-image-150x150.jpg',
+    ]);
+    assert_same(count($attachment_upload_audit['conflicts']), 1, 'built-in WordPress attachment upload validator exposes missing generated files as WordPress-scoped audit conflicts');
+    $attachment_upload_preview = (string)($attachment_upload_audit['conflicts'][0]['chosen_preview'] ?? '');
+    $attachment_upload_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_true(str_contains($attachment_upload_preview, '"attachment_id":63'), 'built-in WordPress attachment upload audit includes the attachment ID');
+    assert_same($attachment_upload_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload audit identifies generated-size files');
+    assert_same($attachment_upload_payload['candidate']['missing_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-150x150.jpg', 'built-in WordPress attachment upload audit includes the missing upload path');
+    assert_same($attachment_upload_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-150x150.jpg'], 'built-in WordPress attachment upload audit exposes the missing generated file filter');
+
+    $attachment_upload_invalid_path_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-invalid-path',
+    ]);
+    assert_same(count($attachment_upload_invalid_path_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects metadata paths that normalize outside uploads');
+    $attachment_upload_invalid_path_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_invalid_path_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_invalid_path_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload invalid-path audit identifies generated-size files');
+    assert_same($attachment_upload_invalid_path_payload['candidate']['generated_file'] ?? null, '../../../../database/.ht.sqlite', 'built-in WordPress attachment upload invalid-path audit keeps the unsafe raw metadata path');
+    assert_same($attachment_upload_invalid_path_audit['conflicts'][0]['plugin_files'] ?? null, [], 'built-in WordPress attachment upload invalid-path audit does not expose managed DB paths as plugin files');
+
+    if ($has_attachment_upload_symlink) {
+        $attachment_upload_invalid_entry_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+            'scope' => 'plugin',
+            'records' => 'conflicts',
+            'semantic_scope' => 'wordpress',
+            'conflict_type' => 'plugin-wp-attachment-upload-invalid-entry',
+            'plugin_file' => 'wp-content/uploads/2026/05/generated-image-symlink.jpg',
+        ]);
+        assert_same(count($attachment_upload_invalid_entry_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects generated files that are symlinks');
+        $attachment_upload_invalid_entry_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_invalid_entry_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+        assert_same($attachment_upload_invalid_entry_payload['candidate']['entry_type'] ?? null, 'symlink', 'built-in WordPress attachment upload invalid-entry audit records symlink entry type');
+        assert_same($attachment_upload_invalid_entry_payload['candidate']['invalid_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-symlink.jpg', 'built-in WordPress attachment upload invalid-entry audit includes the symlink upload path');
+        assert_same($attachment_upload_invalid_entry_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-symlink.jpg'], 'built-in WordPress attachment upload invalid-entry audit exposes the symlink upload path filter');
+    }
+
+    $attachment_upload_duplicate_owner_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-duplicate-owner',
+        'plugin_file' => 'wp-content/uploads/2026/05/generated-image.jpg',
+    ]);
+    assert_same(count($attachment_upload_duplicate_owner_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects duplicate upload ownership');
+    $attachment_upload_duplicate_owner_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_duplicate_owner_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_duplicate_owner_payload['candidate']['upload_file'] ?? null, 'wp-content/uploads/2026/05/generated-image.jpg', 'built-in WordPress attachment upload duplicate-owner audit includes the shared upload path');
+    assert_same($attachment_upload_duplicate_owner_payload['candidate']['attachment_ids'] ?? null, [63, $duplicate_upload_attachment_id], 'built-in WordPress attachment upload duplicate-owner audit includes both attachment IDs');
+    assert_same($attachment_upload_duplicate_owner_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image.jpg'], 'built-in WordPress attachment upload duplicate-owner audit exposes the shared upload path filter');
+
+    $attachment_upload_metadata_drift_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-metadata-file-drift',
+        'plugin_file' => 'wp-content/uploads/2026/05/metadata-drift-metadata.jpg',
+    ]);
+    assert_same(count($attachment_upload_metadata_drift_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects mismatched attached-file and metadata-file paths');
+    $attachment_upload_metadata_drift_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_metadata_drift_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_metadata_drift_payload['candidate']['attached_file'] ?? null, '2026/05/metadata-drift-attached.jpg', 'built-in WordPress attachment upload metadata-file-drift audit includes the attached file');
+    assert_same($attachment_upload_metadata_drift_payload['candidate']['metadata_file'] ?? null, '2026/05/metadata-drift-metadata.jpg', 'built-in WordPress attachment upload metadata-file-drift audit includes the metadata file');
+    assert_same($attachment_upload_metadata_drift_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/metadata-drift-attached.jpg', 'wp-content/uploads/2026/05/metadata-drift-metadata.jpg'], 'built-in WordPress attachment upload metadata-file-drift audit exposes both upload path filters');
+
+    $attachment_upload_missing_metadata_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-metadata-missing',
+        'plugin_file' => 'wp-content/uploads/2026/05/missing-metadata-image.jpg',
+    ]);
+    assert_same(count($attachment_upload_missing_metadata_audit['conflicts']), 1, 'built-in WordPress attachment upload validator rejects image attachments without attachment metadata');
+    $attachment_upload_missing_metadata_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_missing_metadata_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($attachment_upload_missing_metadata_payload['candidate']['attachment_id'] ?? null, $missing_metadata_attachment_id, 'built-in WordPress attachment upload missing-metadata audit includes the attachment ID');
+    assert_same($attachment_upload_missing_metadata_payload['candidate']['attached_file'] ?? null, '2026/05/missing-metadata-image.jpg', 'built-in WordPress attachment upload missing-metadata audit includes the attached file');
+    assert_same($attachment_upload_missing_metadata_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/missing-metadata-image.jpg'], 'built-in WordPress attachment upload missing-metadata audit exposes the attached file filter');
+
+    $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
+    $existing_attachment_upload_source_root = $tmp . '/existing-attachment-upload-source';
+    $existing_attachment_upload_target_root = $tmp . '/existing-attachment-upload-target';
+    $existing_attachment_upload_base = $existing_attachment_upload_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_attachment_upload_source = $existing_attachment_upload_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_attachment_upload_target = $existing_attachment_upload_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_attachment_upload_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-attachment-upload-validator-metadata.sqlite';
+    $existing_attachment_upload_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-attachment-upload-validator.json';
+
+    mkdir($existing_attachment_upload_base_root . '/wp-content/database', 0777, true);
+    create_wp_attachment_upload_metadata_db($existing_attachment_upload_base);
+    foreach ([
+        'generated-image.jpg',
+        'generated-image-300x200.jpg',
+        'generated-image-original.jpg',
+        'generated-image-backup.jpg',
+    ] as $filename) {
+        write_test_file($existing_attachment_upload_base_root . '/wp-content/uploads/2026/05/' . $filename, $filename . ' bytes');
+    }
+    copy_tree_for_test($existing_attachment_upload_base_root, $existing_attachment_upload_source_root);
+    copy_tree_for_test($existing_attachment_upload_base_root, $existing_attachment_upload_target_root);
+    cow_merge_capture_file_base($existing_attachment_upload_base_root, $existing_attachment_upload_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_attachment_upload_source, $existing_attachment_upload_metadata, 'feature-wp-existing-attachment-upload-source');
+    cow_merge_allocate_autoincrement_bands($existing_attachment_upload_target, $existing_attachment_upload_metadata, 'main');
+
+    $db = open_db($existing_attachment_upload_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES ('Unrelated source page', '<!-- wp:paragraph --><p>Unrelated</p><!-- /wp:paragraph -->', 'publish', 'page', 'unrelated-source-page', '')");
+    $db->close();
+
+    $existing_attachment_upload_result = cow_merge_branch_state(
+        $existing_attachment_upload_base,
+        $existing_attachment_upload_source,
+        $existing_attachment_upload_target,
+        $existing_attachment_upload_metadata,
+        'feature-wp-existing-attachment-upload-source',
+        'main',
+        $existing_attachment_upload_file_base,
+        $existing_attachment_upload_source_root,
+        $existing_attachment_upload_target_root
+    );
+
+    assert_same($existing_attachment_upload_result['status'], 'completed', 'built-in WordPress attachment upload validator ignores preexisting missing generated files');
+    assert_same((int)($existing_attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress attachment upload validator only records newly introduced missing generated files');
 
     $image_block_base_root = $tmp . '/image-block-base';
     $image_block_source_root = $tmp . '/image-block-source';
@@ -3227,23 +3960,22 @@ PHP);
         $term_taxonomy_target_root
     );
 
-    assert_same($term_taxonomy_result['status'], 'completed_with_conflicts', 'WordPress term-taxonomy validator holds missing terms for review');
+    assert_same($term_taxonomy_result['status'], 'completed_with_conflicts', 'WordPress term-taxonomy owner delete with target-edited taxonomies stays reviewable');
     assert_same((int)($term_taxonomy_result['plugin_validators'] ?? 0), 1, 'WordPress term-taxonomy validator is discovered from mu-plugins during merge');
-    assert_same((int)($term_taxonomy_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress term-taxonomy validator records missing term owners for multiple taxonomies');
-    assert_same((int)scalar($term_taxonomy_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 89'), 0, 'WordPress term-taxonomy validator leaves the source term deletion staged for review');
+    assert_same((int)($term_taxonomy_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress term-taxonomy owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($term_taxonomy_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 89'), 1, 'WordPress term-taxonomy owner delete guard keeps the parent term before review');
     assert_same(scalar($term_taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 90'), 'Target category taxonomy still pointing at deleted term', 'WordPress term-taxonomy validator preserves the target category taxonomy edit');
     assert_same(scalar($term_taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 91'), 'Target tag taxonomy still pointing at deleted term', 'WordPress term-taxonomy validator preserves the target tag taxonomy edit');
 
     $term_taxonomy_audit = cow_merge_audit_report($term_taxonomy_metadata, (int)$term_taxonomy_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-term-taxonomy-missing-term',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($term_taxonomy_audit['conflicts']), 2, 'WordPress term-taxonomy validator exposes missing terms as plugin-scoped audit conflicts');
+    assert_same(count($term_taxonomy_audit['conflicts']), 1, 'WordPress term-taxonomy owner delete guard records one row constraint conflict');
     $term_taxonomy_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $term_taxonomy_audit['conflicts']));
-    assert_true(str_contains($term_taxonomy_preview, '"missing_term_id":89'), 'WordPress term-taxonomy audit includes the missing term ID');
-    assert_true(str_contains($term_taxonomy_preview, '"field":"term_id"'), 'WordPress term-taxonomy audit includes the stale field name');
-    assert_true(str_contains($term_taxonomy_preview, '"taxonomy":"post_tag"'), 'WordPress term-taxonomy audit includes the affected taxonomy');
+    assert_true(str_contains($term_taxonomy_preview, '89'), 'WordPress term-taxonomy audit includes the guarded term ID');
+    $term_taxonomy_blocker_reason = (string)scalar($term_taxonomy_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_terms' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($term_taxonomy_blocker_reason, 'target has changed wp_term_taxonomy rows'), 'WordPress term-taxonomy audit explains the changed dependent taxonomy blocker');
 
     $term_parent_base_root = $tmp . '/term-parent-base';
     $term_parent_source_root = $tmp . '/term-parent-source';
@@ -3404,23 +4136,22 @@ PHP);
         $termmeta_target_root
     );
 
-    assert_same($termmeta_result['status'], 'completed_with_conflicts', 'WordPress termmeta validator holds missing term owners for review');
+    assert_same($termmeta_result['status'], 'completed_with_conflicts', 'WordPress termmeta owner delete with target-edited metadata stays reviewable');
     assert_same((int)($termmeta_result['plugin_validators'] ?? 0), 1, 'WordPress termmeta validator is discovered from mu-plugins during merge');
-    assert_same((int)($termmeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress termmeta validator records missing term owners for scalar and JSON metadata');
-    assert_same((int)scalar($termmeta_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 87'), 0, 'WordPress termmeta validator leaves the source term deletion staged for review');
+    assert_same((int)($termmeta_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress termmeta owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($termmeta_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 87'), 1, 'WordPress termmeta owner delete guard keeps the parent term before review');
     assert_same(scalar($termmeta_target, 'SELECT meta_value FROM wp_termmeta WHERE meta_id = 88'), 'Target termmeta still pointing at deleted term', 'WordPress termmeta validator preserves the target scalar termmeta edit');
     assert_same(scalar($termmeta_target, 'SELECT meta_value FROM wp_termmeta WHERE meta_id = 89'), '{"favorite":"target"}', 'WordPress termmeta validator preserves the target JSON termmeta edit');
 
     $termmeta_audit = cow_merge_audit_report($termmeta_metadata, (int)$termmeta_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-termmeta-missing-term',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($termmeta_audit['conflicts']), 2, 'WordPress termmeta validator exposes missing terms as plugin-scoped audit conflicts');
+    assert_same(count($termmeta_audit['conflicts']), 1, 'WordPress termmeta owner delete guard records one row constraint conflict');
     $termmeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $termmeta_audit['conflicts']));
-    assert_true(str_contains($termmeta_preview, '"missing_term_id":87'), 'WordPress termmeta audit includes the missing term ID');
-    assert_true(str_contains($termmeta_preview, '"field":"term_id"'), 'WordPress termmeta audit includes the stale field name');
-    assert_true(str_contains($termmeta_preview, '"meta_key":"_forkpress_term_json"'), 'WordPress termmeta audit includes JSON metadata');
+    assert_true(str_contains($termmeta_preview, '87'), 'WordPress termmeta audit includes the guarded term ID');
+    $termmeta_blocker_reason = (string)scalar($termmeta_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_terms' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($termmeta_blocker_reason, 'target has changed wp_termmeta rows'), 'WordPress termmeta audit explains the changed dependent metadata blocker');
 
     $comment_base_root = $tmp . '/comment-ref-base';
     $comment_source_root = $tmp . '/comment-ref-source';
@@ -3552,29 +4283,29 @@ PHP);
         $comment_target_root
     );
 
-    assert_same($comment_result['status'], 'completed_with_conflicts', 'WordPress comment-reference validator holds missing post/user/comment refs for review');
+    assert_same($comment_result['status'], 'completed_with_conflicts', 'WordPress comment-reference owner deletes with target-edited dependents stay reviewable');
     assert_same((int)($comment_result['plugin_validators'] ?? 0), 1, 'WordPress comment-reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($comment_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress comment-reference validator records missing post, user, parent comment, and commentmeta refs');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 120'), 0, 'WordPress comment-reference validator leaves the source post deletion staged for review');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 121'), 0, 'WordPress comment-reference validator leaves the source user deletion staged for review');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 123'), 0, 'WordPress comment-reference validator leaves the source comment deletion staged for review');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 125'), 0, 'WordPress comment-reference validator leaves the source parent comment deletion staged for review');
+    assert_same((int)($comment_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress comment-reference owner delete guards prevent missing-reference validator fallout');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 120'), 1, 'WordPress comment-reference owner delete guard keeps the referenced post before review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 121'), 1, 'WordPress comment-reference owner delete guard keeps the referenced user before review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 123'), 1, 'WordPress comment-reference owner delete guard keeps the comment before review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 125'), 1, 'WordPress comment-reference owner delete guard keeps the parent comment before review');
     assert_same(scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 122'), 'Target comment still pointing at deleted post and user', 'WordPress comment-reference validator preserves target comment edits');
     assert_same(scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 126'), 'Target child comment still pointing at deleted parent', 'WordPress comment-reference validator preserves target child comment edits');
     assert_same(scalar($comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 124'), 'target metadata still pointing at deleted comment', 'WordPress comment-reference validator preserves target commentmeta edits');
 
     $comment_audit = cow_merge_audit_report($comment_metadata, (int)$comment_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($comment_audit['conflicts']), 4, 'WordPress comment-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    assert_same(count($comment_audit['conflicts']), 4, 'WordPress comment-reference owner delete guards record one row constraint per guarded owner');
     $comment_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $comment_audit['conflicts']));
-    foreach (['"object_type":"post"', '"object_type":"user"', '"object_type":"comment"', '"missing_object_id":120', '"missing_object_id":121', '"missing_object_id":123', '"missing_object_id":125'] as $needle) {
+    foreach (['120', '121', '123', '125'] as $needle) {
         assert_true(str_contains($comment_preview, $needle), 'WordPress comment-reference audit includes ' . $needle);
     }
-    foreach (['comment_post_ID', 'user_id', 'comment_parent', 'comment_id'] as $needle) {
-        assert_true(str_contains($comment_preview, $needle), 'WordPress comment-reference audit includes ' . $needle);
-    }
+    $comment_blocker_reasons = (string)scalar($comment_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments') AND decision = 'target-wins'");
+    assert_true(str_contains($comment_blocker_reasons, 'target has changed wp_comments rows'), 'WordPress comment-reference audit explains the changed dependent comment blockers');
+    assert_true(str_contains($comment_blocker_reasons, 'target has changed wp_commentmeta rows'), 'WordPress comment-reference audit explains the changed dependent comment metadata blocker');
 
     $option_base_root = $tmp . '/option-ref-base';
     $option_source_root = $tmp . '/option-ref-source';
@@ -4011,9 +4742,10 @@ PHP);
 
     assert_same($option_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($option_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 18, 'WordPress option reference validator records missing pages, posts, attachments, nav menus, widgets, and option refs');
-    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92, 93)'), 0, 'WordPress option reference validator leaves source object deletions staged for review');
-    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 0, 'WordPress option reference validator leaves source nav menu deletion staged for review');
+    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 9, 'WordPress option reference validator records only unguarded missing pages, posts, widgets, and option refs');
+    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92)'), 0, 'WordPress option reference validator leaves unguarded source object deletions staged for review');
+    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 93'), 1, 'WordPress option owner guard keeps target-edited attachment option refs before validation');
+    assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 1, 'WordPress option owner guard keeps target-edited nav menu option refs before validation');
 
     $option_theme_mods_value = scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
     $option_theme_mods = is_string($option_theme_mods_value) ? unserialize($option_theme_mods_value) : null;
@@ -4056,17 +4788,24 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($option_audit['conflicts']), 18, 'WordPress option reference validator exposes missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($option_audit['conflicts']), 9, 'WordPress option reference validator exposes remaining missing option objects as plugin-scoped audit conflicts');
     $option_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_audit['conflicts']));
-    foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":93', '"missing_object_id":94'] as $needle) {
+    foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":94'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"attachment"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
+    foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['theme_mods_forkpress_active', 'widget_nav_menu', 'nav_menu_options', 'widget_media_image', 'widget_media_audio', 'widget_media_video', 'widget_media_gallery', 'widget_pages', 'widget_block', 'widget_text', 'widget_custom_html', 'sidebars_widgets', 'widget_rss', 'site_icon', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
+    foreach (['theme_mods_forkpress_active', 'nav_menu_options', 'widget_pages', 'sidebars_widgets', 'widget_rss', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
+    $option_owner_guard_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    $option_owner_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_owner_guard_audit['conflicts']));
+    assert_true(str_contains($option_owner_guard_preview, '93'), 'WordPress option owner guard audit includes the guarded attachment ID');
+    assert_true(str_contains($option_owner_guard_preview, '94'), 'WordPress option owner guard audit includes the guarded nav menu term ID');
 
     $plugin_cpt_base_root = $tmp . '/wp-plugin-cpt-validator-files-base';
     $plugin_cpt_source_root = $tmp . '/wp-plugin-cpt-validator-files-source';

@@ -5794,6 +5794,113 @@ function cow_merge_wordpress_post_content_reference_violation(
     return null;
 }
 
+function cow_merge_wordpress_post_content_references_deleted_owner(string $content, string $owner_table, int $owner_id, ?string $owner_post_type): bool {
+    if ($content === '') {
+        return false;
+    }
+    $int_refs_owner = static function (mixed $candidate) use ($owner_id): bool {
+        if (is_int($candidate)) {
+            return $candidate === $owner_id;
+        }
+        if (is_string($candidate) && preg_match('/^-?\d+$/', trim($candidate))) {
+            return (int)trim($candidate) === $owner_id;
+        }
+        return false;
+    };
+
+    if ($owner_table === 'wp_posts' && $owner_post_type === 'attachment') {
+        foreach (cow_merge_wordpress_post_content_legacy_attachment_refs($content) as $ref) {
+            if ($int_refs_owner($ref['id'] ?? null)) {
+                return true;
+            }
+        }
+    }
+
+    foreach (cow_merge_wordpress_post_content_blocks($content) as $block) {
+        $block_name = (string)$block['name'];
+        $attrs = json_decode((string)$block['attrs'], true);
+        if (!is_array($attrs)) {
+            continue;
+        }
+
+        if ($owner_table === 'wp_posts') {
+            if ($block_name === 'block' && $owner_post_type === 'wp_block' && array_key_exists('ref', $attrs) && $int_refs_owner($attrs['ref'])) {
+                return true;
+            }
+            if (in_array($block_name, ['audio', 'cover', 'file', 'image', 'video'], true) && $owner_post_type === 'attachment' && array_key_exists('id', $attrs) && $int_refs_owner($attrs['id'])) {
+                return true;
+            }
+            if ($block_name === 'media-text' && $owner_post_type === 'attachment' && array_key_exists('mediaId', $attrs) && $int_refs_owner($attrs['mediaId'])) {
+                return true;
+            }
+            if ($block_name === 'gallery' && $owner_post_type === 'attachment' && isset($attrs['ids']) && is_array($attrs['ids'])) {
+                foreach ($attrs['ids'] as $id) {
+                    if ($int_refs_owner($id)) {
+                        return true;
+                    }
+                }
+            }
+            if (in_array($block_name, ['navigation-link', 'navigation-submenu'], true) && ($attrs['kind'] ?? null) === 'post-type' && array_key_exists('id', $attrs) && $int_refs_owner($attrs['id'])) {
+                return true;
+            }
+            if ($block_name === 'navigation' && $owner_post_type === 'wp_navigation' && array_key_exists('ref', $attrs) && $int_refs_owner($attrs['ref'])) {
+                return true;
+            }
+        }
+
+        if ($owner_table === 'wp_users') {
+            if ($block_name === 'avatar' && array_key_exists('userId', $attrs) && $int_refs_owner($attrs['userId'])) {
+                return true;
+            }
+            if ($block_name === 'latest-posts' && isset($attrs['selectedAuthor']) && $int_refs_owner($attrs['selectedAuthor'])) {
+                return true;
+            }
+            if ($block_name === 'query' && isset($attrs['query']) && is_array($attrs['query']) && array_key_exists('author', $attrs['query']) && $int_refs_owner($attrs['query']['author'])) {
+                return true;
+            }
+        }
+
+        if ($owner_table === 'wp_terms') {
+            if ($block_name === 'latest-posts' && isset($attrs['categories']) && is_array($attrs['categories'])) {
+                foreach ($attrs['categories'] as $term_id) {
+                    if ($int_refs_owner($term_id)) {
+                        return true;
+                    }
+                }
+            }
+            if (in_array($block_name, ['navigation-link', 'navigation-submenu'], true) && ($attrs['kind'] ?? null) === 'taxonomy' && array_key_exists('id', $attrs) && $int_refs_owner($attrs['id'])) {
+                return true;
+            }
+            if ($block_name === 'query' && isset($attrs['query']) && is_array($attrs['query'])) {
+                foreach (['categoryIds', 'tagIds'] as $field) {
+                    if (!isset($attrs['query'][$field]) || !is_array($attrs['query'][$field])) {
+                        continue;
+                    }
+                    foreach ($attrs['query'][$field] as $term_id) {
+                        if ($int_refs_owner($term_id)) {
+                            return true;
+                        }
+                    }
+                }
+                if (isset($attrs['query']['taxQuery']) && is_array($attrs['query']['taxQuery'])) {
+                    foreach ($attrs['query']['taxQuery'] as $term_ids) {
+                        if (!is_array($term_ids)) {
+                            continue;
+                        }
+                        foreach ($term_ids as $term_id) {
+                            if ($int_refs_owner($term_id)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 function cow_merge_wordpress_option_reference_violation(
     SQLite3 $source,
     SQLite3 $target,
@@ -5966,6 +6073,213 @@ function cow_merge_wordpress_option_reference_violation(
             if ($violation !== null) {
                 return $violation;
             }
+        }
+    }
+
+    return null;
+}
+
+function cow_merge_wordpress_option_value_references_deleted_owner(string $option_name, string $option_value, string $owner_table, int $owner_id, ?string $owner_post_type): bool {
+    $int_refs_owner = static function (mixed $candidate) use ($owner_id): bool {
+        if (is_int($candidate)) {
+            return $candidate === $owner_id;
+        }
+        if (is_string($candidate) && preg_match('/^-?\d+$/', trim($candidate))) {
+            return (int)trim($candidate) === $owner_id;
+        }
+        return false;
+    };
+
+    if ($owner_table === 'wp_posts') {
+        if (in_array($option_name, ['page_on_front', 'page_for_posts'], true)) {
+            return $owner_post_type === 'page' && $int_refs_owner($option_value);
+        }
+        if ($option_name === 'site_icon') {
+            return $owner_post_type === 'attachment' && $int_refs_owner($option_value);
+        }
+    }
+
+    $decoded = @unserialize($option_value, ['allowed_classes' => false]);
+    if (!is_array($decoded)) {
+        return false;
+    }
+
+    if ($owner_table === 'wp_posts') {
+        if ($option_name === 'sticky_posts') {
+            foreach ($decoded as $post_id) {
+                if ($owner_post_type === 'post' && $int_refs_owner($post_id)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (str_starts_with($option_name, 'theme_mods_')) {
+            return $owner_post_type === 'attachment'
+                && array_key_exists('custom_logo', $decoded)
+                && $int_refs_owner($decoded['custom_logo']);
+        }
+
+        if (in_array($option_name, ['widget_media_image', 'widget_media_audio', 'widget_media_video'], true)) {
+            if ($owner_post_type !== 'attachment') {
+                return false;
+            }
+            foreach ($decoded as $widget) {
+                if (is_array($widget) && array_key_exists('attachment_id', $widget) && $int_refs_owner($widget['attachment_id'])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'widget_media_gallery') {
+            if ($owner_post_type !== 'attachment') {
+                return false;
+            }
+            foreach ($decoded as $widget) {
+                if (!is_array($widget) || !array_key_exists('ids', $widget)) {
+                    continue;
+                }
+                $ids = is_array($widget['ids']) ? $widget['ids'] : explode(',', (string)$widget['ids']);
+                foreach ($ids as $attachment_id) {
+                    if ($int_refs_owner($attachment_id)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'widget_pages') {
+            if ($owner_post_type !== 'page') {
+                return false;
+            }
+            foreach ($decoded as $widget) {
+                if (!is_array($widget) || !array_key_exists('exclude', $widget)) {
+                    continue;
+                }
+                $excluded_ids = is_array($widget['exclude']) ? $widget['exclude'] : explode(',', (string)$widget['exclude']);
+                foreach ($excluded_ids as $post_id) {
+                    if ($int_refs_owner($post_id)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    if ($owner_table === 'wp_terms') {
+        if (str_starts_with($option_name, 'theme_mods_')) {
+            $locations = $decoded['nav_menu_locations'] ?? null;
+            if (is_array($locations)) {
+                foreach ($locations as $term_id) {
+                    if ($int_refs_owner($term_id)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'widget_nav_menu') {
+            foreach ($decoded as $widget) {
+                if (is_array($widget) && array_key_exists('nav_menu', $widget) && $int_refs_owner($widget['nav_menu'])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if ($option_name === 'nav_menu_options') {
+            $auto_add = $decoded['auto_add'] ?? null;
+            if (is_array($auto_add)) {
+                foreach ($auto_add as $term_id) {
+                    if ($int_refs_owner($term_id)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    $block_content_widget_fields = [
+        'widget_block' => 'content',
+        'widget_custom_html' => 'content',
+        'widget_text' => 'text',
+    ];
+    $block_content_field = $block_content_widget_fields[$option_name] ?? null;
+    if ($block_content_field !== null) {
+        foreach ($decoded as $widget) {
+            if (!is_array($widget) || !isset($widget[$block_content_field]) || !is_string($widget[$block_content_field])) {
+                continue;
+            }
+            if (cow_merge_wordpress_post_content_references_deleted_owner($widget[$block_content_field], $owner_table, $owner_id, $owner_post_type)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function cow_merge_wordpress_target_changed_options_for_deleted_owner(SQLite3 $base, SQLite3 $target, string $owner_table, int $owner_id, ?string $owner_post_type = null): ?string {
+    foreach (['wp_options'] as $option_table) {
+        if (!cow_merge_schema_object_exists($base, $option_table) || !cow_merge_schema_object_exists($target, $option_table)) {
+            continue;
+        }
+        $base_columns = cow_merge_table_columns($base, $option_table);
+        $target_columns = cow_merge_table_columns($target, $option_table);
+        foreach (['option_id', 'option_name', 'option_value'] as $required_column) {
+            if (!in_array($required_column, $base_columns, true) || !in_array($required_column, $target_columns, true)) {
+                continue 2;
+            }
+        }
+
+        $columns = cow_merge_all_columns($target_columns, $base_columns);
+        $interesting_options = [
+            'nav_menu_options',
+            'page_for_posts',
+            'page_on_front',
+            'site_icon',
+            'sticky_posts',
+            'widget_media_audio',
+            'widget_media_gallery',
+            'widget_media_image',
+            'widget_media_video',
+            'widget_nav_menu',
+            'widget_pages',
+            'widget_block',
+            'widget_custom_html',
+            'widget_text',
+        ];
+        $placeholders = implode(',', array_fill(0, count($interesting_options), '?'));
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'SELECT * FROM ' . cow_merge_quote_ident($option_table)
+                . " WHERE option_name LIKE 'theme_mods_%' OR option_name IN ($placeholders)"
+                . ' ORDER BY option_id',
+            "failed to prepare target $option_table WordPress option dependency lookup"
+        );
+        foreach ($interesting_options as $index => $option_name) {
+            cow_merge_bind($stmt, $index + 1, $option_name);
+        }
+        $res = cow_merge_execute_checked($stmt, $target, "failed to inspect target $option_table WordPress option dependencies");
+        try {
+            while ($target_row = $res->fetchArray(SQLITE3_ASSOC)) {
+                $option_name = (string)($target_row['option_name'] ?? '');
+                $option_value = (string)($target_row['option_value'] ?? '');
+                if (!cow_merge_wordpress_option_value_references_deleted_owner($option_name, $option_value, $owner_table, $owner_id, $owner_post_type)) {
+                    continue;
+                }
+                $option_id = $target_row['option_id'] ?? null;
+                $base_row = cow_merge_wordpress_source_row($base, $option_table, 'option_id', $option_id);
+                if ($base_row === null || !cow_merge_row_values_equal($target_row, $base_row, $columns)) {
+                    return "source deleted $owner_table row $owner_id while target has changed $option_table rows referencing it";
+                }
+            }
+        } finally {
+            cow_merge_result_finalize_checked($res, "failed to finalize target $option_table WordPress option dependency lookup");
         }
     }
 
@@ -6164,6 +6478,7 @@ function cow_merge_wordpress_row_reference_violation(
 }
 
 function cow_merge_wordpress_delete_reference_violation(
+    SQLite3 $base,
     SQLite3 $source,
     SQLite3 $target,
     SQLite3 $meta,
@@ -6171,6 +6486,129 @@ function cow_merge_wordpress_delete_reference_violation(
     string $table,
     array $base_row
 ): ?string {
+    if ($table === 'wp_posts') {
+        $post_id = $base_row['ID'] ?? null;
+        if (is_int($post_id) || (is_string($post_id) && preg_match('/^-?\d+$/', $post_id))) {
+            $dependent_specs = [
+                ['table' => 'wp_postmeta', 'pk' => 'meta_id', 'owner_column' => 'post_id'],
+                ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'comment_post_ID'],
+            ];
+            if (($base_row['post_type'] ?? null) === 'attachment') {
+                $dependent_specs[] = [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_thumbnail_id',
+                ];
+                $dependent_specs[] = [
+                    'table' => 'wp_options',
+                    'pk' => 'option_id',
+                    'reference_column' => 'option_value',
+                    'filter_column' => 'option_name',
+                    'filter_value' => 'site_icon',
+                ];
+            }
+            if (($base_row['post_type'] ?? null) === 'nav_menu_item') {
+                $dependent_specs[] = [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_menu_item_menu_item_parent',
+                ];
+            }
+            if (($base_row['post_type'] ?? null) !== 'nav_menu_item') {
+                $dependent_specs[] = [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_menu_item_object_id',
+                    'sibling_meta_key' => '_menu_item_type',
+                    'sibling_meta_value' => 'post_type',
+                ];
+            }
+            if (($base_row['post_type'] ?? null) === 'page') {
+                $dependent_specs[] = [
+                    'table' => 'wp_options',
+                    'pk' => 'option_id',
+                    'reference_column' => 'option_value',
+                    'filter_column' => 'option_name',
+                    'filter_value' => 'page_on_front',
+                ];
+                $dependent_specs[] = [
+                    'table' => 'wp_options',
+                    'pk' => 'option_id',
+                    'reference_column' => 'option_value',
+                    'filter_column' => 'option_name',
+                    'filter_value' => 'page_for_posts',
+                ];
+            }
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, $dependent_specs);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, (string)($base_row['post_type'] ?? ''));
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
+            }
+        }
+    }
+    if ($table === 'wp_users') {
+        $user_id = $base_row['ID'] ?? null;
+        if (is_int($user_id) || (is_string($user_id) && preg_match('/^-?\d+$/', $user_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_users', (int)$user_id, [
+                ['table' => 'wp_usermeta', 'pk' => 'umeta_id', 'owner_column' => 'user_id'],
+                ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'user_id'],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_users', (int)$user_id);
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
+            }
+        }
+    }
+    if ($table === 'wp_terms') {
+        $term_id = $base_row['term_id'] ?? null;
+        if (is_int($term_id) || (is_string($term_id) && preg_match('/^-?\d+$/', $term_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_terms', (int)$term_id, [
+                ['table' => 'wp_termmeta', 'pk' => 'meta_id', 'owner_column' => 'term_id'],
+                ['table' => 'wp_term_taxonomy', 'pk' => 'term_taxonomy_id', 'owner_column' => 'term_id'],
+                [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_menu_item_object_id',
+                    'sibling_meta_key' => '_menu_item_type',
+                    'sibling_meta_value' => 'taxonomy',
+                ],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_terms', (int)$term_id);
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
+            }
+        }
+    }
+    if ($table === 'wp_comments') {
+        $comment_id = $base_row['comment_ID'] ?? null;
+        if (is_int($comment_id) || (is_string($comment_id) && preg_match('/^-?\d+$/', $comment_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_comments', (int)$comment_id, [
+                ['table' => 'wp_commentmeta', 'pk' => 'meta_id', 'owner_column' => 'comment_id'],
+                ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'comment_parent'],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+        }
+    }
+
     if ($table !== 'wp_term_relationships' || !cow_merge_schema_object_exists($source, 'wp_term_relationships')) {
         return null;
     }
@@ -6208,6 +6646,96 @@ function cow_merge_wordpress_delete_reference_violation(
         cow_merge_result_finalize_checked($res, 'failed to finalize WordPress source term relationship replacement lookup');
     }
 
+    return null;
+}
+
+function cow_merge_wordpress_target_changed_dependents_for_deleted_owner(SQLite3 $base, SQLite3 $target, string $owner_table, int $owner_id, array $dependent_specs): ?string {
+    foreach ($dependent_specs as $spec) {
+        $dependent_table = (string)($spec['table'] ?? '');
+        $dependent_pk = (string)($spec['pk'] ?? '');
+        $owner_column = (string)($spec['owner_column'] ?? '');
+        $reference_column = (string)($spec['reference_column'] ?? '');
+        if ($dependent_table === '' || $dependent_pk === '' || ($owner_column === '' && $reference_column === '')) {
+            continue;
+        }
+        if (!cow_merge_schema_object_exists($base, $dependent_table) || !cow_merge_schema_object_exists($target, $dependent_table)) {
+            continue;
+        }
+        $base_columns = cow_merge_table_columns($base, $dependent_table);
+        $target_columns = cow_merge_table_columns($target, $dependent_table);
+        if (
+            !in_array($dependent_pk, $base_columns, true)
+            || !in_array($dependent_pk, $target_columns, true)
+        ) {
+            continue;
+        }
+        $filter_column = (string)($spec['filter_column'] ?? '');
+        $filter_value = $spec['filter_value'] ?? null;
+        if ($filter_column !== '' && !in_array($filter_column, $target_columns, true)) {
+            continue;
+        }
+        $where = '';
+        if ($owner_column !== '') {
+            if (!in_array($owner_column, $target_columns, true)) {
+                continue;
+            }
+            $where = cow_merge_quote_ident($owner_column) . ' = :owner_id';
+        } else {
+            if (!in_array($reference_column, $target_columns, true)) {
+                continue;
+            }
+            $where = 'trim(' . cow_merge_quote_ident($reference_column) . ') = :owner_id_text';
+        }
+        if ($filter_column !== '') {
+            $where .= ' AND ' . cow_merge_quote_ident($filter_column) . ' = :filter_value';
+        }
+        if ($dependent_table === 'wp_postmeta' && isset($spec['sibling_meta_key'], $spec['sibling_meta_value'])) {
+            if (!in_array('post_id', $target_columns, true)) {
+                continue;
+            }
+            $where .= ' AND EXISTS ('
+                . 'SELECT 1 FROM wp_postmeta sibling '
+                . 'WHERE sibling.post_id = ' . cow_merge_quote_ident($dependent_table) . '.post_id '
+                . "AND sibling.meta_key = :sibling_meta_key "
+                . "AND sibling.meta_value = :sibling_meta_value"
+                . ')';
+        }
+        $columns = cow_merge_all_columns($target_columns, $base_columns);
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'SELECT * FROM ' . cow_merge_quote_ident($dependent_table)
+                . ' WHERE ' . $where
+                . ' ORDER BY ' . cow_merge_quote_ident($dependent_pk),
+            "failed to prepare target $dependent_table dependency lookup"
+        );
+        if ($owner_column !== '') {
+            cow_merge_bind($stmt, ':owner_id', $owner_id);
+        } else {
+            cow_merge_bind($stmt, ':owner_id_text', (string)$owner_id);
+        }
+        if ($filter_column !== '') {
+            cow_merge_bind($stmt, ':filter_value', $filter_value);
+        }
+        if ($dependent_table === 'wp_postmeta' && isset($spec['sibling_meta_key'], $spec['sibling_meta_value'])) {
+            cow_merge_bind($stmt, ':sibling_meta_key', $spec['sibling_meta_key']);
+            cow_merge_bind($stmt, ':sibling_meta_value', $spec['sibling_meta_value']);
+        }
+        $res = cow_merge_execute_checked($stmt, $target, "failed to inspect target $dependent_table dependencies");
+        try {
+            while ($target_row = $res->fetchArray(SQLITE3_ASSOC)) {
+                $dependent_id = $target_row[$dependent_pk] ?? null;
+                if (!is_int($dependent_id) && !(is_string($dependent_id) && preg_match('/^-?\d+$/', (string)$dependent_id))) {
+                    continue;
+                }
+                $base_row = cow_merge_wordpress_source_row($base, $dependent_table, $dependent_pk, $dependent_id);
+                if ($base_row === null || !cow_merge_row_values_equal($target_row, $base_row, $columns)) {
+                    return "source deleted $owner_table row $owner_id while target has changed $dependent_table rows referencing it";
+                }
+            }
+        } finally {
+            cow_merge_result_finalize_checked($res, "failed to finalize target $dependent_table dependency lookup");
+        }
+    }
     return null;
 }
 
@@ -9503,6 +10031,343 @@ function cow_merge_wordpress_block_asset_findings(
     return $findings;
 }
 
+function cow_merge_wordpress_upload_relative_path(string $path): ?string {
+    $path = trim(cow_merge_path_to_unix($path));
+    if ($path === '' || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/', $path) === 1) {
+        return null;
+    }
+    $relative = str_starts_with($path, 'wp-content/uploads/')
+        ? $path
+        : 'wp-content/uploads/' . ltrim($path, '/');
+    $normalized = cow_merge_normalize_relative_path($relative);
+    if ($normalized === null || !str_starts_with($normalized, 'wp-content/uploads/')) {
+        return null;
+    }
+    return $normalized;
+}
+
+function cow_merge_wordpress_upload_child_relative_path(string $base_path, string $filename): ?string {
+    $filename = trim(cow_merge_path_to_unix($filename));
+    if ($filename === '' || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/', $filename) === 1) {
+        return null;
+    }
+    if (str_starts_with($filename, 'wp-content/uploads/') || str_contains($filename, '/')) {
+        return cow_merge_wordpress_upload_relative_path($filename);
+    }
+    $directory = dirname($base_path);
+    $directory = $directory === '.' ? 'wp-content/uploads' : $directory;
+    return cow_merge_normalize_relative_path($directory . '/' . $filename);
+}
+
+function cow_merge_wordpress_upload_is_file(string $root, string $relative_path): bool {
+    $path = rtrim($root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative_path);
+    return is_file($path);
+}
+
+function cow_merge_wordpress_attachment_upload_issues(string $target_db, string $target_root): array {
+    if ($target_root === '' || !is_dir($target_root)) {
+        return [];
+    }
+
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+        foreach (['ID', 'post_title', 'post_type'] as $column) {
+            if (!isset($post_columns[$column])) {
+                return [];
+            }
+        }
+        $postmeta_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_postmeta'), true);
+        foreach (['meta_id', 'post_id', 'meta_key', 'meta_value'] as $column) {
+            if (!isset($postmeta_columns[$column])) {
+                return [];
+            }
+        }
+
+        $issues = [];
+        $upload_owners = [];
+        $record_issue = static function (
+            array &$issues,
+            int $attachment_id,
+            string $post_title,
+            string $type,
+            string $reason,
+            array $candidate,
+            array $files = []
+        ): void {
+            $key_parts = [$type, (string)$attachment_id];
+            if ($files !== []) {
+                $key_parts[] = implode('|', $files);
+            } elseif (isset($candidate['field'])) {
+                $key_parts[] = (string)$candidate['field'];
+            }
+            if (isset($candidate['role'])) {
+                $key_parts[] = (string)$candidate['role'];
+            }
+            $issues[implode("\0", $key_parts)] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'attachment:' . (string)$attachment_id,
+                'reason' => $reason,
+                'type' => $type,
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'files' => $files,
+                'validator' => 'forkpress-wordpress-core-attachment-uploads@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-attachment-upload',
+                    'attachment_id' => $attachment_id,
+                    'files' => $files,
+                    'field' => $candidate['field'] ?? null,
+                    'role' => $candidate['role'] ?? null,
+                ],
+                'manual_review_reason' => 'WordPress attachment metadata points at upload files that are not present in the merged filesystem.',
+                'suggested_action' => 'Restore the missing upload file, update the attachment metadata, or regenerate media derivatives in WordPress before accepting the merged state.',
+                'candidate' => [
+                    'attachment_id' => $attachment_id,
+                    'post_title' => $post_title,
+                ] + $candidate,
+            ];
+        };
+
+        $mime_select = isset($post_columns['post_mime_type']) ? 'p.post_mime_type' : "''";
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT p.ID, p.post_title, $mime_select AS post_mime_type,
+                    (SELECT f.meta_value FROM wp_postmeta f WHERE f.post_id = p.ID AND f.meta_key = '_wp_attached_file' ORDER BY f.meta_id DESC LIMIT 1) AS attached_file,
+                    (SELECT m.meta_value FROM wp_postmeta m WHERE m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata' ORDER BY m.meta_id DESC LIMIT 1) AS attachment_metadata
+             FROM wp_posts p
+             WHERE p.post_type = 'attachment'
+             ORDER BY p.ID",
+            'failed to prepare WordPress attachment upload inspection'
+        );
+        $res = cow_merge_execute_checked($stmt, $db, 'failed to inspect WordPress attachment uploads');
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $attachment_id = (int)$row['ID'];
+            $post_title = (string)$row['post_title'];
+            $post_mime_type = is_string($row['post_mime_type'] ?? null) ? strtolower((string)$row['post_mime_type']) : '';
+            $attached_file_raw = is_string($row['attached_file'] ?? null) ? (string)$row['attached_file'] : '';
+            $attached_path = cow_merge_wordpress_upload_relative_path($attached_file_raw);
+            if ($attached_path === null) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment has no valid _wp_attached_file upload path', [
+                    'field' => '_wp_attached_file',
+                    'attached_file' => $attached_file_raw,
+                ]);
+                continue;
+            }
+
+            $seen_paths = [];
+            $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, &$upload_owners, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
+                if (isset($seen_paths[$path])) {
+                    return;
+                }
+                $seen_paths[$path] = true;
+                $absolute_path = rtrim($target_root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $path);
+                if (is_link($absolute_path) || (file_exists($absolute_path) && !is_file($absolute_path))) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-entry', 'attachment metadata references a non-regular upload path', [
+                        'field' => $field,
+                        'role' => $role,
+                        'attached_file' => $attached_file_raw,
+                        'invalid_file' => $path,
+                        'entry_type' => is_link($absolute_path) ? 'symlink' : filetype($absolute_path),
+                    ] + $extra, [$path]);
+                    return;
+                }
+                if (!is_file($absolute_path)) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-missing-file', 'attachment metadata references a missing upload file', [
+                        'field' => $field,
+                        'role' => $role,
+                        'attached_file' => $attached_file_raw,
+                        'missing_file' => $path,
+                    ] + $extra, [$path]);
+                    return;
+                }
+                $owner_key = (string)$attachment_id;
+                if (!isset($upload_owners[$path][$owner_key])) {
+                    $upload_owners[$path][$owner_key] = [
+                        'attachment_id' => $attachment_id,
+                        'post_title' => $post_title,
+                        'roles' => [],
+                        'fields' => [],
+                    ];
+                }
+                $upload_owners[$path][$owner_key]['roles'][$role] = $role;
+                $upload_owners[$path][$owner_key]['fields'][$field] = $field;
+            };
+            $check_file($attached_path, '_wp_attached_file', 'original');
+
+            $metadata_raw = is_string($row['attachment_metadata'] ?? null) ? (string)$row['attachment_metadata'] : '';
+            if ($metadata_raw === '') {
+                if (str_starts_with($post_mime_type, 'image/')) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-missing', 'image attachment is missing _wp_attachment_metadata', [
+                        'field' => '_wp_attachment_metadata',
+                        'attached_file' => $attached_file_raw,
+                        'post_mime_type' => $post_mime_type,
+                    ], [$attached_path]);
+                }
+                continue;
+            }
+            $metadata = @unserialize($metadata_raw, ['allowed_classes' => false]);
+            if (!is_array($metadata)) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid', 'attachment metadata is not readable as serialized PHP', [
+                    'field' => '_wp_attachment_metadata',
+                    'attached_file' => $attached_file_raw,
+                ]);
+                continue;
+            }
+
+            $base_path = $attached_path;
+            if (isset($metadata['file']) && is_string($metadata['file']) && trim($metadata['file']) !== '') {
+                $metadata_path = cow_merge_wordpress_upload_relative_path((string)$metadata['file']);
+                if ($metadata_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment metadata file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.file',
+                        'role' => 'metadata-file',
+                        'attached_file' => $attached_file_raw,
+                        'metadata_file' => (string)$metadata['file'],
+                    ]);
+                } else {
+                    if ($metadata_path !== $attached_path) {
+                        $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-metadata-file-drift', 'attachment metadata file disagrees with _wp_attached_file', [
+                            'field' => '_wp_attachment_metadata.file',
+                            'role' => 'metadata-file',
+                            'attached_file' => $attached_file_raw,
+                            'metadata_file' => (string)$metadata['file'],
+                        ], array_values(array_unique([$attached_path, $metadata_path])));
+                    }
+                    $base_path = $metadata_path;
+                    $check_file($metadata_path, '_wp_attachment_metadata.file', 'metadata-file', [
+                        'metadata_file' => (string)$metadata['file'],
+                    ]);
+                }
+            }
+
+            $sizes = is_array($metadata['sizes'] ?? null) ? $metadata['sizes'] : [];
+            foreach ($sizes as $size_name => $size) {
+                if (!is_array($size) || !isset($size['file']) || !is_string($size['file'])) {
+                    continue;
+                }
+                $size_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$size['file']);
+                if ($size_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment generated-size file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file',
+                        'role' => 'generated-size',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'generated_file' => (string)$size['file'],
+                    ]);
+                    continue;
+                }
+                $check_file($size_path, '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file', 'generated-size', [
+                    'size' => (string)$size_name,
+                    'generated_file' => (string)$size['file'],
+                ]);
+            }
+
+            if (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
+                $original_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$metadata['original_image']);
+                if ($original_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment original_image file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.original_image',
+                        'role' => 'original-image',
+                        'attached_file' => $attached_file_raw,
+                        'original_image' => (string)$metadata['original_image'],
+                    ]);
+                } else {
+                    $check_file($original_path, '_wp_attachment_metadata.original_image', 'original-image', [
+                        'original_image' => (string)$metadata['original_image'],
+                    ]);
+                }
+            }
+
+            $backup_sizes = is_array($metadata['backup_sizes'] ?? null) ? $metadata['backup_sizes'] : [];
+            foreach ($backup_sizes as $backup_name => $backup) {
+                if (!is_array($backup) || !isset($backup['file']) || !is_string($backup['file'])) {
+                    continue;
+                }
+                $backup_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$backup['file']);
+                if ($backup_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment backup-size file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file',
+                        'role' => 'backup-size',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'backup_file' => (string)$backup['file'],
+                    ]);
+                    continue;
+                }
+                $check_file($backup_path, '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file', 'backup-size', [
+                    'backup_size' => (string)$backup_name,
+                    'backup_file' => (string)$backup['file'],
+                ]);
+            }
+        }
+        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress attachment upload inspection');
+        foreach ($upload_owners as $path => $owners_by_attachment) {
+            if (count($owners_by_attachment) < 2) {
+                continue;
+            }
+            ksort($owners_by_attachment, SORT_NUMERIC);
+            $owners = [];
+            foreach ($owners_by_attachment as $owner) {
+                $owner['roles'] = array_values($owner['roles']);
+                $owner['fields'] = array_values($owner['fields']);
+                $owners[] = $owner;
+            }
+            $attachment_ids = array_map(static fn(array $owner): int => (int)$owner['attachment_id'], $owners);
+            $issues['plugin-wp-attachment-upload-duplicate-owner' . "\0" . $path] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'upload:' . $path,
+                'reason' => 'multiple attachments claim the same upload file',
+                'type' => 'plugin-wp-attachment-upload-duplicate-owner',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'files' => [$path],
+                'validator' => 'forkpress-wordpress-core-attachment-uploads@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-attachment-upload-ownership',
+                    'file' => $path,
+                ],
+                'manual_review_reason' => 'WordPress attachment metadata assigns one upload file to multiple attachments.',
+                'suggested_action' => 'Review the attachment rows and metadata, then keep one owner or create distinct upload files before accepting the merged state.',
+                'candidate' => [
+                    'upload_file' => $path,
+                    'attachment_ids' => $attachment_ids,
+                    'owners' => $owners,
+                ],
+            ];
+        }
+        return $issues;
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_collect_wordpress_attachment_upload_findings(
+    string $target_db,
+    string $target_root,
+    ?string $target_before_db = null,
+    ?string $target_before_root = null
+): array {
+    $current_issues = cow_merge_wordpress_attachment_upload_issues($target_db, $target_root);
+    if ($current_issues === []) {
+        return [];
+    }
+    $before_issues = [];
+    if (
+        is_string($target_before_db)
+        && $target_before_db !== ''
+        && is_file($target_before_db)
+        && is_string($target_before_root)
+        && $target_before_root !== ''
+        && is_dir($target_before_root)
+    ) {
+        $before_issues = cow_merge_wordpress_attachment_upload_issues($target_before_db, $target_before_root);
+    }
+    return array_values(array_diff_key($current_issues, $before_issues));
+}
+
 function cow_merge_collect_wordpress_semantic_findings(
     string $target_db,
     ?string $target_before_db = null,
@@ -9515,6 +10380,12 @@ function cow_merge_collect_wordpress_semantic_findings(
         cow_merge_collect_wordpress_duplicate_user_login_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_global_styles_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_site_editor_object_findings($target_db, $target_before_db),
+        is_string($target_root) ? cow_merge_collect_wordpress_attachment_upload_findings(
+            $target_db,
+            $target_root,
+            $target_before_db,
+            $target_before_root
+        ) : [],
         cow_merge_wordpress_block_asset_findings($target_db, $target_root, $target_before_root)
     );
 }
@@ -19642,7 +20513,7 @@ function cow_merge_table_rows(
         }
 
         if ($base_row !== null && $source_row === null && cow_merge_row_values_equal($target_row, $base_row, $row_columns)) {
-            $wp_delete_reference_violation = cow_merge_wordpress_delete_reference_violation($source, $target, $meta, $source_branch, $table, $base_row);
+            $wp_delete_reference_violation = cow_merge_wordpress_delete_reference_violation($base, $source, $target, $meta, $source_branch, $table, $base_row);
             if ($wp_delete_reference_violation !== null) {
                 if (cow_merge_record_row_target_constraint(
                     $meta,

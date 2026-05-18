@@ -36,6 +36,11 @@ Recent additions in the current merge-reliability work:
   `wp_template_part` rows with the same theme object key. These stay
   reviewable with WordPress-scoped audit payloads, while preexisting duplicate
   template keys do not block unrelated source templates.
+- Built-in WordPress semantic validation now cross-checks attachment upload
+  metadata against the merged filesystem. A source-side generated-file delete
+  that leaves `_wp_attachment_metadata` pointing at the missing derivative is
+  held as a WordPress-scoped review conflict, and preexisting missing generated
+  files on target do not block unrelated merges.
 - `tests/cow/wp_semantic_validator.php` now includes a built-in WordPress term
   route validator case where source and target create taxonomy terms with the
   same taxonomy, parent, and slug. Newly introduced duplicates stay reviewable,
@@ -48,6 +53,23 @@ Recent additions in the current merge-reliability work:
   graph validator case where a deleted CPT row leaves plugin custom-table JSON,
   serialized PHP, and option references stale. The merge stays reviewable and
   plugin-scoped audit output identifies both stale graph owners.
+- Source deletes of core WordPress owner rows are now held when target-edited
+  dependent rows still point at them, including posts/postmeta, posts/comments,
+  users/usermeta, users/comments, terms/term taxonomy, terms/termmeta,
+  comments/commentmeta, and threaded comment parents. The target remains
+  coherent before review instead of deleting the owner row and relying on a
+  later missing-owner validator finding.
+- Attachment deletes are also held when the target branch adds or edits
+  `_thumbnail_id` postmeta that points at the attachment. This covers the common
+  featured-image reference stored as a metadata value rather than an owner
+  column.
+- Source page and attachment deletes are held when the target branch changes
+  scalar WordPress options that point at them, currently `page_on_front`,
+  `page_for_posts`, and `site_icon`.
+- Source post, term, and menu-item deletes are held when target-edited nav menu
+  metadata points at them through `_menu_item_object_id` or
+  `_menu_item_menu_item_parent`, with type-aware sibling metadata checks to
+  avoid conflating taxonomy IDs with post IDs.
 - Reviewed table rebuild conflicts now retain rebuild-plan evidence for direct
   source indexes/triggers, dependent views, and dependent view triggers.
   `tests/cow/schema_review.php` proves dependency-only source drift returns the
@@ -61,6 +83,23 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress semantic validator now scans `block.json` `file:`
   references in active plugins and records review conflicts when a merge leaves
   standard block metadata pointing at a missing or unsafe plugin asset.
+- The built-in WordPress attachment upload validator now rejects upload
+  metadata paths after normalization if they escape `wp-content/uploads`, so
+  generated-size metadata such as `../../../../database/.ht.sqlite` cannot be
+  treated as a valid managed database file.
+- The built-in WordPress attachment upload validator now also rejects upload
+  metadata paths that resolve to symlinks or other non-regular filesystem
+  entries, so generated-size metadata cannot satisfy an attachment reference by
+  pointing at a special upload entry.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when multiple attachment rows claim the same regular upload file,
+  so duplicate ownership is caught even without a plugin media validator.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when a safe `_wp_attachment_metadata.file` path disagrees with the
+  safe `_wp_attached_file` path for the same attachment.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when an image attachment has a safe `_wp_attached_file` upload path
+  but no `_wp_attachment_metadata` row.
 
 | Objective item | Evidence on trunk | Remaining gap |
 | --- | --- | --- |
@@ -146,7 +185,7 @@ metadata, `core/image`/`core/gallery`/`core/file`/`core/media-text`/
 and serialized payloads without rewrite.
 It also includes page/postmeta, child page, revision, user, comment, threaded
 comment, taxonomy term, reusable block, synced pattern, navigation block,
-template part, template, menu, attachment, and option edit/delete conflict cases that must stay reviewable and
+template part, template, menu, attachment, media block page, and option edit/delete conflict cases that must stay reviewable and
 keep the target deletion until review. The page/postmeta case covers the
 `wp_posts` row and its `wp_postmeta` graph, the child page case covers a deleted
 child `wp_posts` row while preserving the unchanged parent page, the revision
@@ -161,10 +200,15 @@ the deleted `wp_template_part` row and target page cleanup, the template case co
 the deleted `wp_template` row and target page template assignment cleanup, the menu case covers menu
 terms, taxonomy rows, menu item posts, menu item metadata, relationships, and
 theme-mod location cleanup, the attachment case covers the DB and file graph,
+the media block page case covers a deleted page plus `core/audio`,
+`core/cover`, and `core/video` attachment rows, attachment metadata, and upload
+files,
 and the option cases cover JSON and serialized `wp_options` rows plus global
 front/posts page singleton, serialized sticky-post, and scalar site-icon option
 disagreements, plus serialized theme-mod custom-logo and media-image widget
-and nav-menu widget disagreements, that must stay reviewable.
+media/audio/video/gallery widgets, pages widget exclusions, nav-menu widget,
+nav-menu auto-add, content-bearing widgets, and menu-location disagreements,
+that must stay reviewable.
 
 For filesystem merge behavior, including binary changes and conflicts, safe
 relative symlinks, unsafe absolute/root-escaping/self-referential/managed-path
@@ -278,7 +322,11 @@ pointing at deleted `post_parent` rows, posts or attachments left pointing at
 deleted `post_author` users, postmeta rows left pointing at deleted posts,
 usermeta rows left pointing at deleted users, and nav menu items left pointing
 at deleted parent menu items or deleted pages, plus featured-image postmeta left pointing at deleted
-attachments/files and `core/audio`, `core/cover`, `core/file`, `core/image`,
+attachments/files, target-added or target-edited `_thumbnail_id` metadata
+pointing at source-deleted attachments, target-edited `page_on_front`,
+`page_for_posts`, or `site_icon` options pointing at source-deleted objects,
+target-edited `_menu_item_object_id` or `_menu_item_menu_item_parent` metadata
+pointing at source-deleted menu objects, and `core/audio`, `core/cover`, `core/file`, `core/image`,
   `core/video`, `core/media-text`, or `core/gallery` block JSON left pointing at
 deleted attachments/files from content-bearing custom post types as well as
 posts/pages, `core/query` block JSON including `taxQuery` and `core/latest-posts` filters left pointing at deleted author
