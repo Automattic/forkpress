@@ -5,6 +5,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -19,6 +21,10 @@ use forkpress_core::{
     read_site_manifest, validate_branch_name, write_site_manifest,
 };
 use forkpress_runtime::{PortableRuntime, run_php_script};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 
 mod remote;
 pub use remote::{
@@ -1117,14 +1123,9 @@ fn record_cow_merge_base_snapshot(
     remove_sqlite_file_and_sidecars(&tmp_db)?;
     hot_copy_sqlite_database(layout, runtime, shared, source_db, &tmp_db)
         .with_context(|| format!("failed to capture merge base for branch '{branch}'"))?;
-    remove_sqlite_file_and_sidecars(&dest)?;
-    fs::rename(&tmp_db, &dest).with_context(|| {
-        format!(
-            "failed to publish merge base snapshot {} to {}",
-            tmp_db.display(),
-            dest.display()
-        )
-    })?;
+    remove_sqlite_sidecars(&dest)?;
+    publish_file_atomically(&tmp_db, &dest, "merge base snapshot")?;
+    remove_sqlite_sidecars(&dest)?;
     Ok(())
 }
 
@@ -1169,16 +1170,7 @@ fn record_cow_file_merge_base_snapshot(
         args.iter().map(|arg| arg.as_os_str()),
     )
     .with_context(|| format!("failed to capture filesystem merge base for branch '{branch}'"))?;
-    if dest.exists() {
-        fs::remove_file(&dest).with_context(|| format!("failed to replace {}", dest.display()))?;
-    }
-    fs::rename(&tmp, &dest).with_context(|| {
-        format!(
-            "failed to publish filesystem merge base {} to {}",
-            tmp.display(),
-            dest.display()
-        )
-    })?;
+    publish_file_atomically(&tmp, &dest, "filesystem merge base")?;
     Ok(())
 }
 
@@ -3456,6 +3448,71 @@ fn sqlite_sidecar_path(db: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn publish_file_atomically(tmp: &Path, dest: &Path, label: &str) -> Result<()> {
+    atomic_replace_file(tmp, dest).with_context(|| {
+        format!(
+            "failed to publish {label} {} to {}",
+            tmp.display(),
+            dest.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+    fs::rename(tmp, dest)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+    let tmp_wide: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let dest_wide: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        MoveFileExW(
+            tmp_wide.as_ptr(),
+            dest_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        return Err(std::io::Error::last_os_error()).context("MoveFileExW failed");
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn atomic_replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        bail!(
+            "atomic replacement is not implemented for this platform and destination exists: {}",
+            dest.display()
+        );
+    }
+    fs::rename(tmp, dest)?;
+    Ok(())
+}
+
+fn remove_sqlite_sidecars(db: &Path) -> Result<()> {
+    for path in [
+        sqlite_sidecar_path(db, "-wal"),
+        sqlite_sidecar_path(db, "-shm"),
+    ] {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {
+                fs::remove_file(&path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+            Ok(_) => bail!("{} is not a regular SQLite sidecar file", path.display()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("failed to inspect {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn remove_sqlite_file_and_sidecars(db: &Path) -> Result<()> {
     for path in [
         db.to_path_buf(),
@@ -4163,6 +4220,80 @@ fn path_bytes(path: &Path) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_publish_preserves_existing_destination_on_publish_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-atomic-publish-failure-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let dest = root.join("base.sqlite");
+        let missing_tmp = root.join(".base.tmp");
+        fs::write(&dest, b"previous base").unwrap();
+
+        let error = publish_file_atomically(&missing_tmp, &dest, "test snapshot")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("failed to publish test snapshot"));
+        assert_eq!(fs::read(&dest).unwrap(), b"previous base");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_publish_replaces_existing_destination_without_predelete() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-atomic-publish-success-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let dest = root.join("file-base.json");
+        let tmp = root.join(".file-base.tmp.json");
+        fs::write(&dest, br#"{"old":true}"#).unwrap();
+        fs::write(&tmp, br#"{"new":true}"#).unwrap();
+
+        publish_file_atomically(&tmp, &dest, "test file base").unwrap();
+
+        assert_eq!(fs::read(&dest).unwrap(), br#"{"new":true}"#);
+        assert!(!path_exists_no_follow(&tmp));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn merge_base_sidecar_cleanup_does_not_remove_existing_main_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-atomic-merge-base-sidecars-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let dest = root.join("feature.sqlite");
+        let missing_tmp = root.join(".feature.merge-base.tmp.sqlite");
+        fs::write(&dest, b"previous sqlite base").unwrap();
+        fs::write(sqlite_sidecar_path(&dest, "-wal"), b"stale wal").unwrap();
+        fs::write(sqlite_sidecar_path(&dest, "-shm"), b"stale shm").unwrap();
+
+        remove_sqlite_sidecars(&dest).unwrap();
+        let result = publish_file_atomically(&missing_tmp, &dest, "merge base snapshot");
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"previous sqlite base");
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(&dest, "-wal")));
+        assert!(!path_exists_no_follow(&sqlite_sidecar_path(&dest, "-shm")));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn reset_rollback_reports_restore_outcome() {

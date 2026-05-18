@@ -90,6 +90,11 @@ The PHP merge suite covers these rollback classes:
   `forkpress branch merge`, verifies the pending filesystem crash recovery
   blocks retries, restores both DB and files through public recovery, and
   reruns the public merge successfully.
+- Post-merge and Git-created-branch DB/filesystem merge-base snapshots are
+  published through atomic replace helpers. Focused storage and Git-server
+  tests prove an existing snapshot is not removed if the replacement publish
+  fails before the new file becomes visible, and that stale SQLite sidecars can
+  be cleaned without deleting the main merge-base snapshot.
 
 The Git server suite covers these publication classes:
 
