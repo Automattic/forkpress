@@ -85,6 +85,28 @@ try {
     $target_band = cow_merge_allocate_autoincrement_bands($target, $metadata, 'feature-target');
     assert_same($source_band['allocated'], 2, 'source branch allocates AUTOINCREMENT bands for posts and options');
     assert_same($target_band['allocated'], 2, 'target branch allocates independent AUTOINCREMENT bands for posts and options');
+    $source_birth_validation = cow_merge_validate_branch_birth_metadata($source, $metadata, 'feature-source');
+    assert_same($source_birth_validation['status'], 'validated', 'branch birth metadata validation accepts complete ID-band and plain-IPK skip metadata');
+    assert_same($source_birth_validation['plain_integer_primary_key_tables'], 2, 'branch birth metadata validation counts non-bandable plain INTEGER PRIMARY KEY plugin tables');
+
+    $missing_plain_skip = $tmp . '/missing-plain-skip.sqlite';
+    $missing_plain_skip_metadata = $tmp . '/.forkpress/cow/merge/missing-plain-skip-metadata.sqlite';
+    copy($base, $missing_plain_skip);
+    cow_merge_allocate_autoincrement_bands($missing_plain_skip, $missing_plain_skip_metadata, 'feature-missing-plain-skip');
+    $missing_plain_skip_meta = open_db($missing_plain_skip_metadata);
+    $missing_plain_skip_meta->exec("DELETE FROM merge_decisions WHERE decision = 'id-band-skipped' AND table_name = 'plugin_plain_ipk_implicit'");
+    $missing_plain_skip_meta->close();
+    $missing_plain_skip_error = null;
+    try {
+        cow_merge_validate_branch_birth_metadata($missing_plain_skip, $missing_plain_skip_metadata, 'feature-missing-plain-skip');
+    } catch (Throwable $e) {
+        $missing_plain_skip_error = $e->getMessage();
+    }
+    assert_true(
+        is_string($missing_plain_skip_error) &&
+            str_contains($missing_plain_skip_error, 'plain INTEGER PRIMARY KEY skip decision for plugin_plain_ipk_implicit'),
+        'branch birth metadata validation rejects missing plain INTEGER PRIMARY KEY skip audit decisions'
+    );
 
     $source_db = open_db($source);
     $source_db->exec("INSERT INTO wp_posts (post_title, post_content, post_status) VALUES ('Source page', 'Source content', 'publish')");

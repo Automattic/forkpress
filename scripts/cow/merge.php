@@ -5301,6 +5301,27 @@ function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, stri
     ];
 }
 
+function cow_merge_has_plain_integer_primary_key_skip(SQLite3 $meta, string $branch, string $table): bool {
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT 1 FROM merge_decisions d ' .
+        'JOIN merge_runs r ON r.id = d.run_id ' .
+        'WHERE r.source_branch = :branch_name ' .
+        "AND r.policy = 'autoincrement-id-band-allocation' " .
+        "AND r.status = 'id_bands_allocated' " .
+        "AND d.decision = 'id-band-skipped' " .
+        'AND d.table_name = :table_name ' .
+        'LIMIT 1',
+        'failed to prepare plain INTEGER PRIMARY KEY skip lookup'
+    );
+    cow_merge_bind($stmt, ':branch_name', $branch);
+    cow_merge_bind($stmt, ':table_name', $table);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up plain INTEGER PRIMARY KEY skip');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize plain INTEGER PRIMARY KEY skip lookup');
+    return (bool)$row;
+}
+
 function cow_merge_autoincrement_id_band_violation(
     SQLite3 $meta,
     string $source_branch,
@@ -6440,18 +6461,24 @@ function cow_merge_validate_branch_birth_metadata(
     $db = cow_merge_open_db($db_path, SQLITE3_OPEN_READONLY);
     $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READONLY);
     try {
-        foreach (['merge_autoincrement_bands', 'merge_row_identities'] as $table) {
+        foreach (['merge_runs', 'merge_decisions', 'merge_autoincrement_bands', 'merge_row_identities'] as $table) {
             if (!cow_merge_audit_has_table($meta, $table)) {
                 throw new RuntimeException("merge metadata database is missing required table $table");
             }
         }
 
         $autoincrement_tables = cow_merge_autoincrement_tables($db);
+        $plain_integer_primary_key_tables = cow_merge_plain_integer_primary_key_tables($db);
         $keyless_tables = cow_merge_keyless_tables($db);
         $missing = [];
         foreach ($autoincrement_tables as $table) {
             if (cow_merge_lookup_autoincrement_band($meta, $branch, $table) === null) {
                 $missing[] = "AUTOINCREMENT ID band for $table";
+            }
+        }
+        foreach ($plain_integer_primary_key_tables as $table) {
+            if (!cow_merge_has_plain_integer_primary_key_skip($meta, $branch, $table)) {
+                $missing[] = "plain INTEGER PRIMARY KEY skip decision for $table";
             }
         }
 
@@ -6478,6 +6505,7 @@ function cow_merge_validate_branch_birth_metadata(
             'status' => 'validated',
             'branch' => $branch,
             'autoincrement_tables' => count($autoincrement_tables),
+            'plain_integer_primary_key_tables' => count($plain_integer_primary_key_tables),
             'keyless_tables' => count($keyless_tables),
             'keyless_rows' => $keyless_rows,
         ];
