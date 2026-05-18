@@ -498,6 +498,58 @@ pub fn create_cow_branch_from_tree(
     seed_branch: Option<&str>,
     url_hint: Option<(String, String)>,
 ) -> Result<()> {
+    let copy_mode = if cow_branch_copies_require_cow(layout)? {
+        TreeCloneMode::RequireCow
+    } else {
+        TreeCloneMode::AllowCopyFallback
+    };
+    create_cow_branch_from_tree_with_copy_mode(
+        layout,
+        runtime,
+        shared,
+        branch,
+        source,
+        source_label,
+        seed_branch,
+        url_hint,
+        copy_mode,
+    )
+}
+
+pub fn create_cow_branch_from_external_tree(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    source: &Path,
+    source_label: &str,
+    seed_branch: Option<&str>,
+    url_hint: Option<(String, String)>,
+) -> Result<()> {
+    create_cow_branch_from_tree_with_copy_mode(
+        layout,
+        runtime,
+        shared,
+        branch,
+        source,
+        source_label,
+        seed_branch,
+        url_hint,
+        TreeCloneMode::AllowCopyFallback,
+    )
+}
+
+fn create_cow_branch_from_tree_with_copy_mode(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    source: &Path,
+    source_label: &str,
+    seed_branch: Option<&str>,
+    url_hint: Option<(String, String)>,
+    copy_mode: TreeCloneMode,
+) -> Result<()> {
     validate_branch_name(branch)?;
     let file_view = read_site_manifest(layout)?
         .and_then(|manifest| manifest.file_view)
@@ -538,11 +590,7 @@ pub fn create_cow_branch_from_tree(
     let source_db = cow_sqlite_db_path(source);
     let mut staging_published = false;
     let create_result = (|| -> Result<()> {
-        if cow_branch_copies_require_cow(layout)? {
-            copy_tree_cow_required(source, &staging)?;
-        } else {
-            copy_tree_cow(source, &staging)?;
-        }
+        copy_tree_cow_mode(source, &staging, copy_mode)?;
 
         run_cow_bootstrap_script(layout, runtime, shared, &staging, "ForkPress", "admin")?;
         if !source_db.is_file() {

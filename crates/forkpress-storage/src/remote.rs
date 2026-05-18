@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::create_cow_branch_from_tree;
+use crate::create_cow_branch_from_external_tree;
 
 const REMOTE_SITE_MANIFEST_VERSION: u32 = 1;
 
@@ -245,7 +245,7 @@ pub fn branch_remote_site(
             cache.cache_root.display()
         );
     }
-    create_cow_branch_from_tree(
+    create_cow_branch_from_external_tree(
         layout,
         runtime,
         shared,
