@@ -10861,12 +10861,13 @@ function cow_merge_audit_revalidation_class_filter(?string $value): ?string {
         'compatible-schema-index-target-drift',
         'compatible-schema-view-target-drift',
         'compatible-schema-trigger-target-drift',
+        'compatible-schema-table-target-drift',
         'missing',
         'incompatible',
         'replacement-evidence',
         'unclassified',
     ], true)) {
-        throw new InvalidArgumentException('--revalidation-class must be unchanged, compatible-target-drift, compatible-source-drift, compatible-schema-index-target-drift, compatible-schema-view-target-drift, compatible-schema-trigger-target-drift, missing, incompatible, replacement-evidence, or unclassified');
+        throw new InvalidArgumentException('--revalidation-class must be unchanged, compatible-target-drift, compatible-source-drift, compatible-schema-index-target-drift, compatible-schema-view-target-drift, compatible-schema-trigger-target-drift, compatible-schema-table-target-drift, missing, incompatible, replacement-evidence, or unclassified');
     }
     return $value;
 }
