@@ -432,9 +432,13 @@ root and records plugin-scoped conflicts when attachment metadata references
 missing original or generated upload files, plus WordPress comment-reference
 validators for comments or commentmeta left pointing at deleted posts, users,
 parent comments, or comments. A WooCommerce HPOS-shaped fixture covers a real
-plugin graph: order addresses, order items, itemmeta, cached order options, and
-`_product_id` metadata that must point at `wp_wc_product_meta_lookup`. Missing
-order and product lookup rows produce plugin-scoped review conflicts grouped by
-WooCommerce logical identity. Plugin validator reruns also cover changed source
-evidence and changed first-class `logical_identity` evidence returning reviewed
-findings to `needs-action` as replacement evidence.
+plugin graph: order addresses, order metadata, order items, itemmeta, cached
+order options, and `_product_id` metadata that must point at
+`wp_wc_product_meta_lookup`. Missing order and product lookup rows produce
+plugin-scoped review conflicts grouped by WooCommerce logical identity. A
+Gravity Forms-shaped fixture covers plugin schema stored in JSON: `wp_gf_entry`
+metadata whose field key points at a field removed from
+`wp_gf_form_meta.display_meta` stays reviewable and is filterable by form-field
+logical identity. Plugin validator reruns also cover changed source evidence
+and changed first-class `logical_identity` evidence returning reviewed findings
+to `needs-action` as replacement evidence.

@@ -5387,6 +5387,44 @@ function cow_merge_lookup_autoincrement_band(SQLite3 $meta, string $branch, stri
     ];
 }
 
+function cow_merge_autoincrement_band_ranges(SQLite3 $meta, string $branch, string $table): array {
+    $ranges = [];
+    $band = cow_merge_lookup_autoincrement_band($meta, $branch, $table);
+    if ($band !== null) {
+        $ranges[] = $band;
+    }
+
+    $stmt = cow_merge_prepare_checked(
+        $meta,
+        'SELECT d.source_payload FROM merge_decisions d ' .
+        'JOIN merge_runs r ON r.id = d.run_id ' .
+        'WHERE r.source_branch = :branch_name ' .
+        "AND r.policy = 'autoincrement-id-band-allocation' " .
+        "AND r.status = 'id_bands_allocated' " .
+        "AND d.decision IN ('id-band-allocated', 'id-band-reused') " .
+        'AND d.table_name = :table_name ' .
+        'ORDER BY d.id',
+        'failed to prepare AUTOINCREMENT band range lookup'
+    );
+    cow_merge_bind($stmt, ':branch_name', $branch);
+    cow_merge_bind($stmt, ':table_name', $table);
+    $res = cow_merge_execute_checked($stmt, $meta, 'failed to look up AUTOINCREMENT band ranges');
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $payload = cow_merge_decode_payload_json((string)($row['source_payload'] ?? ''), 'AUTOINCREMENT band decision');
+        if (!is_array($payload) || !isset($payload['band_start'], $payload['band_end'], $payload['band_size'])) {
+            continue;
+        }
+        $ranges[] = [
+            'band_start' => (int)$payload['band_start'],
+            'band_end' => (int)$payload['band_end'],
+            'band_size' => (int)$payload['band_size'],
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize AUTOINCREMENT band range lookup');
+
+    return $ranges;
+}
+
 function cow_merge_has_plain_integer_primary_key_skip(SQLite3 $meta, string $branch, string $table): bool {
     $stmt = cow_merge_prepare_checked(
         $meta,
@@ -5418,8 +5456,8 @@ function cow_merge_autoincrement_id_band_violation(
     if (count($pk_cols) !== 1) {
         return null;
     }
-    $band = cow_merge_lookup_autoincrement_band($meta, $source_branch, $table);
-    if ($band === null) {
+    $ranges = cow_merge_autoincrement_band_ranges($meta, $source_branch, $table);
+    if (!$ranges) {
         return null;
     }
     $pk_col = $pk_cols[0];
@@ -5431,11 +5469,16 @@ function cow_merge_autoincrement_id_band_violation(
         return null;
     }
     $id = (int)$value;
-    $band_start = (int)$band['band_start'];
-    $band_end = (int)$band['band_end'];
-    if ($id >= $band_start && $id <= $band_end) {
-        return null;
+    foreach ($ranges as $band) {
+        $band_start = (int)$band['band_start'];
+        $band_end = (int)$band['band_end'];
+        if ($id >= $band_start && $id <= $band_end) {
+            return null;
+        }
     }
+    $current = cow_merge_lookup_autoincrement_band($meta, $source_branch, $table);
+    $band_start = $current !== null ? (int)$current['band_start'] : (int)$ranges[0]['band_start'];
+    $band_end = $current !== null ? (int)$current['band_end'] : (int)$ranges[0]['band_end'];
     return "source inserted explicit AUTOINCREMENT id $id outside reserved branch band $band_start-$band_end";
 }
 
@@ -6957,7 +7000,7 @@ function cow_merge_allocate_autoincrement_bands(
             if (
                 $existing !== null
                 && $current_floor >= ((int)$existing['band_start']) - 1
-                && $current_floor <= (int)$existing['band_end']
+                && $current_floor < (int)$existing['band_end']
             ) {
                 $band_start = (int)$existing['band_start'];
                 $band_end = (int)$existing['band_end'];

@@ -215,6 +215,12 @@ function create_woocommerce_hpos_validator_db(string $path): void {
         address_type TEXT NOT NULL,
         first_name TEXT NOT NULL
     )");
+    $db->exec("CREATE TABLE wp_wc_orders_meta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
     $db->exec("CREATE TABLE wp_woocommerce_order_items (
         order_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id INTEGER NOT NULL,
@@ -241,11 +247,49 @@ function create_woocommerce_hpos_validator_db(string $path): void {
     $db->exec("INSERT INTO wp_wc_order_addresses (id, order_id, address_type, first_name) VALUES (21, 20, 'billing', 'Base')");
     $db->exec("INSERT INTO wp_woocommerce_order_items (order_item_id, order_id, order_item_name, order_item_type) VALUES (22, 20, 'Base product', 'line_item')");
     $db->exec("INSERT INTO wp_woocommerce_order_itemmeta (meta_id, order_item_id, meta_key, meta_value) VALUES (23, 22, '_product_id', '100')");
+    $db->exec("INSERT INTO wp_wc_orders_meta (id, order_id, meta_key, meta_value) VALUES (24, 20, '_forkpress_note', 'Base note')");
     $db->exec("INSERT INTO wp_wc_product_meta_lookup (product_id, sku) VALUES (100, 'base-product')");
     $recent_orders = json_encode(['recent_order_ids' => [20]], JSON_UNESCAPED_SLASHES);
     $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('woocommerce_recent_order_ids', :value, 'yes')");
     $stmt->bindValue(':value', $recent_orders, SQLITE3_TEXT);
     $stmt->execute();
+    $db->close();
+}
+
+function create_gravity_forms_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_gf_form (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1
+    )");
+    $db->exec("CREATE TABLE wp_gf_form_meta (
+        form_id INTEGER PRIMARY KEY,
+        display_meta TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_gf_entry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        form_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active'
+    )");
+    $db->exec("CREATE TABLE wp_gf_entry_meta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        form_id INTEGER NOT NULL,
+        entry_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
+    $db->exec("INSERT INTO wp_gf_form (id, title, is_active) VALUES (30, 'Contact', 1)");
+    $display_meta = json_encode([
+        'fields' => [
+            ['id' => 5, 'label' => 'Name', 'type' => 'text'],
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare('INSERT INTO wp_gf_form_meta (form_id, display_meta) VALUES (30, :display_meta)');
+    $stmt->bindValue(':display_meta', $display_meta, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->exec("INSERT INTO wp_gf_entry (id, form_id, status) VALUES (40, 30, 'active')");
+    $db->exec("INSERT INTO wp_gf_entry_meta (id, form_id, entry_id, meta_key, meta_value) VALUES (41, 30, 40, '5', 'Base field value')");
     $db->close();
 }
 
@@ -2488,6 +2532,14 @@ while ($row = $addresses->fetchArray(SQLITE3_ASSOC)) {
         'first_name' => (string)$row['first_name'],
     ]);
 }
+$order_metas = $db->query('SELECT id, order_id, meta_key, meta_value FROM wp_wc_orders_meta ORDER BY id');
+while ($row = $order_metas->fetchArray(SQLITE3_ASSOC)) {
+    $check_order((int)$row['order_id'], 'order-meta:' . (int)$row['id'], ['wp_wc_orders', 'wp_wc_orders_meta'], [
+        'order_meta_id' => (int)$row['id'],
+        'meta_key' => (string)$row['meta_key'],
+        'meta_value' => (string)$row['meta_value'],
+    ]);
+}
 $items = $db->query('SELECT order_item_id, order_id, order_item_name FROM wp_woocommerce_order_items ORDER BY order_item_id');
 while ($row = $items->fetchArray(SQLITE3_ASSOC)) {
     $check_order((int)$row['order_id'], 'order-item:' . (int)$row['order_item_id'], ['wp_wc_orders', 'wp_woocommerce_order_items'], [
@@ -2587,6 +2639,7 @@ PHP);
 
     $db = open_db($woocommerce_target);
     $db->exec("UPDATE wp_wc_order_addresses SET first_name = 'Target' WHERE id = 21");
+    $db->exec("UPDATE wp_wc_orders_meta SET meta_value = 'Target note' WHERE id = 24");
     $db->exec("UPDATE wp_woocommerce_order_items SET order_item_name = 'Target product' WHERE order_item_id = 22");
     $db->exec("INSERT INTO wp_wc_product_meta_lookup (product_id, sku) VALUES (200, 'target-product')");
     $db->exec("UPDATE wp_woocommerce_order_itemmeta SET meta_value = '200' WHERE meta_id = 23");
@@ -2610,9 +2663,10 @@ PHP);
 
     assert_same($woocommerce_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds orphaned order graphs for review');
     assert_same((int)($woocommerce_result['plugin_validators'] ?? 0), 1, 'WooCommerce HPOS validator is discovered from mu-plugins during merge');
-    assert_same((int)($woocommerce_result['plugin_validator_conflicts'] ?? 0), 4, 'WooCommerce HPOS validator records address, item, itemmeta, and option order graph conflicts');
+    assert_same((int)($woocommerce_result['plugin_validator_conflicts'] ?? 0), 5, 'WooCommerce HPOS validator records address, meta, item, itemmeta, and option order graph conflicts');
     assert_same((int)scalar($woocommerce_target, 'SELECT COUNT(*) FROM wp_wc_orders WHERE id = 20'), 0, 'WooCommerce HPOS validator leaves the source order delete staged for review');
     assert_same(scalar($woocommerce_target, 'SELECT first_name FROM wp_wc_order_addresses WHERE id = 21'), 'Target', 'WooCommerce HPOS validator preserves target address edits for review');
+    assert_same(scalar($woocommerce_target, 'SELECT meta_value FROM wp_wc_orders_meta WHERE id = 24'), 'Target note', 'WooCommerce HPOS validator preserves target order metadata edits for review');
     assert_same(scalar($woocommerce_target, 'SELECT order_item_name FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 'Target product', 'WooCommerce HPOS validator preserves target order item edits for review');
     assert_same(scalar($woocommerce_target, 'SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23'), '200', 'WooCommerce HPOS validator preserves target itemmeta edits for review');
     $woocommerce_option = json_decode((string)scalar($woocommerce_target, "SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_recent_order_ids'"), true);
@@ -2625,7 +2679,7 @@ PHP);
         'plugin' => 'woocommerce',
         'conflict_type' => 'plugin-woocommerce-hpos-missing-order',
     ]);
-    assert_same(count($woocommerce_audit['conflicts']), 4, 'WooCommerce HPOS validator exposes every stale order reference as plugin audit conflicts');
+    assert_same(count($woocommerce_audit['conflicts']), 5, 'WooCommerce HPOS validator exposes every stale order reference as plugin audit conflicts');
     $woocommerce_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $woocommerce_audit['conflicts']));
     assert_true(str_contains($woocommerce_preview, '"order_id":20'), 'WooCommerce HPOS audit includes the missing order ID');
     $woocommerce_objects = [];
@@ -2636,8 +2690,8 @@ PHP);
     sort($woocommerce_objects);
     assert_same(
         $woocommerce_objects,
-        ['option:woocommerce_recent_order_ids:0', 'order-address:21', 'order-item:22', 'order-itemmeta:23'],
-        'WooCommerce HPOS audit exposes the stale address, item, itemmeta, and cached option objects'
+        ['option:woocommerce_recent_order_ids:0', 'order-address:21', 'order-item:22', 'order-itemmeta:23', 'order-meta:24'],
+        'WooCommerce HPOS audit exposes the stale address, meta, item, itemmeta, and cached option objects'
     );
     $woocommerce_logical_identity_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
         'scope' => 'plugin',
@@ -2645,7 +2699,7 @@ PHP);
         'plugin' => 'woocommerce',
         'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'shop_order', 'order_id' => 20], JSON_UNESCAPED_SLASHES),
     ]);
-    assert_same(count($woocommerce_logical_identity_audit['conflicts']), 4, 'WooCommerce HPOS audit filters conflicts by plugin logical order identity');
+    assert_same(count($woocommerce_logical_identity_audit['conflicts']), 5, 'WooCommerce HPOS audit filters conflicts by plugin logical order identity');
     $woocommerce_group_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
@@ -2662,7 +2716,7 @@ PHP);
             $woocommerce_order_group_count += $conflict_count;
         }
     }
-    assert_same($woocommerce_order_group_count, 4, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
+    assert_same($woocommerce_order_group_count, 5, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
 
     $woocommerce_product_base_root = $tmp . '/woocommerce-product-base';
     $woocommerce_product_source_root = $tmp . '/woocommerce-product-source';
@@ -2787,6 +2841,130 @@ PHP);
         'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'order_item', 'order_item_id' => 22], JSON_UNESCAPED_SLASHES),
     ]);
     assert_same(count($woocommerce_itemmeta_logical_identity_audit['conflicts']), 1, 'WooCommerce HPOS audit filters stale itemmeta findings by plugin logical order-item identity');
+
+    $gravity_base_root = $tmp . '/gravity-base';
+    $gravity_source_root = $tmp . '/gravity-source';
+    $gravity_target_root = $tmp . '/gravity-target';
+    $gravity_base = $gravity_base_root . '/wp-content/database/.ht.sqlite';
+    $gravity_source = $gravity_source_root . '/wp-content/database/.ht.sqlite';
+    $gravity_target = $gravity_target_root . '/wp-content/database/.ht.sqlite';
+    $gravity_metadata = $tmp . '/.forkpress/cow/merge/plugin-gravity-validator-metadata.sqlite';
+    $gravity_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-gravity-validator.json';
+
+    mkdir($gravity_base_root . '/wp-content/database', 0777, true);
+    create_gravity_forms_validator_db($gravity_base);
+    write_test_file($gravity_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$forms = [];
+$form_meta = $db->query('SELECT form_id, display_meta FROM wp_gf_form_meta ORDER BY form_id');
+while ($row = $form_meta->fetchArray(SQLITE3_ASSOC)) {
+    $payload = json_decode((string)$row['display_meta'], true);
+    $field_ids = [];
+    if (is_array($payload)) {
+        foreach (($payload['fields'] ?? []) as $field) {
+            if (is_array($field) && array_key_exists('id', $field)) {
+                $field_ids[(string)(int)$field['id']] = true;
+            }
+        }
+    }
+    $forms[(int)$row['form_id']] = $field_ids;
+}
+$entry_meta = $db->query('SELECT id, form_id, entry_id, meta_key, meta_value FROM wp_gf_entry_meta ORDER BY id');
+while ($row = $entry_meta->fetchArray(SQLITE3_ASSOC)) {
+    $form_id = (int)$row['form_id'];
+    $field_id = (int)$row['meta_key'];
+    if ((string)$field_id !== (string)$row['meta_key']) {
+        continue;
+    }
+    if (isset($forms[$form_id][(string)$field_id])) {
+        continue;
+    }
+    $findings[] = [
+        'plugin' => 'gravityforms',
+        'object' => 'entry-meta:' . (int)$row['id'] . ':field:' . $field_id,
+        'reason' => 'Gravity Forms entry metadata references a field removed from the form definition',
+        'type' => 'plugin-gravityforms-missing-field-definition',
+        'tables' => ['wp_gf_form_meta', 'wp_gf_entry_meta'],
+        'validator' => 'gravityforms-field-map@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'gravityforms',
+            'kind' => 'form_field',
+            'form_id' => $form_id,
+            'field_id' => $field_id,
+        ],
+        'candidate' => [
+            'entry_meta_id' => (int)$row['id'],
+            'entry_id' => (int)$row['entry_id'],
+            'form_id' => $form_id,
+            'field_id' => $field_id,
+            'meta_value' => (string)$row['meta_value'],
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($gravity_base_root, $gravity_source_root);
+    copy_tree_for_test($gravity_base_root, $gravity_target_root);
+    cow_merge_capture_file_base($gravity_base_root, $gravity_file_base);
+    cow_merge_allocate_autoincrement_bands($gravity_source, $gravity_metadata, 'feature-plugin-gravity-source');
+    cow_merge_allocate_autoincrement_bands($gravity_target, $gravity_metadata, 'main');
+
+    $db = open_db($gravity_source);
+    $display_meta_without_field = json_encode(['fields' => []], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare('UPDATE wp_gf_form_meta SET display_meta = :display_meta WHERE form_id = 30');
+    $stmt->bindValue(':display_meta', $display_meta_without_field, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $db = open_db($gravity_target);
+    $db->exec("UPDATE wp_gf_entry_meta SET meta_value = 'Target edited field value' WHERE id = 41");
+    $db->close();
+
+    $gravity_result = cow_merge_branch_state(
+        $gravity_base,
+        $gravity_source,
+        $gravity_target,
+        $gravity_metadata,
+        'feature-plugin-gravity-source',
+        'main',
+        $gravity_file_base,
+        $gravity_source_root,
+        $gravity_target_root
+    );
+
+    assert_same($gravity_result['status'], 'completed_with_conflicts', 'Gravity Forms validator holds entry metadata for removed form fields for review');
+    assert_same((int)($gravity_result['plugin_validators'] ?? 0), 1, 'Gravity Forms field-map validator is discovered from mu-plugins during merge');
+    assert_same((int)($gravity_result['plugin_validator_conflicts'] ?? 0), 1, 'Gravity Forms validator records the stale entry metadata field reference');
+    $gravity_display_meta = json_decode((string)scalar($gravity_target, 'SELECT display_meta FROM wp_gf_form_meta WHERE form_id = 30'), true);
+    assert_same($gravity_display_meta['fields'] ?? null, [], 'Gravity Forms validator leaves the source form field removal staged for review');
+    assert_same(scalar($gravity_target, 'SELECT meta_value FROM wp_gf_entry_meta WHERE id = 41'), 'Target edited field value', 'Gravity Forms validator preserves target entry metadata edits for review');
+
+    $gravity_audit = cow_merge_audit_report($gravity_metadata, (int)$gravity_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'gravityforms',
+        'conflict_type' => 'plugin-gravityforms-missing-field-definition',
+    ]);
+    assert_same(count($gravity_audit['conflicts']), 1, 'Gravity Forms audit exposes stale field-definition entry metadata as a plugin conflict');
+    $gravity_payload = cow_merge_decode_payload_json((string)($gravity_audit['conflicts'][0]['chosen_payload'] ?? ''), 'Gravity Forms field-map validator payload');
+    assert_same($gravity_payload['object'] ?? null, 'entry-meta:41:field:5', 'Gravity Forms audit identifies the stale entry metadata field');
+    assert_same($gravity_payload['candidate']['form_id'] ?? null, 30, 'Gravity Forms audit includes the form ID');
+    assert_same($gravity_payload['candidate']['field_id'] ?? null, 5, 'Gravity Forms audit includes the removed field ID');
+
+    $gravity_logical_identity_audit = cow_merge_audit_report($gravity_metadata, (int)$gravity_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'gravityforms',
+        'plugin_logical_identity' => json_encode(['plugin' => 'gravityforms', 'kind' => 'form_field', 'form_id' => 30, 'field_id' => 5], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($gravity_logical_identity_audit['conflicts']), 1, 'Gravity Forms audit filters stale field findings by plugin logical form-field identity');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'
