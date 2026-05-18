@@ -54,6 +54,35 @@ function run_php_code_env(string $code, array $env): array {
 
 require_once __DIR__ . '/../../scripts/cow/git_server.php';
 
+echo "=== COW Git atomic merge-base publication ===\n";
+
+$atomic_tmp = sys_get_temp_dir() . '/forkpress-cow-git-atomic-publish-' . getmypid() . '-' . bin2hex(random_bytes(4));
+mkdir($atomic_tmp, 0777, true);
+$atomic_db = $atomic_tmp . '/feature.sqlite';
+$atomic_missing_tmp = $atomic_tmp . '/.feature.tmp.sqlite';
+file_put_contents($atomic_db, 'previous git-created DB base');
+file_put_contents($atomic_db . '-wal', 'stale wal');
+file_put_contents($atomic_db . '-shm', 'stale shm');
+cow_git_remove_sqlite_sidecars($atomic_db);
+$atomic_failed = false;
+try {
+    cow_git_publish_file_atomically($atomic_missing_tmp, $atomic_db, 'test merge base snapshot');
+} catch (Throwable $e) {
+    $atomic_failed = str_contains($e->getMessage(), 'failed to publish test merge base snapshot');
+}
+assert_true($atomic_failed, 'Git merge-base atomic publish reports missing replacement failures');
+assert_same(file_get_contents($atomic_db), 'previous git-created DB base', 'Git merge-base atomic publish keeps the existing DB base after failure');
+assert_true(!file_exists($atomic_db . '-wal'), 'Git merge-base sidecar cleanup removes stale WAL without deleting the main base');
+assert_true(!file_exists($atomic_db . '-shm'), 'Git merge-base sidecar cleanup removes stale SHM without deleting the main base');
+$atomic_file_base = $atomic_tmp . '/feature.json';
+$atomic_file_tmp = $atomic_tmp . '/.feature.tmp.json';
+file_put_contents($atomic_file_base, '{"old":true}');
+file_put_contents($atomic_file_tmp, '{"new":true}');
+cow_git_publish_file_atomically($atomic_file_tmp, $atomic_file_base, 'test filesystem merge base');
+assert_same(file_get_contents($atomic_file_base), '{"new":true}', 'Git filesystem merge-base atomic publish replaces the old file base');
+assert_true(!file_exists($atomic_file_tmp), 'Git filesystem merge-base atomic publish consumes the temporary file');
+cow_git_remove_tree($atomic_tmp);
+
 echo "=== COW Git created-branch cleanup ===\n";
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-created-branch-cleanup-' . getmypid() . '-' . bin2hex(random_bytes(4));

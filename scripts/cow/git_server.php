@@ -585,11 +585,9 @@ function cow_git_capture_created_branch_db_merge_base(string $merge_dir, string 
     $tmp = dirname($dest) . '/.' . $branch . '.merge-base-' . getmypid() . '-' . bin2hex(random_bytes(4)) . '.sqlite';
     cow_git_remove_sqlite_file_and_sidecars($tmp);
     cow_merge_backup_sqlite_db($source_db, $tmp);
-    cow_git_remove_sqlite_file_and_sidecars($dest);
-    if (!@rename($tmp, $dest)) {
-        cow_git_remove_sqlite_file_and_sidecars($tmp);
-        throw new \RuntimeException("failed to publish merge base snapshot for git-created branch '$branch'");
-    }
+    cow_git_remove_sqlite_sidecars($dest);
+    cow_git_publish_file_atomically($tmp, $dest, "merge base snapshot for git-created branch '$branch'");
+    cow_git_remove_sqlite_sidecars($dest);
 }
 
 function cow_git_capture_created_branch_file_merge_base(string $merge_dir, string $branch, string $source_root): void {
@@ -600,18 +598,26 @@ function cow_git_capture_created_branch_file_merge_base(string $merge_dir, strin
         @unlink($tmp);
     }
     cow_merge_capture_file_base($source_root, $tmp);
-    if (file_exists($dest) && !@unlink($dest)) {
-        @unlink($tmp);
-        throw new \RuntimeException("failed to replace filesystem merge base for git-created branch '$branch'");
-    }
+    cow_git_publish_file_atomically($tmp, $dest, "filesystem merge base for git-created branch '$branch'");
+}
+
+function cow_git_publish_file_atomically(string $tmp, string $dest, string $description): void {
     if (!@rename($tmp, $dest)) {
         @unlink($tmp);
-        throw new \RuntimeException("failed to publish filesystem merge base for git-created branch '$branch'");
+        throw new \RuntimeException("failed to publish $description");
     }
 }
 
 function cow_git_remove_sqlite_file_and_sidecars(string $path): void {
     foreach ([$path, $path . '-wal', $path . '-shm', $path . '-journal'] as $candidate) {
+        if (file_exists($candidate) || is_link($candidate)) {
+            @unlink($candidate);
+        }
+    }
+}
+
+function cow_git_remove_sqlite_sidecars(string $path): void {
+    foreach ([$path . '-wal', $path . '-shm', $path . '-journal'] as $candidate) {
         if (file_exists($candidate) || is_link($candidate)) {
             @unlink($candidate);
         }
