@@ -431,9 +431,12 @@ WordPress media-shaped mu-plugin validator that inspects the candidate target
 root and records plugin-scoped conflicts when attachment metadata references
 missing original or generated upload files, plus WordPress comment-reference
 validators for comments or commentmeta left pointing at deleted posts, users,
-parent comments, or comments. A WooCommerce HPOS-shaped fixture covers a real
-plugin graph: order addresses, order metadata, order items, itemmeta, cached
-order options, and `_product_id` metadata that must point at
+parent comments, or comments. WordPress semantic fixtures also cover term
+taxonomy count coherence by flagging a staged custom-taxonomy
+`wp_term_relationships` change that leaves `wp_term_taxonomy.count` stale. A
+WooCommerce HPOS-shaped fixture covers a real plugin graph: order addresses,
+order metadata, order items, itemmeta, cached order options, and `_product_id`
+metadata that must point at
 `wp_wc_product_meta_lookup`. Missing order and product lookup rows produce
 plugin-scoped review conflicts grouped by WooCommerce logical identity. A
 Gravity Forms-shaped fixture covers plugin schema stored in JSON: `wp_gf_entry`

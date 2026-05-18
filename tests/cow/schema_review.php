@@ -1533,6 +1533,66 @@ SQL);
         'invalid trigger-body view rewrite leaves the target trigger runnable before review'
     );
 
+    $view_rewrite_dropped_trigger_base = $tmp . '/view-rewrite-dropped-trigger-base.sqlite';
+    $view_rewrite_dropped_trigger_source = $tmp . '/view-rewrite-dropped-trigger-source.sqlite';
+    $view_rewrite_dropped_trigger_target = $tmp . '/view-rewrite-dropped-trigger-target.sqlite';
+    $view_rewrite_dropped_trigger_metadata = $tmp . '/.forkpress/cow/merge/schema-view-rewrite-dropped-trigger-metadata.sqlite';
+
+    $db = open_db($view_rewrite_dropped_trigger_base);
+    $db->exec('CREATE TABLE plugin_view_rewrite_dropped_trigger_items (item_id TEXT PRIMARY KEY, legacy_label TEXT NOT NULL, modern_label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_view_rewrite_dropped_trigger_items (item_id, legacy_label, modern_label) VALUES ('view-dropped-trigger', 'Legacy dropped trigger', 'Modern dropped trigger')");
+    $db->exec('CREATE VIEW plugin_view_rewrite_dropped_trigger_visible AS SELECT item_id, legacy_label AS label FROM plugin_view_rewrite_dropped_trigger_items');
+    $db->exec('CREATE TABLE plugin_view_rewrite_dropped_trigger_events (item_id TEXT PRIMARY KEY)');
+    $db->exec('CREATE TABLE plugin_view_rewrite_dropped_trigger_audit (item_id TEXT, label TEXT)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_view_rewrite_dropped_trigger_events_insert
+AFTER INSERT ON plugin_view_rewrite_dropped_trigger_events
+BEGIN
+    INSERT INTO plugin_view_rewrite_dropped_trigger_audit (item_id, label)
+    SELECT NEW.item_id, label FROM plugin_view_rewrite_dropped_trigger_visible WHERE item_id = NEW.item_id;
+END
+SQL);
+    $db->close();
+    copy($view_rewrite_dropped_trigger_base, $view_rewrite_dropped_trigger_source);
+    copy($view_rewrite_dropped_trigger_base, $view_rewrite_dropped_trigger_target);
+
+    $source_db = open_db($view_rewrite_dropped_trigger_source);
+    $source_db->exec('DROP TRIGGER plugin_view_rewrite_dropped_trigger_events_insert');
+    $source_db->exec('DROP VIEW plugin_view_rewrite_dropped_trigger_visible');
+    $source_db->exec('CREATE VIEW plugin_view_rewrite_dropped_trigger_visible AS SELECT item_id, modern_label FROM plugin_view_rewrite_dropped_trigger_items');
+    $source_db->close();
+
+    $view_rewrite_dropped_trigger_result = cow_merge_databases(
+        $view_rewrite_dropped_trigger_base,
+        $view_rewrite_dropped_trigger_source,
+        $view_rewrite_dropped_trigger_target,
+        $view_rewrite_dropped_trigger_metadata,
+        'feature-schema-view-rewrite-dropped-trigger',
+        'main'
+    );
+    $view_rewrite_dropped_trigger_run_id = (int)$view_rewrite_dropped_trigger_result['run_id'];
+    assert_same($view_rewrite_dropped_trigger_result['status'], 'completed', 'source-changed view applies automatically when source also drops the invalidating target trigger');
+    assert_same(
+        (int)scalar($view_rewrite_dropped_trigger_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $view_rewrite_dropped_trigger_run_id AND conflict_type IN ('schema-source-changed-view', 'schema-source-dropped-trigger')"),
+        0,
+        'dropped trigger dependency creates no review-only schema conflict for the source-changed view'
+    );
+    assert_same(
+        (int)scalar($view_rewrite_dropped_trigger_target, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'plugin_view_rewrite_dropped_trigger_events_insert'"),
+        0,
+        'source-dropped trigger dependency is removed before validating the source-changed view'
+    );
+    assert_same(
+        scalar($view_rewrite_dropped_trigger_target, "SELECT modern_label FROM plugin_view_rewrite_dropped_trigger_visible WHERE item_id = 'view-dropped-trigger'"),
+        'Modern dropped trigger',
+        'source-changed view remains queryable after its dropped trigger dependency is planned first'
+    );
+    assert_same(
+        (int)scalar($view_rewrite_dropped_trigger_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE run_id = $view_rewrite_dropped_trigger_run_id AND column_name IN ('plugin_view_rewrite_dropped_trigger_visible', 'plugin_view_rewrite_dropped_trigger_events_insert') AND decision = 'source-applied'"),
+        2,
+        'source-changed view and source-dropped trigger dependency are both audited as source-applied decisions'
+    );
+
     $view_rewrite_source_table_base = $tmp . '/view-rewrite-source-table-base.sqlite';
     $view_rewrite_source_table_source = $tmp . '/view-rewrite-source-table-source.sqlite';
     $view_rewrite_source_table_target = $tmp . '/view-rewrite-source-table-target.sqlite';
