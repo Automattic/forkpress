@@ -44,6 +44,7 @@ export default defineConfig({
 					items: [
 						{ label: 'Branching', slug: 'docs/branching' },
 						{ label: 'Merging', slug: 'docs/merging' },
+						{ label: 'Plugin validator recipes', slug: 'docs/plugin-validator-recipes' },
 						{ label: 'Git workflow', slug: 'docs/git-workflow' },
 						{ label: 'Agents', slug: 'docs/agents' },
 					],
