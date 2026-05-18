@@ -1376,6 +1376,70 @@ SQL);
         'automatically rewritten source view is queryable after merge'
     );
 
+    $view_rewrite_trigger_body_base = $tmp . '/view-rewrite-trigger-body-base.sqlite';
+    $view_rewrite_trigger_body_source = $tmp . '/view-rewrite-trigger-body-source.sqlite';
+    $view_rewrite_trigger_body_target = $tmp . '/view-rewrite-trigger-body-target.sqlite';
+    $view_rewrite_trigger_body_metadata = $tmp . '/.forkpress/cow/merge/schema-view-rewrite-trigger-body-metadata.sqlite';
+
+    $db = open_db($view_rewrite_trigger_body_base);
+    $db->exec('CREATE TABLE plugin_view_rewrite_trigger_body_items (item_id TEXT PRIMARY KEY, legacy_label TEXT NOT NULL, modern_label TEXT NOT NULL)');
+    $db->exec("INSERT INTO plugin_view_rewrite_trigger_body_items (item_id, legacy_label, modern_label) VALUES ('view-trigger-body', 'Legacy label', 'Modern label')");
+    $db->exec('CREATE VIEW plugin_view_rewrite_trigger_body_visible AS SELECT item_id, legacy_label AS label FROM plugin_view_rewrite_trigger_body_items');
+    $db->exec('CREATE TABLE plugin_view_rewrite_trigger_body_events (item_id TEXT PRIMARY KEY)');
+    $db->exec('CREATE TABLE plugin_view_rewrite_trigger_body_audit (item_id TEXT, label TEXT)');
+    $db->exec(<<<'SQL'
+CREATE TRIGGER plugin_view_rewrite_trigger_body_events_insert
+AFTER INSERT ON plugin_view_rewrite_trigger_body_events
+BEGIN
+    INSERT INTO plugin_view_rewrite_trigger_body_audit (item_id, label)
+    SELECT NEW.item_id, label FROM plugin_view_rewrite_trigger_body_visible WHERE item_id = NEW.item_id;
+END
+SQL);
+    $db->close();
+    copy($view_rewrite_trigger_body_base, $view_rewrite_trigger_body_source);
+    copy($view_rewrite_trigger_body_base, $view_rewrite_trigger_body_target);
+
+    $source_db = open_db($view_rewrite_trigger_body_source);
+    $source_db->exec('DROP VIEW plugin_view_rewrite_trigger_body_visible');
+    $source_db->exec('CREATE VIEW plugin_view_rewrite_trigger_body_visible AS SELECT item_id, modern_label FROM plugin_view_rewrite_trigger_body_items');
+    $source_db->close();
+
+    $view_rewrite_trigger_body_result = cow_merge_databases(
+        $view_rewrite_trigger_body_base,
+        $view_rewrite_trigger_body_source,
+        $view_rewrite_trigger_body_target,
+        $view_rewrite_trigger_body_metadata,
+        'feature-schema-view-rewrite-trigger-body',
+        'main'
+    );
+    $view_rewrite_trigger_body_run_id = (int)$view_rewrite_trigger_body_result['run_id'];
+    assert_same($view_rewrite_trigger_body_result['status'], 'completed_with_conflicts', 'source-changed view stays reviewable when target trigger body would become invalid');
+    assert_same(
+        (int)scalar($view_rewrite_trigger_body_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE run_id = $view_rewrite_trigger_body_run_id AND column_name = 'plugin_view_rewrite_trigger_body_visible' AND conflict_type = 'schema-source-changed-view'"),
+        1,
+        'invalid trigger-body view rewrite records a source-changed view conflict'
+    );
+    $view_rewrite_trigger_body_payload = cow_merge_decode_payload_json(
+        (string)scalar($view_rewrite_trigger_body_metadata, "SELECT source_payload FROM merge_conflicts WHERE run_id = $view_rewrite_trigger_body_run_id AND column_name = 'plugin_view_rewrite_trigger_body_visible' ORDER BY id DESC LIMIT 1"),
+        'schema view trigger-body source conflict payload'
+    );
+    assert_true(
+        str_contains((string)($view_rewrite_trigger_body_payload['validation_error'] ?? ''), 'plugin_view_rewrite_trigger_body_events_insert'),
+        'invalid trigger-body view rewrite payload names the dependent target trigger'
+    );
+    assert_true(
+        str_contains((string)scalar($view_rewrite_trigger_body_target, "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'plugin_view_rewrite_trigger_body_visible'"), 'legacy_label AS label'),
+        'invalid trigger-body view rewrite leaves the target view unchanged before review'
+    );
+    $target_db = open_db($view_rewrite_trigger_body_target);
+    $target_db->exec("INSERT INTO plugin_view_rewrite_trigger_body_events (item_id) VALUES ('view-trigger-body')");
+    $target_db->close();
+    assert_same(
+        scalar($view_rewrite_trigger_body_target, "SELECT label FROM plugin_view_rewrite_trigger_body_audit WHERE item_id = 'view-trigger-body'"),
+        'Legacy label',
+        'invalid trigger-body view rewrite leaves the target trigger runnable before review'
+    );
+
     $view_rewrite_source_table_base = $tmp . '/view-rewrite-source-table-base.sqlite';
     $view_rewrite_source_table_source = $tmp . '/view-rewrite-source-table-source.sqlite';
     $view_rewrite_source_table_target = $tmp . '/view-rewrite-source-table-target.sqlite';

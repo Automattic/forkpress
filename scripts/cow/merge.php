@@ -12359,9 +12359,11 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
         fn(array $dependency): string => (string)$dependency['name'],
         array_filter($dependencies, fn(array $dependency): bool => (string)($dependency['type'] ?? '') === 'trigger')
     );
-    $dependent_trigger_bodies = $source_sql === null
-        ? cow_merge_table_dependent_triggers($target, $view, $dependent_trigger_names)
-        : [];
+    $dependent_trigger_bodies = cow_merge_trigger_body_dependencies(
+        $target,
+        array_merge([['name' => $view]], $dependent_views),
+        $dependent_trigger_names
+    );
     if ($source_sql === null && $dependent_views) {
         $names = implode(', ', array_map(fn($dependency) => (string)$dependency['name'], $dependent_views));
         throw new InvalidArgumentException("source view drop resolution cannot leave dependent target views invalid: $names");
@@ -12431,6 +12433,9 @@ function cow_merge_apply_source_view_schema_resolution(SQLite3 $target, string $
             cow_merge_validate_views($target, [['name' => $view, 'sql' => $source_sql]], 'post-view-resolution');
         }
         cow_merge_validate_views($target, $dependent_views, 'post-view-resolution');
+        foreach ($dependent_trigger_bodies as $dependency) {
+            cow_merge_validate_schema_dependency_program($target, $dependency, 'view schema resolution');
+        }
         cow_merge_release_savepoint_checked($target, 'forkpress_view_resolution', 'source view schema resolution');
         $target_savepoint_started = false;
     } catch (Throwable $e) {
