@@ -154,7 +154,8 @@ function create_wp_post_parent_reference_db(string $path): void {
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
         (37, 'Deleted parent page', '<!-- wp:paragraph --><p>Parent page</p><!-- /wp:paragraph -->', 'publish', 'page', 'deleted-parent-page', 0),
         (38, 'Child page', '<!-- wp:paragraph --><p>Child page</p><!-- /wp:paragraph -->', 'publish', 'page', 'child-page', 37),
-        (39, 'Child attachment', '', 'inherit', 'attachment', 'child-attachment', 37)");
+        (39, 'Child attachment', '', 'inherit', 'attachment', 'child-attachment', 37),
+        (40, 'Child revision', '<!-- wp:paragraph --><p>Revision</p><!-- /wp:paragraph -->', 'inherit', 'revision', '37-revision-v1', 37)");
     $db->close();
 }
 
@@ -1353,6 +1354,7 @@ PHP);
     $db = open_db($post_parent_target);
     $db->exec("UPDATE wp_posts SET post_title = 'Target child page still pointing at deleted parent' WHERE ID = 38");
     $db->exec("UPDATE wp_posts SET post_title = 'Target child attachment still pointing at deleted parent' WHERE ID = 39");
+    $db->exec("UPDATE wp_posts SET post_title = 'Target child revision still pointing at deleted parent' WHERE ID = 40");
     $db->close();
 
     $post_parent_result = cow_merge_branch_state(
@@ -1369,21 +1371,23 @@ PHP);
 
     assert_same($post_parent_result['status'], 'completed_with_conflicts', 'WordPress post-parent validator holds missing parent posts for review');
     assert_same((int)($post_parent_result['plugin_validators'] ?? 0), 1, 'WordPress post-parent validator is discovered from mu-plugins during merge');
-    assert_same((int)($post_parent_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress post-parent validator records missing parent references for child posts and attachments');
+    assert_same((int)($post_parent_result['plugin_validator_conflicts'] ?? 0), 3, 'WordPress post-parent validator records missing parent references for child posts, attachments, and revisions');
     assert_same((int)scalar($post_parent_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 37'), 0, 'WordPress post-parent validator leaves the source parent deletion staged for review');
     assert_same(scalar($post_parent_target, 'SELECT post_title FROM wp_posts WHERE ID = 38'), 'Target child page still pointing at deleted parent', 'WordPress post-parent validator preserves the target child page edit');
     assert_same(scalar($post_parent_target, 'SELECT post_title FROM wp_posts WHERE ID = 39'), 'Target child attachment still pointing at deleted parent', 'WordPress post-parent validator preserves the target child attachment edit');
+    assert_same(scalar($post_parent_target, 'SELECT post_title FROM wp_posts WHERE ID = 40'), 'Target child revision still pointing at deleted parent', 'WordPress post-parent validator preserves the target child revision edit');
 
     $post_parent_audit = cow_merge_audit_report($post_parent_metadata, (int)$post_parent_result['run_id'], 10, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-post-parent-missing-reference',
     ]);
-    assert_same(count($post_parent_audit['conflicts']), 2, 'WordPress post-parent validator exposes missing parents as plugin-scoped audit conflicts');
+    assert_same(count($post_parent_audit['conflicts']), 3, 'WordPress post-parent validator exposes missing parents as plugin-scoped audit conflicts');
     $post_parent_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $post_parent_audit['conflicts']));
     assert_true(str_contains($post_parent_preview, '"missing_parent_id":37'), 'WordPress post-parent audit includes the missing parent ID');
     assert_true(str_contains($post_parent_preview, '"field":"post_parent"'), 'WordPress post-parent audit includes the stale field name');
     assert_true(str_contains($post_parent_preview, '"post_type":"attachment"'), 'WordPress post-parent audit includes attachment children');
+    assert_true(str_contains($post_parent_preview, '"post_type":"revision"'), 'WordPress post-parent audit includes revision children');
 
     $duplicate_page_base_root = $tmp . '/duplicate-page-route-base';
     $duplicate_page_source_root = $tmp . '/duplicate-page-route-source';
