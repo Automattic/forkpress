@@ -11,6 +11,11 @@ Plugin validators are the intended boundary: plugins should be able to inspect
 a merged candidate and either confirm that their object graph is coherent or
 return reviewable conflicts.
 
+For concrete plugin graph recipes, including WooCommerce HPOS-style orders,
+Gravity Forms-style field maps, ACF field definitions, Elementor widget JSON,
+Yoast indexables, and Events Calendar caches, see
+[Plugin Validator Recipes](./plugin-validator-recipes.md).
+
 ## Contract
 
 A validator should be deterministic and side-effect free. It receives:
