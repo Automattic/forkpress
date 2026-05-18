@@ -165,10 +165,12 @@ define('NONCE_SALT',       'forkpress-s4-xxxxxxxxxxxxxxxxxxxxx');
 define('WP_DEBUG', true);
 define('WP_DEBUG_LOG', '__DEBUG_LOG__');
 define('WP_DEBUG_DISPLAY', false);
-define('DISALLOW_FILE_MODS', true);
+define('FS_METHOD', 'direct');
+define('DISALLOW_FILE_MODS', false);
+define('DISALLOW_FILE_EDIT', true);
 define('WP_AUTO_UPDATE_CORE', false);
 define('AUTOMATIC_UPDATER_DISABLED', true);
-define('WP_HTTP_BLOCK_EXTERNAL', true);
+define('WP_HTTP_BLOCK_EXTERNAL', false);
 if (!defined('DISABLE_WP_CRON')) {
     define('DISABLE_WP_CRON', true);
 }
