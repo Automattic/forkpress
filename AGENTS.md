@@ -60,7 +60,7 @@ The issue #2 workflow is Git/worktree based:
 - `forkpress commit` stages, commits, and pushes a worktree.
 - Each checkout includes `database.sql` as a read-only branch DB snapshot.
 
-## Local Git Sandbox Permissions
+## Codex `.git` Sandbox Repair
 
 Known Codex-only failure mode: default sandbox sessions may start with a
 restrictive `umask` and create local Git object directories without execute
@@ -71,6 +71,8 @@ repository database .git/objects` during `fetch`, `commit`, or `push`.
 Treat these `.git` permission failures as Codex sandbox damage first. They are
 not evidence of a ForkPress Git, merge, release, or CI regression unless the
 same failure reproduces outside the default Codex sandbox permissions state.
+This has happened before; do the repair below before investigating product
+code.
 
 Before commands that write Git objects or create test temp trees, use:
 
@@ -79,14 +81,26 @@ umask 0022
 ```
 
 If a checkout is already affected, repair only that checkout's local Git
-directory. Use `git rev-parse --git-dir` because linked worktrees may store
-`.git` as a file that points somewhere else:
+metadata. Use both `git rev-parse --git-dir` and `git rev-parse
+--git-common-dir` because linked worktrees keep per-worktree state in one
+directory and shared objects/refs in another. In a materialized bare repository,
+run the same commands from inside that bare repository:
 
 ```bash
 git_dir="$(git rev-parse --git-dir)"
-find "$git_dir" -type d -exec chmod 755 {} +
-find "$git_dir" -type f -exec chmod u+rw {} +
+git_common_dir="$(git rev-parse --git-common-dir)"
+for dir in "$git_dir" "$git_common_dir"; do
+    find "$dir" -type d -exec chmod u+rwx,go+rx {} +
+    find "$dir" -type f -exec chmod u+rw,go+r {} +
+done
 ```
+
+For a linked worktree, run the snippet from the worktree root. For a bare or
+materialized repository, run it from the bare repository directory itself. If
+`git rev-parse` cannot run because the permissions are too broken, identify the
+checkout's `.git` file/directory and common gitdir manually, repair those
+directories with the same `find ... chmod ...` commands, then rerun
+`git rev-parse`.
 
 Do not reset the repository, rewrite history, delete worktrees, or revert
 unrelated work to fix this. Do not patch ForkPress Git/merge code for this
