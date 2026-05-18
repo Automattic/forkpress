@@ -191,6 +191,27 @@ log_step() {
   echo "==> $*"
 }
 
+branch_storage_artifact_roots() {
+  printf '%s\n' "$WORK"
+  if [ -d "$WORK_DIR/macos-cow/mount/branches" ]; then
+    printf '%s\n' "$WORK_DIR/macos-cow/mount/branches"
+  fi
+  if [ -d "$WORK_DIR/linux-xfs/mount" ]; then
+    find "$WORK_DIR/linux-xfs/mount" -path '*/branches' -type d -print
+  fi
+}
+
+branch_storage_artifact_exists() {
+  local pattern="$1"
+  local root
+  while IFS= read -r root; do
+    if find "$root" -maxdepth 1 -name "$pattern" | grep -q .; then
+      return 0
+    fi
+  done < <(branch_storage_artifact_roots)
+  return 1
+}
+
 branch_host() {
   if [ "$1" = "main" ]; then
     printf 'wp.localhost:%s' "$PORT"
@@ -1700,7 +1721,7 @@ fi
 "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
 test -f "$WORK/feature-cow/wp-content/cow-git-update-crash.txt"
 grep -F "changed through crashed existing branch git update" "$WORK/feature-cow/wp-content/cow-git-update-crash.txt" >/dev/null
-if ! find "$WORK" -maxdepth 1 -name '.forkpress-update-backup-feature-cow-*' | grep -q .; then
+if ! branch_storage_artifact_exists '.forkpress-update-backup-feature-cow-*'; then
   echo "existing-branch Git update crash did not leave the expected rollback backup artifact" >&2
   exit 1
 fi
@@ -1712,7 +1733,7 @@ printf "changed through retried existing branch git update\n" > "$TMP/checkout/w
 "$BIN" commit "$TMP/checkout" --message "retry existing branch Git update after crash" > "$TMP/git-existing-http-update-crash-retry.out" 2>&1
 test -f "$WORK/feature-cow/wp-content/cow-git-update-crash.txt"
 grep -F "changed through retried existing branch git update" "$WORK/feature-cow/wp-content/cow-git-update-crash.txt" >/dev/null
-if find "$WORK" -maxdepth 1 -name '.forkpress-update-*' | grep -q .; then
+if branch_storage_artifact_exists '.forkpress-update-*'; then
   echo "retry after existing-branch Git update crash left stale update artifacts" >&2
   exit 1
 fi
