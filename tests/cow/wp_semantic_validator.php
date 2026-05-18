@@ -4742,10 +4742,11 @@ PHP);
 
     assert_same($option_result['status'], 'completed_with_conflicts', 'WordPress option reference validator holds missing option objects for review');
     assert_same((int)($option_result['plugin_validators'] ?? 0), 1, 'WordPress option reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 9, 'WordPress option reference validator records only unguarded missing pages, posts, widgets, and option refs');
+    assert_same((int)($option_result['plugin_validator_conflicts'] ?? 0), 6, 'WordPress option reference validator records only unguarded missing pages, posts, widgets, and option refs');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (90, 91, 92)'), 0, 'WordPress option reference validator leaves unguarded source object deletions staged for review');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 93'), 1, 'WordPress option owner guard keeps target-edited attachment option refs before validation');
     assert_same((int)scalar($option_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 94'), 1, 'WordPress option owner guard keeps target-edited nav menu option refs before validation');
+    assert_same((int)scalar($option_target, "SELECT COUNT(*) FROM wp_term_taxonomy WHERE term_id = 94 AND taxonomy = 'nav_menu'"), 1, 'WordPress option owner guard keeps target-edited nav menu taxonomy rows before validation');
 
     $option_theme_mods_value = scalar($option_target, "SELECT option_value FROM wp_options WHERE option_name = 'theme_mods_forkpress_active'");
     $option_theme_mods = is_string($option_theme_mods_value) ? unserialize($option_theme_mods_value) : null;
@@ -4788,15 +4789,15 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-option-missing-object',
     ]);
-    assert_same(count($option_audit['conflicts']), 9, 'WordPress option reference validator exposes remaining missing option objects as plugin-scoped audit conflicts');
+    assert_same(count($option_audit['conflicts']), 6, 'WordPress option reference validator exposes remaining missing option objects as plugin-scoped audit conflicts');
     $option_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $option_audit['conflicts']));
-    foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92', '"missing_object_id":94'] as $needle) {
+    foreach (['"missing_object_id":90', '"missing_object_id":91', '"missing_object_id":92'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"nav_menu"', '"object_type":"widget"'] as $needle) {
+    foreach (['"object_type":"page"', '"object_type":"post"', '"object_type":"widget"'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
-    foreach (['theme_mods_forkpress_active', 'nav_menu_options', 'widget_pages', 'sidebars_widgets', 'widget_rss', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
+    foreach (['theme_mods_forkpress_active', 'widget_pages', 'sidebars_widgets', 'widget_rss', 'page_on_front', 'page_for_posts', 'sticky_posts'] as $needle) {
         assert_true(str_contains($option_preview, $needle), 'WordPress option reference audit includes ' . $needle);
     }
     $option_owner_guard_audit = cow_merge_audit_report($option_metadata, (int)$option_result['run_id'], 10, [

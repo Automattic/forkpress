@@ -6682,6 +6682,33 @@ function cow_merge_wordpress_delete_reference_violation(
             }
         }
     }
+    if ($table === 'wp_term_taxonomy') {
+        $term_id = $base_row['term_id'] ?? null;
+        if (is_int($term_id) || (is_string($term_id) && preg_match('/^-?\d+$/', (string)$term_id))) {
+            $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner($base, $target, 'wp_terms', (int)$term_id);
+            if ($target_option_violation !== null) {
+                return $target_option_violation;
+            }
+        }
+    }
+    if ($table === 'wp_postmeta') {
+        $post_id = $base_row['post_id'] ?? null;
+        if (is_int($post_id) || (is_string($post_id) && preg_match('/^-?\d+$/', (string)$post_id))) {
+            $base_post = cow_merge_wordpress_source_row($base, 'wp_posts', 'ID', (int)$post_id);
+            if (is_array($base_post)) {
+                $target_option_violation = cow_merge_wordpress_target_changed_options_for_deleted_owner(
+                    $base,
+                    $target,
+                    'wp_posts',
+                    (int)$post_id,
+                    (string)($base_post['post_type'] ?? '')
+                );
+                if ($target_option_violation !== null) {
+                    return $target_option_violation;
+                }
+            }
+        }
+    }
     if ($table === 'wp_comments') {
         $comment_id = $base_row['comment_ID'] ?? null;
         if (is_int($comment_id) || (is_string($comment_id) && preg_match('/^-?\d+$/', $comment_id))) {
