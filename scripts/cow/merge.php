@@ -6766,6 +6766,16 @@ function cow_merge_copy_file_entry(string $source_root, string $target_root, str
     if (!is_file($source)) {
         throw new RuntimeException("source filesystem path is not a regular file: $source");
     }
+    $actual_size = filesize($source);
+    $actual_hash = hash_file('sha256', $source);
+    if (
+        !is_int($actual_size)
+        || !is_string($actual_hash)
+        || (int)($entry['size'] ?? -1) !== $actual_size
+        || !hash_equals((string)($entry['sha256'] ?? ''), $actual_hash)
+    ) {
+        throw new RuntimeException("source filesystem file changed while merging: $source");
+    }
     if (is_dir($target) && !is_link($target)) {
         throw new RuntimeException("target filesystem path is a directory: $target");
     }
