@@ -11680,6 +11680,8 @@ function cow_merge_apply_reviewed_resolutions(
         'next_action' => 'apply-reviewed-choice',
     ]);
     $applied = [];
+    $revalidations = [];
+    $skipped = [];
     $errors = [];
     foreach ($audit['conflicts'] as $conflict) {
         $conflict_id = (int)($conflict['id'] ?? 0);
@@ -11687,6 +11689,40 @@ function cow_merge_apply_reviewed_resolutions(
             continue;
         }
         try {
+            $stale_status = (string)($conflict['stale_status'] ?? 'unknown');
+            if (in_array($stale_status, ['stale', 'error'], true)) {
+                $revalidation = cow_merge_revalidate_reviewed_conflicts(
+                    $metadata_db,
+                    isset($conflict['run_id']) ? (int)$conflict['run_id'] : $run_id,
+                    $reviewer,
+                    $conflict_id
+                );
+                $revalidations[] = $revalidation;
+                if ((int)($revalidation['stale'] ?? 0) + (int)($revalidation['errors'] ?? 0) > 0) {
+                    $carried = (int)($revalidation['carried'] ?? 0);
+                    $already_needs_action = (int)($revalidation['already_needs_action'] ?? 0);
+                    if ($carried + $already_needs_action < 1) {
+                        $errors[] = [
+                            'conflict_id' => $conflict_id,
+                            'error' => 'stale validated conflict has no reviewed intent to carry back to needs-action',
+                        ];
+                        break;
+                    }
+                    $skipped[] = [
+                        'conflict_id' => $conflict_id,
+                        'reason' => 'revalidation-required',
+                        'stale_status' => $stale_status,
+                    ];
+                    continue;
+                }
+                if ((int)($revalidation['fresh'] ?? 0) < 1) {
+                    $errors[] = [
+                        'conflict_id' => $conflict_id,
+                        'error' => 'stale preflight revalidation did not produce a fresh or actionable reviewed conflict',
+                    ];
+                    break;
+                }
+            }
             $choice = cow_merge_latest_validated_resolution_choice_from_db($metadata_db, $conflict_id);
             $applied[] = cow_merge_resolve_conflict(
                 $metadata_db,
@@ -11711,8 +11747,12 @@ function cow_merge_apply_reviewed_resolutions(
         'limit' => $limit,
         'eligible' => count($audit['conflicts']),
         'applied' => count($applied),
+        'revalidated' => count($revalidations),
+        'skipped' => count($skipped),
         'status' => $errors === [] ? 'completed' : 'completed_with_errors',
         'resolutions' => $applied,
+        'revalidations' => $revalidations,
+        'skipped_conflicts' => $skipped,
         'errors' => $errors,
     ];
 }
@@ -22447,6 +22487,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
                 echo "  status:    {$result['status']}\n";
                 echo "  eligible:  {$result['eligible']}\n";
                 echo "  applied:   {$result['applied']}\n";
+                echo "  revalidated: {$result['revalidated']}\n";
+                echo "  skipped:   {$result['skipped']}\n";
                 echo "  metadata:  {$result['metadata_db']}\n";
                 if ($result['errors'] !== []) {
                     foreach ($result['errors'] as $error) {
