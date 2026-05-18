@@ -1197,6 +1197,174 @@ try {
         'page-plus-custom-post-type smoke merge audits all target graph inserts'
     );
 
+    $event_base = $tmp . '/event-calendar-base.sqlite';
+    $event_source = $tmp . '/event-calendar-source.sqlite';
+    $event_target = $tmp . '/event-calendar-target.sqlite';
+    $event_metadata = $tmp . '/.forkpress/cow/merge/event-calendar-metadata.sqlite';
+
+    smoke_create_posts_db($event_base);
+    copy($event_base, $event_source);
+    copy($event_base, $event_target);
+
+    $source_event_option = json_encode([
+        'branch' => 'source',
+        'event_id' => 18000302,
+        'venue_id' => 18000300,
+        'organizer_id' => 18000301,
+        'term_taxonomy_id' => 18000310,
+    ], JSON_UNESCAPED_SLASHES);
+    $target_event_option = json_encode([
+        'branch' => 'target',
+        'event_id' => 19000302,
+        'venue_id' => 19000300,
+        'organizer_id' => 19000301,
+        'term_taxonomy_id' => 19000310,
+    ], JSON_UNESCAPED_SLASHES);
+    $source_event_graph = '{"branch":"source","event_id":18000302,"venue_id":18000300,"organizer_id":18000301}';
+    $target_event_graph = '{"branch":"target","event_id":19000302,"venue_id":19000300,"organizer_id":19000301}';
+
+    $db = smoke_open_db($event_source);
+    smoke_insert_post($db, 18000300, 'Branch Event Venue', 'Branch venue address', 'tribe_venue', 'branch-event-venue');
+    smoke_insert_post($db, 18000301, 'Branch Event Organizer', 'Branch organizer contact', 'tribe_organizer', 'branch-event-organizer');
+    smoke_insert_post($db, 18000302, 'Branch Community Event', 'Branch event body', 'tribe_events', 'branch-community-event');
+    smoke_insert_postmeta($db, 18000303, 18000302, '_EventStartDate', '2026-06-01 10:00:00');
+    smoke_insert_postmeta($db, 18000304, 18000302, '_EventEndDate', '2026-06-01 12:00:00');
+    smoke_insert_postmeta($db, 18000305, 18000302, '_EventVenueID', '18000300');
+    smoke_insert_postmeta($db, 18000306, 18000302, '_EventOrganizerID', '18000301');
+    smoke_insert_postmeta($db, 18000307, 18000302, '_EventTimezone', 'America/New_York');
+    smoke_insert_postmeta($db, 18000308, 18000302, '_forkpress_event_graph', $source_event_graph);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (18000309, 'Branch Events Topic', 'branch-events-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (18000310, 18000309, 'tribe_events_cat', 'Branch event category', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (18000302, 18000310, 0)");
+    smoke_insert_option($db, 18000311, 'forkpress_source_event_calendar_index', $source_event_option);
+    $db->close();
+
+    $db = smoke_open_db($event_target);
+    smoke_insert_post($db, 19000300, 'Main Event Venue', 'Main venue address', 'tribe_venue', 'main-event-venue');
+    smoke_insert_post($db, 19000301, 'Main Event Organizer', 'Main organizer contact', 'tribe_organizer', 'main-event-organizer');
+    smoke_insert_post($db, 19000302, 'Main Community Event', 'Main event body', 'tribe_events', 'main-community-event');
+    smoke_insert_postmeta($db, 19000303, 19000302, '_EventStartDate', '2026-07-01 10:00:00');
+    smoke_insert_postmeta($db, 19000304, 19000302, '_EventEndDate', '2026-07-01 12:00:00');
+    smoke_insert_postmeta($db, 19000305, 19000302, '_EventVenueID', '19000300');
+    smoke_insert_postmeta($db, 19000306, 19000302, '_EventOrganizerID', '19000301');
+    smoke_insert_postmeta($db, 19000307, 19000302, '_EventTimezone', 'America/Chicago');
+    smoke_insert_postmeta($db, 19000308, 19000302, '_forkpress_event_graph', $target_event_graph);
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES
+        (19000309, 'Main Events Topic', 'main-events-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES
+        (19000310, 19000309, 'tribe_events_cat', 'Main event category', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES
+        (19000302, 19000310, 0)");
+    smoke_insert_option($db, 19000311, 'forkpress_target_event_calendar_index', $target_event_option);
+    $db->close();
+
+    $event_result = cow_merge_databases($event_base, $event_source, $event_target, $event_metadata, 'feature-smoke-event-calendar', 'main');
+    assert_same($event_result['status'], 'completed', 'branch and main Events Calendar-shaped CPT graph inserts complete cleanly');
+    assert_same((int)($event_result['conflicts'] ?? -1), 0, 'branch and main Events Calendar-shaped CPT graph inserts do not create merge conflicts');
+    assert_same(smoke_scalar($event_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000302'), 'tribe_events', 'merged target includes the branch event CPT row');
+    assert_same(smoke_scalar($event_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000300'), 'tribe_venue', 'merged target includes the branch venue CPT row');
+    assert_same(smoke_scalar($event_target, 'SELECT post_type FROM wp_posts WHERE ID = 18000301'), 'tribe_organizer', 'merged target includes the branch organizer CPT row');
+    assert_same(smoke_scalar($event_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000302 AND meta_key = '_EventVenueID'"), '18000300', 'merged target keeps the branch event venue ID reference');
+    assert_same(smoke_scalar($event_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000302 AND meta_key = '_EventOrganizerID'"), '18000301', 'merged target keeps the branch event organizer ID reference');
+    assert_same(smoke_scalar($event_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 18000302 AND meta_key = '_forkpress_event_graph'"), $source_event_graph, 'merged target includes branch event graph JSON with source IDs');
+    assert_same(smoke_scalar($event_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_source_event_calendar_index'"), $source_event_option, 'merged target includes branch event option JSON with source graph references');
+    assert_same((int)smoke_scalar($event_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 18000302 AND term_taxonomy_id = 18000310'), 1, 'merged target includes the branch event category relationship');
+    assert_same(smoke_scalar($event_target, 'SELECT post_type FROM wp_posts WHERE ID = 19000302'), 'tribe_events', 'merged target preserves the main event CPT row');
+    assert_same(smoke_scalar($event_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 19000302 AND meta_key = '_EventVenueID'"), '19000300', 'merged target keeps the main event venue ID reference');
+    assert_same(smoke_scalar($event_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 19000302 AND meta_key = '_forkpress_event_graph'"), $target_event_graph, 'merged target preserves target event graph JSON with target IDs');
+    assert_same(smoke_scalar($event_target, "SELECT option_value FROM wp_options WHERE option_name = 'forkpress_target_event_calendar_index'"), $target_event_option, 'merged target preserves target event option JSON with target graph references');
+    assert_same(
+        (int)smoke_scalar($event_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships')"),
+        0,
+        'Events Calendar-shaped smoke merge records no WordPress graph conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($event_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'source-applied'"),
+        13,
+        'Events Calendar-shaped smoke merge audits all source graph inserts'
+    );
+    assert_same(
+        (int)smoke_scalar($event_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_terms', 'wp_term_taxonomy', 'wp_term_relationships') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
+        13,
+        'Events Calendar-shaped smoke merge audits all target graph inserts'
+    );
+
+    $event_edit_delete_base = $tmp . '/event-calendar-edit-delete-base.sqlite';
+    $event_edit_delete_source = $tmp . '/event-calendar-edit-delete-source.sqlite';
+    $event_edit_delete_target = $tmp . '/event-calendar-edit-delete-target.sqlite';
+    $event_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/event-calendar-edit-delete-metadata.sqlite';
+
+    smoke_create_posts_db($event_edit_delete_base);
+    $db = smoke_open_db($event_edit_delete_base);
+    smoke_insert_post($db, 17000320, 'Shared Event Venue', 'Shared venue address', 'tribe_venue', 'shared-event-venue');
+    smoke_insert_post($db, 17000321, 'Shared Event Organizer', 'Shared organizer contact', 'tribe_organizer', 'shared-event-organizer');
+    smoke_insert_post($db, 17000322, 'Shared Community Event', 'Shared event body', 'tribe_events', 'shared-community-event');
+    smoke_insert_postmeta($db, 17000323, 17000322, '_EventStartDate', '2026-08-01 10:00:00');
+    smoke_insert_postmeta($db, 17000324, 17000322, '_EventEndDate', '2026-08-01 12:00:00');
+    smoke_insert_postmeta($db, 17000325, 17000322, '_EventVenueID', '17000320');
+    smoke_insert_postmeta($db, 17000326, 17000322, '_EventOrganizerID', '17000321');
+    smoke_insert_postmeta($db, 17000327, 17000322, '_EventTimezone', 'America/Los_Angeles');
+    smoke_insert_postmeta($db, 17000328, 17000322, '_forkpress_event_graph', '{"branch":"base","event_id":17000322,"venue_id":17000320,"organizer_id":17000321}');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (17000329, 'Shared Events Topic', 'shared-events-topic')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (17000330, 17000329, 'tribe_events_cat', 'Shared event category', 0, 1)");
+    $db->exec("INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (17000322, 17000330, 0)");
+    smoke_insert_option($db, 17000331, 'forkpress_shared_event_calendar_index', '{"branch":"base","event_id":17000322,"venue_id":17000320,"organizer_id":17000321,"term_taxonomy_id":17000330}');
+    $db->close();
+    copy($event_edit_delete_base, $event_edit_delete_source);
+    copy($event_edit_delete_base, $event_edit_delete_target);
+
+    $db = smoke_open_db($event_edit_delete_source);
+    $db->exec("UPDATE wp_posts SET post_title = 'Source Edited Community Event', post_content = 'Source edited event body' WHERE ID = 17000322");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '2026-08-01 11:00:00' WHERE meta_id = 17000323");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '{\"branch\":\"source\",\"event_id\":17000322,\"venue_id\":17000320,\"organizer_id\":17000321,\"edited\":true}' WHERE meta_id = 17000328");
+    $db->exec('UPDATE wp_term_relationships SET term_order = 1 WHERE object_id = 17000322 AND term_taxonomy_id = 17000330');
+    smoke_update_option($db, 'forkpress_shared_event_calendar_index', '{"branch":"source","event_id":17000322,"venue_id":17000320,"organizer_id":17000321,"term_taxonomy_id":17000330,"edited":true}');
+    $db->close();
+
+    $db = smoke_open_db($event_edit_delete_target);
+    $db->exec('DELETE FROM wp_term_relationships WHERE object_id = 17000322 AND term_taxonomy_id = 17000330');
+    $db->exec("DELETE FROM wp_options WHERE option_name = 'forkpress_shared_event_calendar_index'");
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 17000322');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 17000322');
+    $db->close();
+
+    $event_edit_delete_result = cow_merge_databases($event_edit_delete_base, $event_edit_delete_source, $event_edit_delete_target, $event_edit_delete_metadata, 'feature-smoke-event-calendar-edit-delete', 'main');
+    assert_same($event_edit_delete_result['status'], 'completed_with_conflicts', 'Events Calendar-shaped edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($event_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 17000322'), 0, 'Events Calendar-shaped edit/delete preserves target event deletion before review');
+    assert_same((int)smoke_scalar($event_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id = 17000322'), 0, 'Events Calendar-shaped edit/delete preserves target event metadata deletion before review');
+    assert_same((int)smoke_scalar($event_edit_delete_target, "SELECT COUNT(*) FROM wp_options WHERE option_name = 'forkpress_shared_event_calendar_index'"), 0, 'Events Calendar-shaped edit/delete preserves target event option cleanup before review');
+    assert_same((int)smoke_scalar($event_edit_delete_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE object_id = 17000322 AND term_taxonomy_id = 17000330'), 0, 'Events Calendar-shaped edit/delete preserves target event category cleanup before review');
+    assert_same(smoke_scalar($event_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 17000320'), 'Shared Event Venue', 'Events Calendar-shaped edit/delete preserves unchanged venue');
+    assert_same(smoke_scalar($event_edit_delete_target, 'SELECT post_title FROM wp_posts WHERE ID = 17000321'), 'Shared Event Organizer', 'Events Calendar-shaped edit/delete preserves unchanged organizer');
+    assert_same(
+        (int)smoke_scalar($event_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'Events Calendar-shaped edit/delete records the edited event delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($event_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-target-deleted'"),
+        2,
+        'Events Calendar-shaped edit/delete records changed event metadata delete conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($event_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_options' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'Events Calendar-shaped edit/delete records the edited event option delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($event_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_term_relationships' AND conflict_type = 'row-target-deleted'"),
+        1,
+        'Events Calendar-shaped edit/delete records the edited event category relationship delete conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($event_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', 'wp_options', 'wp_term_relationships') AND decision = 'target-wins'"),
+        5,
+        'Events Calendar-shaped edit/delete defaults the changed source event graph to target-wins before review'
+    );
+
     $cpt_edit_delete_base = $tmp . '/cpt-edit-delete-base.sqlite';
     $cpt_edit_delete_source = $tmp . '/cpt-edit-delete-source.sqlite';
     $cpt_edit_delete_target = $tmp . '/cpt-edit-delete-target.sqlite';
