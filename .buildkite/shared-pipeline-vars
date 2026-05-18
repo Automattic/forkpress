@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# This file is `source`'d before `buildkite-agent pipeline upload` and exports
+# variables that are interpolated into the pipeline YAML before upload.
+
+CI_TOOLKIT_PLUGIN_VERSION='6.1.0'
+XCODE_VERSION=$(sed -E 's/^~> ?//' .xcode-version)
+
+export IMAGE_ID="xcode-$XCODE_VERSION"
+export CI_TOOLKIT_PLUGIN="automattic/a8c-ci-toolkit#$CI_TOOLKIT_PLUGIN_VERSION"
