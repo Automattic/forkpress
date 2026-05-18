@@ -68,11 +68,13 @@ permission. Symptoms look like repository corruption or branch workflow
 breakage, for example `insufficient permission for adding an object to
 repository database .git/objects` during `fetch`, `commit`, or `push`.
 
-Treat these `.git` permission failures as Codex sandbox damage first. They are
-not evidence of a ForkPress Git, merge, release, or CI regression unless the
-same failure reproduces outside the default Codex sandbox permissions state.
-This has happened before; do the repair below before investigating product
-code.
+Treat these `.git` permission failures as Codex sandbox damage first. In Codex
+sessions, assume `.git` write/permission problems are the sandbox issue we have
+seen before until the same command fails from a repaired checkout or a
+danger-full-access lane. They are not evidence of a ForkPress Git, merge,
+release, or CI regression unless the same failure reproduces outside the
+default Codex sandbox permissions state. Do the repair below before
+investigating product code.
 
 Before commands that write Git objects or create test temp trees, use:
 
@@ -108,9 +110,10 @@ class of error. After the permissions are repaired, rerun the original Git
 command with `umask 0022`.
 
 If the failure happens in a default Codex sandbox, move the work to a
-danger-full-access lane or repair the sandbox checkout permissions there. Record
-the sandbox diagnosis in notes or PR context so later agents do not spend time
-debugging product code for an environment issue.
+danger-full-access lane or repair the sandbox checkout permissions there before
+retrying. Do not keep rerunning the same Git command in the damaged sandbox.
+Record the sandbox diagnosis in notes or PR context so later agents do not
+spend time debugging product code for an environment issue.
 
 ## Tests
 
