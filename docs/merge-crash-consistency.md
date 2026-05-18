@@ -69,6 +69,9 @@ The PHP merge suite covers these rollback classes:
   transaction but before recovery artifact cleanup leaves the artifact and
   rollback material retryable; a second recovery removes the artifact and
   cleanup material after confirming the target is restored.
+- Scoped recovery with `recover-crash --run` restores only the selected crash
+  artifact, leaves unrelated pending artifacts untouched, and lets a later
+  global recovery restore the remaining queue.
 - The product E2E suite drives `before-target-db-commit` through the public
   `forkpress branch merge` command, verifies `forkpress branch recover-crash`
   reports the pending artifact, verifies a second public merge is blocked while

@@ -1545,6 +1545,98 @@ try {
         assert_true(is_array($restored_crash_recovery_files) && count($restored_crash_recovery_files) === 0, 'crash recovery CLI removes restored artifact files');
         assert_true(!file_exists($crash_backup), 'completed crash recovery cleanup removes target DB snapshot backup');
 
+        $scoped_crash_metadata = $tmp . '/.forkpress/cow/merge/scoped-crash/metadata.sqlite';
+        $scoped_crash_target_a = $tmp . '/scoped-crash-target-a.sqlite';
+        $scoped_crash_target_b = $tmp . '/scoped-crash-target-b.sqlite';
+        create_base_db($scoped_crash_target_a);
+        create_base_db($scoped_crash_target_b);
+        $scoped_snapshot_a = cow_merge_snapshot_sqlite_db($scoped_crash_target_a);
+        $scoped_snapshot_b = cow_merge_snapshot_sqlite_db($scoped_crash_target_b);
+        $db = open_db($scoped_crash_target_a);
+        $db->exec("UPDATE wp_posts SET post_content = 'Scoped crash A dirty content' WHERE ID = 1");
+        $db->close();
+        $db = open_db($scoped_crash_target_b);
+        $db->exec("UPDATE wp_posts SET post_content = 'Scoped crash B dirty content' WHERE ID = 1");
+        $db->close();
+        cow_merge_write_crash_recovery_artifact(
+            $scoped_crash_metadata,
+            101,
+            'target-db-commit',
+            [
+                'source_branch' => 'feature-scoped-crash-a',
+                'target_branch' => 'main',
+                'target_db' => $scoped_crash_target_a,
+            ],
+            $scoped_snapshot_a
+        );
+        cow_merge_write_crash_recovery_artifact(
+            $scoped_crash_metadata,
+            202,
+            'target-db-commit',
+            [
+                'source_branch' => 'feature-scoped-crash-b',
+                'target_branch' => 'main',
+                'target_db' => $scoped_crash_target_b,
+            ],
+            $scoped_snapshot_b
+        );
+        $scoped_crash_run_a_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $scoped_crash_metadata,
+            '--run', '101',
+            '--format', 'json',
+        ]);
+        assert_same($scoped_crash_run_a_report['status'], 0, 'scoped crash recovery CLI lists one selected run');
+        $scoped_crash_run_a_json = json_decode($scoped_crash_run_a_report['output'], true);
+        assert_same($scoped_crash_run_a_json['pending'] ?? null, 1, 'scoped crash recovery reports only the selected run as pending');
+        assert_same($scoped_crash_run_a_json['artifacts'][0]['run_id'] ?? null, 101, 'scoped crash recovery report identifies the selected run id');
+        $scoped_crash_restore_a = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $scoped_crash_metadata,
+            '--run', '101',
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($scoped_crash_restore_a['status'], 0, 'scoped crash recovery restores the selected run');
+        $scoped_crash_restore_a_json = json_decode($scoped_crash_restore_a['output'], true);
+        assert_same($scoped_crash_restore_a_json['restored'] ?? null, 1, 'scoped crash recovery reports one restored selected run');
+        assert_same($scoped_crash_restore_a_json['pending'] ?? null, 0, 'scoped crash recovery reports no remaining artifacts for the selected run');
+        assert_same(
+            scalar($scoped_crash_target_a, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'scoped crash recovery restores the selected target DB'
+        );
+        assert_same(
+            scalar($scoped_crash_target_b, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Scoped crash B dirty content',
+            'scoped crash recovery leaves other pending target DBs untouched'
+        );
+        $scoped_crash_global_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $scoped_crash_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($scoped_crash_global_report['status'], 0, 'global crash recovery still lists unselected pending artifacts');
+        $scoped_crash_global_json = json_decode($scoped_crash_global_report['output'], true);
+        assert_same($scoped_crash_global_json['pending'] ?? null, 1, 'global crash recovery reports the unselected artifact after scoped restore');
+        assert_same($scoped_crash_global_json['artifacts'][0]['run_id'] ?? null, 202, 'global crash recovery leaves the unselected run pending');
+        $scoped_crash_restore_all = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $scoped_crash_metadata,
+            '--restore-target-db',
+            '--format', 'json',
+        ]);
+        assert_same($scoped_crash_restore_all['status'], 0, 'global crash recovery restores remaining artifacts');
+        $scoped_crash_restore_all_json = json_decode($scoped_crash_restore_all['output'], true);
+        assert_same($scoped_crash_restore_all_json['restored'] ?? null, 1, 'global crash recovery restores the remaining artifact');
+        assert_same(
+            scalar($scoped_crash_target_b, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'global crash recovery restores the previously unselected target DB'
+        );
+        assert_same(glob(dirname($scoped_crash_metadata) . '/crash-recovery/*.json') ?: [], [], 'scoped and global crash recovery remove all recovered artifact files');
+        assert_true(!file_exists((string)$scoped_snapshot_a['backup']) && !file_exists((string)$scoped_snapshot_b['backup']), 'scoped and global crash recovery cleanup removes selected and unselected DB snapshots');
+
         $crash_metadata_base = $tmp . '/crash-metadata-base.sqlite';
         $crash_metadata_source = $tmp . '/crash-metadata-source.sqlite';
         $crash_metadata_target = $tmp . '/crash-metadata-target.sqlite';
