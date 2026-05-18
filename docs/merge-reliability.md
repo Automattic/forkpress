@@ -70,6 +70,12 @@ Recent additions in the current merge-reliability work:
 - Source page and attachment deletes are held when the target branch changes
   scalar WordPress options that point at them, currently `page_on_front`,
   `page_for_posts`, and `site_icon`.
+- Source child-row deletes for target-referenced WordPress owners now inherit
+  the same guard where the child is needed to keep the target-owned object
+  coherent. A target-edited nav menu option keeps both the `wp_terms` row and
+  its `wp_term_taxonomy` row before review, and target-edited attachment option
+  references keep attachment-owned `wp_postmeta` rows from being silently
+  removed.
 - Source post, term, and menu-item deletes are held when target-edited nav menu
   metadata points at them through `_menu_item_object_id` or
   `_menu_item_menu_item_parent`, with type-aware sibling metadata checks to
