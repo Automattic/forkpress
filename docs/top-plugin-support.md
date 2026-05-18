@@ -36,6 +36,19 @@ node scripts/popular-plugin-compat.mjs validate
 The validator requires exactly 100 unique ranked plugins and verifies each
 record declares the install support and merge coverage policy.
 
+## Smoke-Testing Plugin Packages
+
+Use the install smoke script to verify the manifest's WordPress.org download
+links unpack into a normal `wp-content/plugins` tree with a plugin header.
+This does not activate plugin code.
+
+```bash
+php scripts/popular-plugin-install-smoke.php --limit 10
+php scripts/popular-plugin-install-smoke.php --slug woocommerce
+```
+
+Run without `--limit` or `--slug` to smoke all 100 manifest plugins.
+
 ## Current Semantic Recipes
 
 ForkPress has focused plugin-shaped validator coverage for:
