@@ -1564,7 +1564,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 97, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 101, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1650,7 +1650,7 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-attachment-metadata-invalid-shape',
     ]);
-    assert_same(count($invalid_shape_audit['conflicts']), 4, 'media validator exposes malformed generated-size and backup-size metadata shapes as plugin-scoped audit conflicts');
+    assert_same(count($invalid_shape_audit['conflicts']), 6, 'media validator exposes malformed generated-size and backup-size metadata shapes as plugin-scoped audit conflicts');
     $invalid_shape_payloads = array_map(
         fn($conflict) => cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'media validator invalid-shape payload'),
         $invalid_shape_audit['conflicts']
@@ -1660,7 +1660,9 @@ PHP);
     assert_same($invalid_shape_fields, [
         '_wp_attachment_metadata.backup_sizes',
         '_wp_attachment_metadata.backup_sizes.full-orig.file',
+        '_wp_attachment_metadata.dimensions',
         '_wp_attachment_metadata.sizes',
+        '_wp_attachment_metadata.sizes.thumbnail.dimensions',
         '_wp_attachment_metadata.sizes.thumbnail.file',
     ], 'media validator invalid-shape audit identifies every malformed metadata field');
     assert_same($invalid_shape_audit['conflicts'][0]['plugin_files'] ?? null, [], 'media validator invalid-shape audit does not expose guessed upload paths');
@@ -1714,6 +1716,24 @@ PHP);
     $meta_db->close();
     assert_true($generated_filesize_recorded, 'media validator filesize audit payload identifies the affected generated file');
     assert_true(str_contains($filesize_preview, (string)$generated_filesize_drift_id), 'media validator filesize audit includes the generated filesize attachment ID');
+    $wp_upload_filesize_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-filesize-drift',
+    ]);
+    assert_same(count($wp_upload_filesize_audit['conflicts']), 2, 'built-in WordPress upload validator exposes original and generated filesize drift as review-only conflicts');
+    $wp_upload_filesize_payloads = array_map(
+        fn($conflict) => cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'media validator WordPress upload filesize payload'),
+        $wp_upload_filesize_audit['conflicts']
+    );
+    $wp_upload_filesize_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $wp_upload_filesize_payloads);
+    sort($wp_upload_filesize_fields, SORT_STRING);
+    assert_same($wp_upload_filesize_fields, [
+        '_wp_attachment_metadata.filesize',
+        '_wp_attachment_metadata.sizes.thumbnail.filesize',
+    ], 'built-in WordPress upload validator names stale filesize metadata fields');
+    assert_same($wp_upload_filesize_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress upload filesize repair is review-only');
     assert_true($backup_filesize_recorded, 'media validator filesize audit payload identifies the affected backup file');
     assert_true(str_contains($filesize_preview, (string)$backup_filesize_drift_id), 'media validator filesize audit includes the backup filesize attachment ID');
 

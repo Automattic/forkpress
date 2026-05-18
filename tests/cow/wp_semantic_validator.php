@@ -2834,10 +2834,18 @@ PHP);
     $db = open_db($attachment_upload_source);
     $metadata_value = (string)$db->querySingle("SELECT meta_value FROM wp_postmeta WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
     $metadata_array = unserialize($metadata_value, ['allowed_classes' => false]);
+    $metadata_array['width'] = 0;
+    $metadata_array['filesize'] = 1;
     $metadata_array['sizes']['escaped-managed-db'] = [
         'file' => '../../../../database/.ht.sqlite',
         'width' => 64,
         'height' => 64,
+    ];
+    $metadata_array['sizes']['bad-dimensions'] = [
+        'file' => 'generated-image-300x200.jpg',
+        'width' => 0,
+        'height' => 200,
+        'filesize' => 1,
     ];
     $metadata_array['sizes']['missing-file-field'] = [
         'width' => 64,
@@ -2933,11 +2941,11 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload guard holds unsafe upload states for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 8 : 7;
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 12 : 11;
     if ($has_attachment_upload_case_collision) {
         $expected_attachment_upload_conflicts++;
     }
-    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records unsafe-path, invalid-shape, non-regular-entry, duplicate-meta, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator records unsafe-path, invalid-shape, invalid-dimensions, non-regular-entry, duplicate-meta, duplicate-owner, metadata-file-drift, and missing-metadata conflicts');
     assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), $expected_attachment_upload_conflicts, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
     assert_same((int)($attachment_upload_result['file_conflicts'] ?? 0), 2, 'filesystem merge holds source deletions of upload files still referenced by WordPress metadata');
     assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'filesystem merge preserves generated files still referenced by WordPress metadata');
@@ -2990,7 +2998,7 @@ PHP);
         'semantic_scope' => 'wordpress',
         'conflict_type' => 'plugin-wp-attachment-metadata-invalid-shape',
     ]);
-    assert_same(count($attachment_upload_invalid_shape_audit['conflicts']), 2, 'built-in WordPress attachment upload validator rejects malformed generated and backup metadata entries');
+    assert_same(count($attachment_upload_invalid_shape_audit['conflicts']), 4, 'built-in WordPress attachment upload validator rejects malformed metadata entries and invalid dimensions');
     $attachment_upload_invalid_shape_payloads = array_map(
         fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
         $attachment_upload_invalid_shape_audit['conflicts']
@@ -2999,9 +3007,30 @@ PHP);
     sort($attachment_upload_invalid_shape_fields, SORT_STRING);
     assert_same($attachment_upload_invalid_shape_fields, [
         '_wp_attachment_metadata.backup_sizes.bad-shape.file',
+        '_wp_attachment_metadata.dimensions',
+        '_wp_attachment_metadata.sizes.bad-dimensions.dimensions',
         '_wp_attachment_metadata.sizes.missing-file-field.file',
-    ], 'built-in WordPress attachment upload invalid-shape audit names malformed metadata fields');
+    ], 'built-in WordPress attachment upload invalid-shape audit names malformed metadata fields and invalid dimensions');
     assert_same($attachment_upload_invalid_shape_audit['conflicts'][0]['plugin_files'] ?? null, [], 'built-in WordPress attachment upload invalid-shape audit does not expose guessed upload paths');
+
+    $attachment_upload_filesize_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-filesize-drift',
+    ]);
+    assert_same(count($attachment_upload_filesize_audit['conflicts']), 2, 'built-in WordPress attachment upload validator rejects stale filesize metadata');
+    $attachment_upload_filesize_payloads = array_map(
+        fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+        $attachment_upload_filesize_audit['conflicts']
+    );
+    $attachment_upload_filesize_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $attachment_upload_filesize_payloads);
+    sort($attachment_upload_filesize_fields, SORT_STRING);
+    assert_same($attachment_upload_filesize_fields, [
+        '_wp_attachment_metadata.filesize',
+        '_wp_attachment_metadata.sizes.bad-dimensions.filesize',
+    ], 'built-in WordPress attachment upload filesize audit names stale metadata fields');
+    assert_same($attachment_upload_filesize_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload filesize audit marks regeneration as review-only');
 
     if ($has_attachment_upload_symlink) {
         $attachment_upload_invalid_entry_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
@@ -3029,6 +3058,7 @@ PHP);
     $attachment_upload_duplicate_owner_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_duplicate_owner_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
     assert_same($attachment_upload_duplicate_owner_payload['candidate']['upload_file'] ?? null, 'wp-content/uploads/2026/05/generated-image.jpg', 'built-in WordPress attachment upload duplicate-owner audit includes the shared upload path');
     assert_same($attachment_upload_duplicate_owner_payload['candidate']['attachment_ids'] ?? null, [63, $duplicate_upload_attachment_id], 'built-in WordPress attachment upload duplicate-owner audit includes both attachment IDs');
+    assert_same($attachment_upload_duplicate_owner_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload duplicate-owner audit marks ownership repair as review-only');
     assert_same($attachment_upload_duplicate_owner_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image.jpg'], 'built-in WordPress attachment upload duplicate-owner audit exposes the shared upload path filter');
 
     $attachment_upload_duplicate_meta_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
@@ -3058,6 +3088,7 @@ PHP);
         assert_same($attachment_upload_case_collision_payload['candidate']['case_insensitive_file'] ?? null, 'wp-content/uploads/2026/05/case-collision.jpg', 'built-in WordPress attachment upload case-collision audit records the case-folded path');
         assert_same($attachment_upload_case_collision_payload['candidate']['upload_files'] ?? null, ['wp-content/uploads/2026/05/Case-Collision.jpg', 'wp-content/uploads/2026/05/case-collision.jpg'], 'built-in WordPress attachment upload case-collision audit includes both upload paths');
         assert_same($attachment_upload_case_collision_payload['candidate']['attachment_ids'] ?? null, [$case_collision_upper_id, $case_collision_lower_id], 'built-in WordPress attachment upload case-collision audit includes both attachment IDs');
+        assert_same($attachment_upload_case_collision_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload case-collision audit marks platform rename/regeneration as review-only');
         assert_same($attachment_upload_case_collision_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/Case-Collision.jpg', 'wp-content/uploads/2026/05/case-collision.jpg'], 'built-in WordPress attachment upload case-collision audit exposes both upload path filters');
     }
 
@@ -3085,6 +3116,11 @@ PHP);
     $attachment_upload_missing_metadata_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_missing_metadata_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
     assert_same($attachment_upload_missing_metadata_payload['candidate']['attachment_id'] ?? null, $missing_metadata_attachment_id, 'built-in WordPress attachment upload missing-metadata audit includes the attachment ID');
     assert_same($attachment_upload_missing_metadata_payload['candidate']['attached_file'] ?? null, '2026/05/missing-metadata-image.jpg', 'built-in WordPress attachment upload missing-metadata audit includes the attached file');
+    assert_same($attachment_upload_missing_metadata_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload audit marks metadata repair as review-only');
+    assert_true(
+        str_contains((string)($attachment_upload_missing_metadata_audit['conflicts'][0]['plugin_suggested_action'] ?? ''), 'regenerate media derivatives in WordPress'),
+        'built-in WordPress attachment upload audit gives explicit regeneration guidance'
+    );
     assert_same($attachment_upload_missing_metadata_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/missing-metadata-image.jpg'], 'built-in WordPress attachment upload missing-metadata audit exposes the attached file filter');
 
     $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
