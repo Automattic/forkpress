@@ -76,7 +76,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-changed test-cow-e2e-git-existing-update-crash test-cow-e2e-remote-cache test-cow-e2e-semantic test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-plugin-validator test-cow-schema-review test-cow-semantic-fast test-cow-stale-audit test-cow-wp-semantic-validator test-branch-cli-fast test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-changed test-cow-e2e-git-existing-update-crash test-cow-e2e-remote-cache test-cow-e2e-semantic test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-mysql-import test-cow-plugin-validator test-cow-schema-review test-cow-semantic-fast test-cow-stale-audit test-cow-wp-semantic-validator test-branch-cli-fast test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -113,6 +113,9 @@ test-cow-changed:
 
 test-cow-merge: test-cow-merge-smoke
 	php $(COW_TEST_DIR)/merge.php
+
+test-cow-mysql-import:
+	php $(COW_TEST_DIR)/mysql_import.php
 
 test-cow-git-server:
 	php $(COW_TEST_DIR)/git_server.php
@@ -170,7 +173,7 @@ test-cow-semantic-fast: test-cow-merge-smoke
 	php $(COW_TEST_DIR)/stale_audit.php
 	php $(COW_TEST_DIR)/wp_semantic_validator.php
 
-test-cow-fast: test-cow-git-server test-cow-merge-smoke
+test-cow-fast: test-cow-git-server test-cow-merge-smoke test-cow-mysql-import
 	php $(COW_TEST_DIR)/branch_birth.php
 	php $(COW_TEST_DIR)/explicit_ids.php
 	php $(COW_TEST_DIR)/filesystem.php
