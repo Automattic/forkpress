@@ -351,6 +351,54 @@ try {
     assert_same($resolved_audit['conflicts'][0]['latest_event_type'], 'resolution-applied', 'after-revalidate resolution advertises latest lifecycle event');
     assert_same($resolved_audit['conflicts'][0]['latest_event_lifecycle_state'], 'resolved', 'after-revalidate resolution advertises latest event state');
 
+    $restore_base = $tmp . '/restore-fresh-base.sqlite';
+    $restore_source = $tmp . '/restore-fresh-source.sqlite';
+    $restore_target = $tmp . '/restore-fresh-target.sqlite';
+    $restore_metadata = $tmp . '/.forkpress/cow/merge/restore-fresh-metadata.sqlite';
+    create_stale_audit_db($restore_base);
+    copy($restore_base, $restore_source);
+    copy($restore_base, $restore_target);
+    $db = open_db($restore_source);
+    $db->exec("UPDATE plugin_items SET value = 'restore source reviewed value' WHERE item_id = 'alpha'");
+    $db->close();
+    $db = open_db($restore_target);
+    $db->exec("UPDATE plugin_items SET value = 'restore target reviewed value' WHERE item_id = 'alpha'");
+    $db->close();
+    $restore_merge = cow_merge_databases($restore_base, $restore_source, $restore_target, $restore_metadata, 'feature-restore-fresh-review', 'main');
+    $restore_run_id = (int)$restore_merge['run_id'];
+    $restore_conflict_id = (int)scalar($restore_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'plugin_items' AND column_name = 'value'");
+    cow_merge_review_record(
+        $restore_metadata,
+        'conflict',
+        $restore_conflict_id,
+        'reviewed',
+        'Restore this reviewed intent when drift clears.',
+        'cow-test'
+    );
+    $db = open_db($restore_target);
+    $db->exec("UPDATE plugin_items SET value = 'restore target temporary drift' WHERE item_id = 'alpha'");
+    $db->close();
+    $restore_stale = cow_merge_revalidate_reviewed_conflicts($restore_metadata, $restore_run_id, 'cow-revalidate');
+    assert_same($restore_stale['carried'], 1, 'restore-fresh fixture first carries stale review intent to needs-action');
+    $db = open_db($restore_target);
+    $db->exec("UPDATE plugin_items SET value = 'restore target reviewed value' WHERE item_id = 'alpha'");
+    $db->close();
+    $restore_text = run_merge_cli([
+        'revalidate-reviews',
+        '--metadata-db', $restore_metadata,
+        '--run', (string)$restore_run_id,
+    ]);
+    assert_same($restore_text['status'], 0, 'revalidation CLI accepts restored fresh reviews');
+    assert_true(str_contains($restore_text['output'], 'restored:             1'), 'text revalidation output counts restored reviews');
+    assert_true(str_contains($restore_text['output'], 'restored-conflicts:'), 'text revalidation output lists restored conflicts');
+    assert_true(str_contains($restore_text['output'], 'Revalidation is fresh again; restored previous reviewed review.'), 'text revalidation output explains restored review intent');
+    $restore_audit = cow_merge_audit_report($restore_metadata, $restore_run_id, 10, [
+        'records' => 'conflicts',
+        'review_status' => 'reviewed',
+    ]);
+    assert_same(count($restore_audit['conflicts']), 1, 'restored fresh conflict returns to reviewed audit state');
+    assert_true(str_contains((string)$restore_audit['conflicts'][0]['review_note'], 'restored previous reviewed review'), 'restored audit state records the restoration note');
+
     $bulk_stale_base = $tmp . '/bulk-stale-base.sqlite';
     $bulk_stale_source = $tmp . '/bulk-stale-source.sqlite';
     $bulk_stale_target = $tmp . '/bulk-stale-target.sqlite';
