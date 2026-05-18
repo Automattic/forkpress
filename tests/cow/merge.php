@@ -1611,6 +1611,141 @@ try {
             'crash recovery CLI restores the pre-metadata target DB content'
         );
 
+        $crash_after_metadata_base = $tmp . '/crash-after-metadata-base.sqlite';
+        $crash_after_metadata_source = $tmp . '/crash-after-metadata-source.sqlite';
+        $crash_after_metadata_target = $tmp . '/crash-after-metadata-target.sqlite';
+        $crash_after_metadata_db = $tmp . '/.forkpress/cow/merge/crash-after-metadata/metadata.sqlite';
+        create_base_db($crash_after_metadata_base);
+        copy($crash_after_metadata_base, $crash_after_metadata_source);
+        copy($crash_after_metadata_base, $crash_after_metadata_target);
+        $db = open_db($crash_after_metadata_source);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source crash after metadata content' WHERE ID = 1");
+        $db->close();
+        $crash_after_metadata_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_after_metadata_base,
+                '--source-db', $crash_after_metadata_source,
+                '--target-db', $crash_after_metadata_target,
+                '--metadata-db', $crash_after_metadata_db,
+                '--source', 'feature-crash-after-metadata',
+                '--target', 'main',
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-metadata-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_after_metadata_result['status'] !== 0, 'crash failpoint terminates the DB-only merge subprocess after metadata commit');
+        assert_same(
+            scalar($crash_after_metadata_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash after metadata content',
+            'DB-only process death after metadata commit leaves the completed target change visible'
+        );
+        assert_same(
+            (int)scalar($crash_after_metadata_db, "SELECT COUNT(*) FROM merge_runs WHERE source_branch = 'feature-crash-after-metadata' AND status = 'completed'"),
+            1,
+            'DB-only process death after metadata commit leaves a completed merge run'
+        );
+        $crash_after_metadata_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_after_metadata_db,
+            '--format', 'json',
+        ]);
+        assert_same($crash_after_metadata_report['status'], 0, 'crash recovery CLI accepts stale DB-only post-metadata artifacts');
+        $crash_after_metadata_report_json = json_decode($crash_after_metadata_report['output'], true);
+        assert_same($crash_after_metadata_report_json['pending'] ?? null, 0, 'stale DB-only post-metadata artifact is not reported as pending recovery');
+        assert_same($crash_after_metadata_report_json['cleared'] ?? null, 1, 'stale DB-only post-metadata artifact is cleaned instead of restored');
+        assert_same(
+            scalar($crash_after_metadata_target, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source crash after metadata content',
+            'stale DB-only artifact cleanup does not roll back a completed merge'
+        );
+        $crash_after_metadata_files = glob(dirname($crash_after_metadata_db) . '/crash-recovery/*.json');
+        assert_true(is_array($crash_after_metadata_files) && count($crash_after_metadata_files) === 0, 'stale DB-only crash artifact file is removed after cleanup');
+
+        $crash_after_metadata_branch_base_db = $tmp . '/crash-after-metadata-branch-base.sqlite';
+        $crash_after_metadata_branch_source_db = $tmp . '/crash-after-metadata-branch-source.sqlite';
+        $crash_after_metadata_branch_target_db = $tmp . '/crash-after-metadata-branch-target.sqlite';
+        $crash_after_metadata_branch_metadata = $tmp . '/.forkpress/cow/merge/crash-after-metadata-branch/metadata.sqlite';
+        create_base_db($crash_after_metadata_branch_base_db);
+        copy($crash_after_metadata_branch_base_db, $crash_after_metadata_branch_source_db);
+        copy($crash_after_metadata_branch_base_db, $crash_after_metadata_branch_target_db);
+        $db = open_db($crash_after_metadata_branch_source_db);
+        $db->exec("UPDATE wp_posts SET post_content = 'Source branch-state crash after metadata content' WHERE ID = 1");
+        $db->close();
+        $crash_after_metadata_branch_base_root = $tmp . '/crash-after-metadata-branch-base-root';
+        $crash_after_metadata_branch_source_root = $tmp . '/crash-after-metadata-branch-source-root';
+        $crash_after_metadata_branch_target_root = $tmp . '/crash-after-metadata-branch-target-root';
+        write_test_file($crash_after_metadata_branch_base_root . '/wp-content/uploads/after-metadata.txt', 'base after-metadata content');
+        copy_tree_for_test($crash_after_metadata_branch_base_root, $crash_after_metadata_branch_source_root);
+        copy_tree_for_test($crash_after_metadata_branch_base_root, $crash_after_metadata_branch_target_root);
+        write_test_file($crash_after_metadata_branch_source_root . '/wp-content/uploads/after-metadata.txt', 'source after-metadata content');
+        $crash_after_metadata_branch_manifest = $tmp . '/.forkpress/cow/merge/file-bases/feature-crash-after-metadata-branch.json';
+        cow_merge_capture_file_base($crash_after_metadata_branch_base_root, $crash_after_metadata_branch_manifest);
+        $crash_after_metadata_branch_result = run_merge_cli_env(
+            [
+                'merge',
+                '--base-db', $crash_after_metadata_branch_base_db,
+                '--source-db', $crash_after_metadata_branch_source_db,
+                '--target-db', $crash_after_metadata_branch_target_db,
+                '--metadata-db', $crash_after_metadata_branch_metadata,
+                '--source', 'feature-crash-after-metadata-branch',
+                '--target', 'main',
+                '--base-files', $crash_after_metadata_branch_manifest,
+                '--source-root', $crash_after_metadata_branch_source_root,
+                '--target-root', $crash_after_metadata_branch_target_root,
+            ],
+            [
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT' => 'after-metadata-commit',
+                'FORKPRESS_COW_MERGE_TEST_FAILPOINT_ACTION' => 'kill',
+            ]
+        );
+        assert_true($crash_after_metadata_branch_result['status'] !== 0, 'crash failpoint terminates branch-state merge after DB metadata commit');
+        assert_same(
+            scalar($crash_after_metadata_branch_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Source branch-state crash after metadata content',
+            'branch-state process death after DB metadata commit leaves the DB phase visible'
+        );
+        assert_same(
+            file_get_contents($crash_after_metadata_branch_target_root . '/wp-content/uploads/after-metadata.txt'),
+            'base after-metadata content',
+            'branch-state process death after DB metadata commit occurs before filesystem changes'
+        );
+        $crash_after_metadata_branch_report = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_after_metadata_branch_metadata,
+            '--format', 'json',
+        ]);
+        assert_same($crash_after_metadata_branch_report['status'], 0, 'crash recovery CLI lists branch-state post-metadata artifacts');
+        $crash_after_metadata_branch_report_json = json_decode($crash_after_metadata_branch_report['output'], true);
+        assert_same($crash_after_metadata_branch_report_json['pending'] ?? null, 1, 'branch-state post-metadata artifact remains pending recovery');
+        assert_same($crash_after_metadata_branch_report_json['cleared'] ?? null, 0, 'branch-state post-metadata artifact is not treated as stale cleanup');
+        assert_same($crash_after_metadata_branch_report_json['artifacts'][0]['checkpoint'] ?? null, 'target-db-commit', 'branch-state post-metadata artifact keeps the DB checkpoint');
+        assert_true(is_array($crash_after_metadata_branch_report_json['artifacts'][0]['metadata_db_snapshot'] ?? null), 'branch-state post-metadata artifact preserves the outer metadata snapshot');
+        assert_true(is_array($crash_after_metadata_branch_report_json['artifacts'][0]['filesystem_snapshot_summary'] ?? null), 'branch-state post-metadata artifact preserves the outer filesystem snapshot summary');
+        $crash_after_metadata_branch_restore = run_merge_cli([
+            'recover-crash',
+            '--metadata-db', $crash_after_metadata_branch_metadata,
+            '--restore-target-db',
+            '--restore-files',
+            '--format', 'json',
+        ]);
+        assert_same($crash_after_metadata_branch_restore['status'], 0, 'crash recovery CLI restores branch-state post-metadata snapshots');
+        $crash_after_metadata_branch_restore_json = json_decode($crash_after_metadata_branch_restore['output'], true);
+        assert_same($crash_after_metadata_branch_restore_json['restored'] ?? null, 1, 'branch-state post-metadata recovery reports one restored artifact');
+        assert_same($crash_after_metadata_branch_restore_json['pending'] ?? null, 0, 'branch-state post-metadata recovery clears the pending artifact');
+        assert_same(
+            scalar($crash_after_metadata_branch_target_db, "SELECT post_content FROM wp_posts WHERE ID = 1"),
+            'Base content',
+            'branch-state post-metadata recovery restores pre-merge DB content'
+        );
+        assert_same(
+            file_get_contents($crash_after_metadata_branch_target_root . '/wp-content/uploads/after-metadata.txt'),
+            'base after-metadata content',
+            'branch-state post-metadata recovery leaves filesystem at pre-merge content'
+        );
+
         $crash_before_file_base_db = $tmp . '/crash-before-file-base.sqlite';
         $crash_before_file_source_db = $tmp . '/crash-before-file-source.sqlite';
         $crash_before_file_target_db = $tmp . '/crash-before-file-target.sqlite';

@@ -4479,13 +4479,77 @@ function cow_merge_crash_recovery_artifacts(string $metadata_db, ?int $run_id = 
     return $artifacts;
 }
 
+function cow_merge_run_status_for_crash_recovery(string $metadata_db, int $run_id): ?string {
+    if ($run_id <= 0 || !is_file($metadata_db)) {
+        return null;
+    }
+    try {
+        $meta = cow_merge_open_db($metadata_db, SQLITE3_OPEN_READONLY);
+        try {
+            $has_runs = (int)$meta->querySingle("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'merge_runs'");
+            if ($has_runs !== 1) {
+                return null;
+            }
+            $stmt = cow_merge_prepare_checked(
+                $meta,
+                'SELECT status FROM merge_runs WHERE id = :id',
+                'failed to prepare crash recovery run status lookup'
+            );
+            cow_merge_bind($stmt, ':id', $run_id);
+            $res = cow_merge_execute_checked($stmt, $meta, 'failed to read crash recovery run status');
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+            cow_merge_result_finalize_checked($res, 'failed to finalize crash recovery run status lookup');
+            return $row ? (string)$row['status'] : null;
+        } finally {
+            $meta->close();
+        }
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+function cow_merge_is_stale_completed_db_crash_artifact(string $metadata_db, array $artifact): bool {
+    if (($artifact['checkpoint'] ?? null) !== 'target-db-commit') {
+        return false;
+    }
+    if (is_array($artifact['metadata_db_snapshot'] ?? null)) {
+        return false;
+    }
+    $status = cow_merge_run_status_for_crash_recovery($metadata_db, (int)($artifact['run_id'] ?? 0));
+    return in_array($status, ['completed', 'completed_with_conflicts'], true);
+}
+
+function cow_merge_pending_crash_recovery_artifacts(string $metadata_db, ?int $run_id = null, bool $cleanup_stale = false, ?int &$cleared = null): array {
+    $cleared_count = 0;
+    $pending = [];
+    foreach (cow_merge_crash_recovery_artifacts($metadata_db, $run_id) as $artifact) {
+        if (cow_merge_is_stale_completed_db_crash_artifact($metadata_db, $artifact)) {
+            if ($cleanup_stale) {
+                $snapshot = $artifact['target_db_snapshot'] ?? null;
+                if (is_array($snapshot)) {
+                    cow_merge_cleanup_sqlite_snapshot($snapshot);
+                }
+                cow_merge_remove_crash_recovery_artifact((string)$artifact['artifact_path']);
+                $cleared_count++;
+            }
+            continue;
+        }
+        $pending[] = $artifact;
+    }
+    if ($cleared !== null) {
+        $cleared += $cleared_count;
+    }
+    return $pending;
+}
+
 function cow_merge_recover_crash_artifacts(
     string $metadata_db,
     ?int $run_id = null,
     bool $restore_target_db = false,
     bool $restore_files = false
 ): array {
-    $artifacts = cow_merge_crash_recovery_artifacts($metadata_db, $run_id);
+    $cleared = 0;
+    $artifacts = cow_merge_pending_crash_recovery_artifacts($metadata_db, $run_id, true, $cleared);
     $restored = 0;
     if ($restore_target_db || $restore_files) {
         foreach ($artifacts as $artifact) {
@@ -4544,7 +4608,7 @@ function cow_merge_recover_crash_artifacts(
             }
             $restored++;
         }
-        $artifacts = cow_merge_crash_recovery_artifacts($metadata_db, $run_id);
+        $artifacts = cow_merge_pending_crash_recovery_artifacts($metadata_db, $run_id, true, $cleared);
     }
     return [
         'metadata_db' => $metadata_db,
@@ -4553,12 +4617,14 @@ function cow_merge_recover_crash_artifacts(
         'restore_files' => $restore_files,
         'pending' => count($artifacts),
         'restored' => $restored,
+        'cleared' => $cleared,
         'artifacts' => $artifacts,
     ];
 }
 
 function cow_merge_assert_no_pending_crash_recovery(string $metadata_db): void {
-    $artifacts = cow_merge_crash_recovery_artifacts($metadata_db);
+    $cleared = 0;
+    $artifacts = cow_merge_pending_crash_recovery_artifacts($metadata_db, null, true, $cleared);
     if (count($artifacts) === 0) {
         return;
     }
@@ -16571,7 +16637,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
     ];
     if ($filters['records'] === 'all' || $filters['records'] === 'crash-recovery') {
         $report['crash_recovery'] = array_slice(
-            cow_merge_crash_recovery_artifacts($metadata_db, $run_id),
+            cow_merge_pending_crash_recovery_artifacts($metadata_db, $run_id),
             0,
             $limit
         );
@@ -19376,7 +19442,10 @@ function cow_merge_databases(
     string $target_db,
     string $metadata_db,
     string $source_branch,
-    string $target_branch
+    string $target_branch,
+    ?array $crash_recovery_metadata_snapshot = null,
+    ?array $crash_recovery_filesystem_snapshot = null,
+    ?string $crash_recovery_filesystem_target_root = null
 ): array {
     foreach ([$base_db, $source_db, $target_db] as $path) {
         if (!is_file($path)) {
@@ -19560,7 +19629,11 @@ function cow_merge_databases(
                 'source_db' => $source_db,
                 'target_db' => $target_db,
             ],
-            $target_snapshot
+            $target_snapshot,
+            null,
+            $crash_recovery_filesystem_target_root,
+            $crash_recovery_metadata_snapshot,
+            $crash_recovery_filesystem_snapshot
         );
         cow_merge_failpoint('before-target-db-commit');
         cow_merge_exec_checked($target, 'COMMIT', 'failed to commit target database transaction');
@@ -19571,6 +19644,7 @@ function cow_merge_databases(
         cow_merge_failpoint('before-metadata-commit');
         cow_merge_exec_checked($meta, 'COMMIT', 'failed to commit merge metadata transaction');
         $metadata_transaction_active = false;
+        cow_merge_failpoint('after-metadata-commit');
         cow_merge_remove_crash_recovery_artifact($crash_recovery_artifact);
         $crash_recovery_artifact = null;
         return [
@@ -19800,7 +19874,17 @@ function cow_merge_branch_state(
     $preserve_rollback_snapshots = false;
     $whole_branch_crash_recovery_artifact = null;
     try {
-        $result = cow_merge_databases($base_db, $source_db, $target_db, $metadata_db, $source_branch, $target_branch);
+        $result = cow_merge_databases(
+            $base_db,
+            $source_db,
+            $target_db,
+            $metadata_db,
+            $source_branch,
+            $target_branch,
+            $metadata_snapshot,
+            $filesystem_snapshot,
+            $has_file_args ? (string)$target_root : null
+        );
         $attempted_run_id = (int)$result['run_id'];
         $result['db_applied'] = $result['applied'];
         $result['db_conflicts'] = $result['conflicts'];
