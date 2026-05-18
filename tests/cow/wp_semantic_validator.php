@@ -621,6 +621,28 @@ function create_wp_term_relationship_db(string $path): void {
     $db->close();
 }
 
+function create_wp_term_count_coherence_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec('CREATE TABLE wp_term_relationships (object_id INTEGER NOT NULL, term_taxonomy_id INTEGER NOT NULL, term_order INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (object_id, term_taxonomy_id))');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name) VALUES
+        (95, 'Term count base post', '<!-- wp:paragraph --><p>Assigned base post</p><!-- /wp:paragraph -->', 'publish', 'post', 'term-count-base-post'),
+        (96, 'Term count source candidate', '<!-- wp:paragraph --><p>Candidate assignment post</p><!-- /wp:paragraph -->', 'publish', 'post', 'term-count-source-candidate')");
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug, term_group) VALUES (97, 'Counted topic', 'counted-topic', 0)");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (98, 97, 'forkpress_topic', 'Counted topic', 0, 1)");
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (95, 98, 0)');
+    $db->close();
+}
+
 function create_wp_term_taxonomy_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL, term_group INTEGER NOT NULL DEFAULT 0)');
@@ -4063,6 +4085,107 @@ PHP);
     assert_same(count($term_audit['conflicts']), 1, 'WordPress term relationship validator exposes the missing taxonomy term as a plugin-scoped audit conflict');
     $term_preview = (string)($term_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($term_preview, '"term_taxonomy_id":82'), 'WordPress term relationship audit includes the missing term taxonomy ID');
+
+    $term_count_base_root = $tmp . '/term-count-base';
+    $term_count_source_root = $tmp . '/term-count-source';
+    $term_count_target_root = $tmp . '/term-count-target';
+    $term_count_base = $term_count_base_root . '/wp-content/database/.ht.sqlite';
+    $term_count_source = $term_count_source_root . '/wp-content/database/.ht.sqlite';
+    $term_count_target = $term_count_target_root . '/wp-content/database/.ht.sqlite';
+    $term_count_metadata = $tmp . '/.forkpress/cow/merge/wp-term-count-validator-metadata.sqlite';
+    $term_count_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-term-count-validator.json';
+
+    mkdir($term_count_base_root . '/wp-content/database', 0777, true);
+    create_wp_term_count_coherence_db($term_count_base);
+    write_test_file($term_count_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$res = $db->query("SELECT tt.term_taxonomy_id, tt.term_id, tt.taxonomy, tt.count, t.slug
+    FROM wp_term_taxonomy tt
+    JOIN wp_terms t ON t.term_id = tt.term_id
+    ORDER BY tt.term_taxonomy_id");
+$findings = [];
+while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+    $term_taxonomy_id = (int)$row['term_taxonomy_id'];
+    $stored_count = (int)$row['count'];
+    $actual_count = (int)$db->querySingle("SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = $term_taxonomy_id");
+    if ($stored_count === $actual_count) {
+        continue;
+    }
+    $taxonomy = (string)$row['taxonomy'];
+    $term_id = (int)$row['term_id'];
+    $findings[] = [
+        'plugin' => 'forkpress-wp-term-counts',
+        'object' => 'term_taxonomy:' . $term_taxonomy_id,
+        'reason' => 'term taxonomy count does not match relationship rows',
+        'type' => 'plugin-wp-term-count-mismatch',
+        'tables' => ['wp_terms', 'wp_term_taxonomy', 'wp_term_relationships'],
+        'validator' => 'forkpress-wp-term-counts@1',
+        'logical_identity' => [
+            'kind' => 'term-count',
+            'taxonomy' => $taxonomy,
+            'term_id' => $term_id,
+            'slug' => (string)$row['slug'],
+        ],
+        'candidate' => [
+            'term_taxonomy_id' => $term_taxonomy_id,
+            'term_id' => $term_id,
+            'taxonomy' => $taxonomy,
+            'stored_count' => $stored_count,
+            'actual_relationship_count' => $actual_count,
+        ],
+    ];
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+    copy_tree_for_test($term_count_base_root, $term_count_source_root);
+    copy_tree_for_test($term_count_base_root, $term_count_target_root);
+    cow_merge_capture_file_base($term_count_base_root, $term_count_file_base);
+    cow_merge_allocate_autoincrement_bands($term_count_source, $term_count_metadata, 'feature-wp-term-count-source');
+    cow_merge_allocate_autoincrement_bands($term_count_target, $term_count_metadata, 'main');
+
+    $db = open_db($term_count_source);
+    $db->exec('INSERT INTO wp_term_relationships (object_id, term_taxonomy_id, term_order) VALUES (96, 98, 0)');
+    $db->close();
+
+    $db = open_db($term_count_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target post receiving stale topic count' WHERE ID = 96");
+    $db->close();
+
+    $term_count_result = cow_merge_branch_state(
+        $term_count_base,
+        $term_count_source,
+        $term_count_target,
+        $term_count_metadata,
+        'feature-wp-term-count-source',
+        'main',
+        $term_count_file_base,
+        $term_count_source_root,
+        $term_count_target_root
+    );
+
+    assert_same($term_count_result['status'], 'completed_with_conflicts', 'WordPress term-count validator holds stale taxonomy counts for review');
+    assert_same((int)($term_count_result['plugin_validators'] ?? 0), 1, 'WordPress term-count validator is discovered from mu-plugins during merge');
+    assert_same((int)($term_count_result['plugin_validator_conflicts'] ?? 0), 1, 'WordPress term-count validator records the stale taxonomy count');
+    assert_same(scalar($term_count_target, 'SELECT post_title FROM wp_posts WHERE ID = 96'), 'Target post receiving stale topic count', 'WordPress term-count validator preserves the target post edit');
+    assert_same((int)scalar($term_count_target, 'SELECT COUNT(*) FROM wp_term_relationships WHERE term_taxonomy_id = 98'), 2, 'WordPress term-count validator leaves the source relationship assignment staged for review');
+    assert_same((int)scalar($term_count_target, 'SELECT count FROM wp_term_taxonomy WHERE term_taxonomy_id = 98'), 1, 'WordPress term-count validator keeps the stale cached count visible for review');
+
+    $term_count_audit = cow_merge_audit_report($term_count_metadata, (int)$term_count_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-term-count-mismatch',
+        'semantic_scope' => 'wordpress',
+    ]);
+    assert_same(count($term_count_audit['conflicts']), 1, 'WordPress term-count validator exposes count drift as a WordPress-scoped audit conflict');
+    $term_count_payload = cow_merge_audit_decode_payload(json_decode((string)($term_count_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($term_count_payload['logical_identity']['taxonomy'] ?? null, 'forkpress_topic', 'WordPress term-count audit records the custom taxonomy identity');
+    assert_same($term_count_payload['logical_identity']['slug'] ?? null, 'counted-topic', 'WordPress term-count audit records the term slug identity');
+    assert_same($term_count_payload['candidate']['stored_count'] ?? null, 1, 'WordPress term-count audit includes the stale stored count');
+    assert_same($term_count_payload['candidate']['actual_relationship_count'] ?? null, 2, 'WordPress term-count audit includes the actual relationship count');
 
     $term_taxonomy_base_root = $tmp . '/term-taxonomy-base';
     $term_taxonomy_source_root = $tmp . '/term-taxonomy-source';
