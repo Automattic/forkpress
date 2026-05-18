@@ -17,6 +17,7 @@ steps:
 
   - label: ":crab: Linux tests (workspace, excl. CLI)"
     key: linux-tests
+    depends_on: cow-changed-preflight
     command: .buildkite/commands/linux-tests.sh
     plugins:
       - $CI_TOOLKIT_PLUGIN
@@ -47,3 +48,17 @@ steps:
     notify:
       - github_commit_status:
           context: "Buildkite / Linux build"
+
+  # TODO: GHA also runs the matrix on `x86_64-apple-darwin` via the
+  # `macos-15-intel` runner. No Intel Mac queue is visible in a8c BK; raise
+  # with infrastructure if Intel mac coverage is required for parity.
+  - label: ":apple: Mac aarch64 cow-e2e"
+    key: mac-aarch64-cow-e2e
+    depends_on: cow-changed-preflight
+    command: .buildkite/commands/mac-aarch64-cow-e2e.sh
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: mac
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Mac aarch64 cow-e2e"
