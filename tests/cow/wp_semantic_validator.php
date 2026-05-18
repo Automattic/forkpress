@@ -2836,6 +2836,9 @@ PHP);
     }
     copy_tree_for_test($attachment_upload_base_root, $attachment_upload_source_root);
     copy_tree_for_test($attachment_upload_base_root, $attachment_upload_target_root);
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image.jpg', "%PDF-1.4 original content MIME drift bytes\n");
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-300x200.jpg', "%PDF-1.4 generated content MIME drift bytes\n");
+    write_test_file($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-backup.jpg', "%PDF-1.4 backup content MIME drift bytes\n");
     cow_merge_capture_file_base($attachment_upload_base_root, $attachment_upload_file_base);
     cow_merge_allocate_autoincrement_bands($attachment_upload_source, $attachment_upload_metadata, 'feature-wp-attachment-upload-source');
     cow_merge_allocate_autoincrement_bands($attachment_upload_target, $attachment_upload_metadata, 'main');
@@ -2868,6 +2871,7 @@ PHP);
         'width' => 0,
         'height' => 200,
         'filesize' => 1,
+        'mime-type' => 'image/png',
     ];
     $metadata_array['sizes']['missing-file-field'] = [
         'width' => 64,
@@ -2879,6 +2883,7 @@ PHP);
         'width' => 0,
         'height' => 200,
         'filesize' => 1,
+        'mime-type' => 'image/png',
     ];
     if ($has_attachment_upload_symlink) {
         $metadata_array['sizes']['symlinked-generated'] = [
@@ -2890,6 +2895,7 @@ PHP);
     $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE post_id = 63 AND meta_key = '_wp_attachment_metadata'");
     $stmt->bindValue(':metadata', serialize($metadata_array), SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("UPDATE wp_posts SET post_mime_type = 'application/pdf' WHERE ID = 63");
     $db->exec("INSERT INTO wp_postmeta (post_id, meta_key, meta_value) VALUES (63, '_wp_attached_file', '2026/05/generated-image.jpg')");
     $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_mime_type, post_name, guid) VALUES ('Source duplicate upload owner', '', 'inherit', 'attachment', 'image/jpeg', 'source-duplicate-upload-owner', 'wp-content/uploads/2026/05/generated-image.jpg')");
     $duplicate_upload_attachment_id = (int)$db->lastInsertRowID();
@@ -2969,7 +2975,7 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload guard holds unsafe upload states for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 14 : 13;
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 21 : 20;
     if ($has_attachment_upload_case_collision) {
         $expected_attachment_upload_conflicts++;
     }
@@ -3067,6 +3073,51 @@ PHP);
         '_wp_attachment_metadata.sizes.bad-dimensions.filesize',
     ], 'built-in WordPress attachment upload filesize audit names stale metadata fields');
     assert_same($attachment_upload_filesize_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload filesize audit marks regeneration as review-only');
+
+    $attachment_upload_mime_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-mime-drift',
+    ]);
+    assert_same(count($attachment_upload_mime_audit['conflicts']), 3, 'built-in WordPress attachment upload validator rejects stale MIME metadata');
+    $attachment_upload_mime_payloads = array_map(
+        fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+        $attachment_upload_mime_audit['conflicts']
+    );
+    $attachment_upload_mime_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $attachment_upload_mime_payloads);
+    sort($attachment_upload_mime_fields, SORT_STRING);
+    assert_same($attachment_upload_mime_fields, [
+        '_wp_attachment_metadata.backup_sizes.bad-dimensions.mime-type',
+        '_wp_attachment_metadata.sizes.bad-dimensions.mime-type',
+        'wp_posts.post_mime_type',
+    ], 'built-in WordPress attachment upload MIME audit names stale metadata fields');
+    assert_same($attachment_upload_mime_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload MIME audit marks regeneration as review-only');
+
+    $attachment_upload_content_mime_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-content-mime-drift',
+    ]);
+    assert_same(count($attachment_upload_content_mime_audit['conflicts']), 4, 'built-in WordPress attachment upload validator rejects upload bytes that disagree with file extensions');
+    $attachment_upload_content_mime_payloads = array_map(
+        fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+        $attachment_upload_content_mime_audit['conflicts']
+    );
+    $attachment_upload_content_mime_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $attachment_upload_content_mime_payloads);
+    sort($attachment_upload_content_mime_fields, SORT_STRING);
+    assert_same($attachment_upload_content_mime_fields, [
+        '_wp_attached_file',
+        '_wp_attached_file',
+        '_wp_attachment_metadata.backup_sizes.full-orig.file',
+        '_wp_attachment_metadata.sizes.medium.file',
+    ], 'built-in WordPress attachment upload content MIME audit names stale file fields');
+    foreach ($attachment_upload_content_mime_payloads as $payload) {
+        assert_same($payload['candidate']['expected_mime_type'] ?? null, 'image/jpeg', 'built-in WordPress attachment upload content MIME audit records the expected JPEG type');
+        assert_same($payload['candidate']['detected_mime_type'] ?? null, 'application/pdf', 'built-in WordPress attachment upload content MIME audit records detected PDF bytes');
+    }
+    assert_same($attachment_upload_content_mime_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress attachment upload content MIME audit marks regeneration as review-only');
 
     if ($has_attachment_upload_symlink) {
         $attachment_upload_invalid_entry_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [

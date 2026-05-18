@@ -1564,7 +1564,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 103, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 111, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1876,6 +1876,58 @@ PHP);
     assert_true($backup_mime_recorded, 'media validator MIME drift audit payload identifies the affected backup size');
     assert_true($backup_content_mime_recorded, 'media validator MIME drift audit payload identifies backup bytes that disagree with the backup extension');
     assert_true(str_contains($mime_preview, (string)$backup_mime_drift_id), 'media validator MIME drift audit includes the backup-size attachment ID');
+
+    $wp_upload_mime_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-mime-drift',
+    ]);
+    assert_same(count($wp_upload_mime_audit['conflicts']), 5, 'built-in WordPress upload validator exposes post, generated, and backup MIME metadata drift as review-only conflicts');
+    $wp_upload_mime_payloads = array_map(
+        fn($conflict) => cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'media validator WordPress upload MIME payload'),
+        $wp_upload_mime_audit['conflicts']
+    );
+    $wp_upload_mime_paths = [];
+    foreach ($wp_upload_mime_payloads as $payload) {
+        foreach (['attached_file', 'generated_file', 'backup_file'] as $key) {
+            if (isset($payload['candidate'][$key])) {
+                $wp_upload_mime_paths[] = (string)$payload['candidate'][$key];
+            }
+        }
+    }
+    assert_true(in_array('2026/05/source-mime-drift.jpg', $wp_upload_mime_paths, true), 'built-in WordPress upload MIME audit includes the original JPEG attachment');
+    assert_true(in_array('2026/05/source-avif-mime-drift.avif', $wp_upload_mime_paths, true), 'built-in WordPress upload MIME audit includes the AVIF attachment');
+    assert_true(in_array('2026/05/source-pdf-mime-drift.pdf', $wp_upload_mime_paths, true), 'built-in WordPress upload MIME audit includes the PDF attachment');
+    assert_true(in_array('source-generated-mime-thumb.png', $wp_upload_mime_paths, true), 'built-in WordPress upload MIME audit includes the generated-size attachment');
+    assert_true(in_array('source-backup-mime-original.png', $wp_upload_mime_paths, true), 'built-in WordPress upload MIME audit includes the backup-size attachment');
+    assert_same($wp_upload_mime_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress upload MIME repair is review-only');
+
+    $wp_upload_content_mime_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-content-mime-drift',
+    ]);
+    assert_same(count($wp_upload_content_mime_audit['conflicts']), 3, 'built-in WordPress upload validator exposes original, generated, and backup content MIME drift as review-only conflicts');
+    $wp_upload_content_mime_payloads = array_map(
+        fn($conflict) => cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'media validator WordPress upload content MIME payload'),
+        $wp_upload_content_mime_audit['conflicts']
+    );
+    $wp_upload_content_mime_paths = [];
+    foreach ($wp_upload_content_mime_payloads as $payload) {
+        foreach (['file', 'attached_file', 'generated_file', 'backup_file'] as $key) {
+            if (isset($payload['candidate'][$key])) {
+                $wp_upload_content_mime_paths[] = (string)$payload['candidate'][$key];
+            }
+        }
+        assert_same($payload['candidate']['expected_mime_type'] ?? null, 'image/jpeg', 'built-in WordPress upload content MIME audit records the expected JPEG type');
+        assert_same($payload['candidate']['detected_mime_type'] ?? null, 'application/pdf', 'built-in WordPress upload content MIME audit records detected PDF bytes');
+    }
+    assert_true(in_array('2026/05/source-content-mime-drift.jpg', $wp_upload_content_mime_paths, true), 'built-in WordPress upload content MIME audit includes the original attachment bytes');
+    assert_true(in_array('2026/05/source-generated-content-mime-thumb.jpg', $wp_upload_content_mime_paths, true) || in_array('source-generated-content-mime-thumb.jpg', $wp_upload_content_mime_paths, true), 'built-in WordPress upload content MIME audit includes the generated-size bytes');
+    assert_true(in_array('2026/05/source-backup-content-mime-original.jpg', $wp_upload_content_mime_paths, true) || in_array('source-backup-content-mime-original.jpg', $wp_upload_content_mime_paths, true), 'built-in WordPress upload content MIME audit includes the backup-size bytes');
+    assert_same($wp_upload_content_mime_audit['conflicts'][0]['plugin_resolution_policy'] ?? null, 'review-only', 'built-in WordPress upload content MIME repair is review-only');
 
     $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
         'scope' => 'plugin',

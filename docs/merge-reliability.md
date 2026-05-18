@@ -137,6 +137,13 @@ Recent additions in the current merge-reliability work:
   dimensions, or when backup-size `filesize` metadata no longer matches the
   referenced upload file, matching the existing original/generated-size
   metadata checks.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when attachment `post_mime_type`, generated-size `mime-type`, or
+  backup-size `mime-type` metadata disagrees with the referenced upload file
+  extension for common WordPress media extensions.
+- The same validator also records review conflicts when recognizable upload
+  bytes for original, generated-size, or backup-size files disagree with common
+  WordPress media file extensions, such as PDF bytes behind a `.jpg` path.
 - Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin-table parent collisions now
   also hold dependent source child rows when a foreign key would otherwise bind
   them to a different target parent row with the same key.

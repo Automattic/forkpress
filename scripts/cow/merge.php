@@ -10279,6 +10279,46 @@ function cow_merge_wordpress_upload_is_file(string $root, string $relative_path)
     return is_file($path);
 }
 
+function cow_merge_wordpress_expected_upload_mime_type(string $relative_path): ?string {
+    $extension = strtolower((string)pathinfo($relative_path, PATHINFO_EXTENSION));
+    return [
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'avif' => 'image/avif',
+        'pdf' => 'application/pdf',
+        'txt' => 'text/plain',
+    ][$extension] ?? null;
+}
+
+function cow_merge_wordpress_detect_upload_mime_type(string $absolute_path): ?string {
+    $bytes = @file_get_contents($absolute_path, false, null, 0, 32);
+    if (!is_string($bytes) || $bytes === '') {
+        return null;
+    }
+    if (str_starts_with($bytes, "\xFF\xD8\xFF")) {
+        return 'image/jpeg';
+    }
+    if (str_starts_with($bytes, "\x89PNG\r\n\x1A\n")) {
+        return 'image/png';
+    }
+    if (str_starts_with($bytes, 'GIF87a') || str_starts_with($bytes, 'GIF89a')) {
+        return 'image/gif';
+    }
+    if (strlen($bytes) >= 12 && substr($bytes, 0, 4) === 'RIFF' && substr($bytes, 8, 4) === 'WEBP') {
+        return 'image/webp';
+    }
+    if (strlen($bytes) >= 12 && substr($bytes, 4, 4) === 'ftyp' && str_starts_with(substr($bytes, 8), 'avif')) {
+        return 'image/avif';
+    }
+    if (str_starts_with($bytes, '%PDF-')) {
+        return 'application/pdf';
+    }
+    return null;
+}
+
 function cow_merge_wordpress_attachment_upload_issues(string $target_db, string $target_root): array {
     if ($target_root === '' || !is_dir($target_root)) {
         return [];
@@ -10320,6 +10360,16 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
             if (isset($candidate['role'])) {
                 $key_parts[] = (string)$candidate['role'];
             }
+            $manual_review_reason = match ($type) {
+                'plugin-wp-attachment-upload-mime-drift' => 'WordPress attachment MIME metadata disagrees with the referenced upload file extension.',
+                'plugin-wp-attachment-upload-content-mime-drift' => 'WordPress attachment metadata points at an upload file whose bytes do not match its extension.',
+                default => 'WordPress attachment metadata points at upload files that are not present in the merged filesystem.',
+            };
+            $suggested_action = match ($type) {
+                'plugin-wp-attachment-upload-mime-drift',
+                'plugin-wp-attachment-upload-content-mime-drift' => 'Review the attachment rows and upload files, then update metadata or regenerate media derivatives in WordPress before accepting the merged state.',
+                default => 'Restore the missing upload file, update the attachment metadata, or regenerate media derivatives in WordPress before accepting the merged state.',
+            };
             $issues[implode("\0", $key_parts)] = [
                 'plugin' => 'forkpress-wordpress-core',
                 'object' => 'attachment:' . (string)$attachment_id,
@@ -10338,8 +10388,8 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'role' => $candidate['role'] ?? null,
                 ],
                 'resolution_policy' => 'review-only',
-                'manual_review_reason' => 'WordPress attachment metadata points at upload files that are not present in the merged filesystem.',
-                'suggested_action' => 'Restore the missing upload file, update the attachment metadata, or regenerate media derivatives in WordPress before accepting the merged state.',
+                'manual_review_reason' => $manual_review_reason,
+                'suggested_action' => $suggested_action,
                 'candidate' => [
                     'attachment_id' => $attachment_id,
                     'post_title' => $post_title,
@@ -10432,6 +10482,16 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 ]);
                 continue;
             }
+            $expected_post_mime_type = cow_merge_wordpress_expected_upload_mime_type($attached_path);
+            if ($expected_post_mime_type !== null && $post_mime_type !== $expected_post_mime_type) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-mime-drift', 'attachment post MIME type does not match the upload file extension', [
+                    'field' => 'wp_posts.post_mime_type',
+                    'role' => 'post-mime-type',
+                    'attached_file' => $attached_file_raw,
+                    'post_mime_type' => $post_mime_type,
+                    'expected_mime_type' => $expected_post_mime_type,
+                ], [$attached_path]);
+            }
 
             $seen_paths = [];
             $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, &$upload_owners, &$upload_case_owners, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
@@ -10483,6 +10543,19 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 }
                 $upload_case_owners[$case_key][$path][$owner_key]['roles'][$role] = $role;
                 $upload_case_owners[$case_key][$path][$owner_key]['fields'][$field] = $field;
+
+                $expected_content_mime_type = cow_merge_wordpress_expected_upload_mime_type($path);
+                $detected_content_mime_type = cow_merge_wordpress_detect_upload_mime_type($absolute_path);
+                if ($expected_content_mime_type !== null && $detected_content_mime_type !== null && $detected_content_mime_type !== $expected_content_mime_type) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-content-mime-drift', 'attachment upload bytes do not match the referenced file extension', [
+                        'field' => $field,
+                        'role' => $role,
+                        'attached_file' => $attached_file_raw,
+                        'file' => $path,
+                        'expected_mime_type' => $expected_content_mime_type,
+                        'detected_mime_type' => $detected_content_mime_type,
+                    ] + $extra, [$path]);
+                }
             };
             $check_file($attached_path, '_wp_attached_file', 'original');
 
@@ -10616,6 +10689,19 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'actual_filesize' => (int)filesize($size_absolute_path),
                     ], [$size_path]);
                 }
+                $declared_size_mime_type = array_key_exists('mime-type', $size) ? strtolower((string)$size['mime-type']) : null;
+                $expected_size_mime_type = cow_merge_wordpress_expected_upload_mime_type($size_path);
+                if ($declared_size_mime_type !== null && $expected_size_mime_type !== null && $declared_size_mime_type !== $expected_size_mime_type) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-mime-drift', 'attachment generated-size MIME type does not match the generated file extension', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.mime-type',
+                        'role' => 'generated-size-mime-type',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'generated_file' => (string)$size['file'],
+                        'generated_mime_type' => (string)$size['mime-type'],
+                        'expected_mime_type' => $expected_size_mime_type,
+                    ], [$size_path]);
+                }
             }
 
             if (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
@@ -10693,6 +10779,19 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'backup_file' => (string)$backup['file'],
                         'declared_filesize' => $declared_backup_filesize,
                         'actual_filesize' => (int)filesize($backup_absolute_path),
+                    ], [$backup_path]);
+                }
+                $declared_backup_mime_type = array_key_exists('mime-type', $backup) ? strtolower((string)$backup['mime-type']) : null;
+                $expected_backup_mime_type = cow_merge_wordpress_expected_upload_mime_type($backup_path);
+                if ($declared_backup_mime_type !== null && $expected_backup_mime_type !== null && $declared_backup_mime_type !== $expected_backup_mime_type) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-mime-drift', 'attachment backup-size MIME type does not match the backup file extension', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.mime-type',
+                        'role' => 'backup-size-mime-type',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'backup_file' => (string)$backup['file'],
+                        'backup_mime_type' => (string)$backup['mime-type'],
+                        'expected_mime_type' => $expected_backup_mime_type,
                     ], [$backup_path]);
                 }
             }
