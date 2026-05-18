@@ -36,6 +36,11 @@ Recent additions in the current merge-reliability work:
   `wp_template_part` rows with the same theme object key. These stay
   reviewable with WordPress-scoped audit payloads, while preexisting duplicate
   template keys do not block unrelated source templates.
+- Built-in WordPress semantic validation now cross-checks attachment upload
+  metadata against the merged filesystem. A source-side generated-file delete
+  that leaves `_wp_attachment_metadata` pointing at the missing derivative is
+  held as a WordPress-scoped review conflict, and preexisting missing generated
+  files on target do not block unrelated merges.
 - `tests/cow/wp_semantic_validator.php` now includes a built-in WordPress term
   route validator case where source and target create taxonomy terms with the
   same taxonomy, parent, and slug. Newly introduced duplicates stay reviewable,

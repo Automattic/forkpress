@@ -9601,6 +9601,263 @@ function cow_merge_wordpress_block_asset_findings(
     return $findings;
 }
 
+function cow_merge_wordpress_upload_relative_path(string $path): ?string {
+    $path = trim(cow_merge_path_to_unix($path));
+    if ($path === '' || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/', $path) === 1) {
+        return null;
+    }
+    $relative = str_starts_with($path, 'wp-content/uploads/')
+        ? $path
+        : 'wp-content/uploads/' . ltrim($path, '/');
+    return cow_merge_normalize_relative_path($relative);
+}
+
+function cow_merge_wordpress_upload_child_relative_path(string $base_path, string $filename): ?string {
+    $filename = trim(cow_merge_path_to_unix($filename));
+    if ($filename === '' || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/', $filename) === 1) {
+        return null;
+    }
+    if (str_starts_with($filename, 'wp-content/uploads/') || str_contains($filename, '/')) {
+        return cow_merge_wordpress_upload_relative_path($filename);
+    }
+    $directory = dirname($base_path);
+    $directory = $directory === '.' ? 'wp-content/uploads' : $directory;
+    return cow_merge_normalize_relative_path($directory . '/' . $filename);
+}
+
+function cow_merge_wordpress_upload_is_file(string $root, string $relative_path): bool {
+    $path = rtrim($root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relative_path);
+    return is_file($path);
+}
+
+function cow_merge_wordpress_attachment_upload_issues(string $target_db, string $target_root): array {
+    if ($target_root === '' || !is_dir($target_root)) {
+        return [];
+    }
+
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+        foreach (['ID', 'post_title', 'post_type'] as $column) {
+            if (!isset($post_columns[$column])) {
+                return [];
+            }
+        }
+        $postmeta_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_postmeta'), true);
+        foreach (['meta_id', 'post_id', 'meta_key', 'meta_value'] as $column) {
+            if (!isset($postmeta_columns[$column])) {
+                return [];
+            }
+        }
+
+        $issues = [];
+        $record_issue = static function (
+            array &$issues,
+            int $attachment_id,
+            string $post_title,
+            string $type,
+            string $reason,
+            array $candidate,
+            array $files = []
+        ): void {
+            $key_parts = [$type, (string)$attachment_id];
+            if ($files !== []) {
+                $key_parts[] = implode('|', $files);
+            } elseif (isset($candidate['field'])) {
+                $key_parts[] = (string)$candidate['field'];
+            }
+            if (isset($candidate['role'])) {
+                $key_parts[] = (string)$candidate['role'];
+            }
+            $issues[implode("\0", $key_parts)] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'attachment:' . (string)$attachment_id,
+                'reason' => $reason,
+                'type' => $type,
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'files' => $files,
+                'validator' => 'forkpress-wordpress-core-attachment-uploads@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-attachment-upload',
+                    'attachment_id' => $attachment_id,
+                    'files' => $files,
+                    'field' => $candidate['field'] ?? null,
+                    'role' => $candidate['role'] ?? null,
+                ],
+                'manual_review_reason' => 'WordPress attachment metadata points at upload files that are not present in the merged filesystem.',
+                'suggested_action' => 'Restore the missing upload file, update the attachment metadata, or regenerate media derivatives in WordPress before accepting the merged state.',
+                'candidate' => [
+                    'attachment_id' => $attachment_id,
+                    'post_title' => $post_title,
+                ] + $candidate,
+            ];
+        };
+
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT p.ID, p.post_title,
+                    (SELECT f.meta_value FROM wp_postmeta f WHERE f.post_id = p.ID AND f.meta_key = '_wp_attached_file' ORDER BY f.meta_id DESC LIMIT 1) AS attached_file,
+                    (SELECT m.meta_value FROM wp_postmeta m WHERE m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata' ORDER BY m.meta_id DESC LIMIT 1) AS attachment_metadata
+             FROM wp_posts p
+             WHERE p.post_type = 'attachment'
+             ORDER BY p.ID",
+            'failed to prepare WordPress attachment upload inspection'
+        );
+        $res = cow_merge_execute_checked($stmt, $db, 'failed to inspect WordPress attachment uploads');
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+            $attachment_id = (int)$row['ID'];
+            $post_title = (string)$row['post_title'];
+            $attached_file_raw = is_string($row['attached_file'] ?? null) ? (string)$row['attached_file'] : '';
+            $attached_path = cow_merge_wordpress_upload_relative_path($attached_file_raw);
+            if ($attached_path === null) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment has no valid _wp_attached_file upload path', [
+                    'field' => '_wp_attached_file',
+                    'attached_file' => $attached_file_raw,
+                ]);
+                continue;
+            }
+
+            $seen_paths = [];
+            $check_file = static function (string $path, string $field, string $role, array $extra = []) use (&$issues, $record_issue, $target_root, $attachment_id, $post_title, $attached_file_raw, &$seen_paths): void {
+                if (isset($seen_paths[$path])) {
+                    return;
+                }
+                $seen_paths[$path] = true;
+                if (!cow_merge_wordpress_upload_is_file($target_root, $path)) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-missing-file', 'attachment metadata references a missing upload file', [
+                        'field' => $field,
+                        'role' => $role,
+                        'attached_file' => $attached_file_raw,
+                        'missing_file' => $path,
+                    ] + $extra, [$path]);
+                }
+            };
+            $check_file($attached_path, '_wp_attached_file', 'original');
+
+            $metadata_raw = is_string($row['attachment_metadata'] ?? null) ? (string)$row['attachment_metadata'] : '';
+            if ($metadata_raw === '') {
+                continue;
+            }
+            $metadata = @unserialize($metadata_raw, ['allowed_classes' => false]);
+            if (!is_array($metadata)) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid', 'attachment metadata is not readable as serialized PHP', [
+                    'field' => '_wp_attachment_metadata',
+                    'attached_file' => $attached_file_raw,
+                ]);
+                continue;
+            }
+
+            $base_path = $attached_path;
+            if (isset($metadata['file']) && is_string($metadata['file']) && trim($metadata['file']) !== '') {
+                $metadata_path = cow_merge_wordpress_upload_relative_path((string)$metadata['file']);
+                if ($metadata_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment metadata file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.file',
+                        'role' => 'metadata-file',
+                        'attached_file' => $attached_file_raw,
+                        'metadata_file' => (string)$metadata['file'],
+                    ]);
+                } else {
+                    $base_path = $metadata_path;
+                    $check_file($metadata_path, '_wp_attachment_metadata.file', 'metadata-file', [
+                        'metadata_file' => (string)$metadata['file'],
+                    ]);
+                }
+            }
+
+            $sizes = is_array($metadata['sizes'] ?? null) ? $metadata['sizes'] : [];
+            foreach ($sizes as $size_name => $size) {
+                if (!is_array($size) || !isset($size['file']) || !is_string($size['file'])) {
+                    continue;
+                }
+                $size_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$size['file']);
+                if ($size_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment generated-size file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file',
+                        'role' => 'generated-size',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'generated_file' => (string)$size['file'],
+                    ]);
+                    continue;
+                }
+                $check_file($size_path, '_wp_attachment_metadata.sizes.' . (string)$size_name . '.file', 'generated-size', [
+                    'size' => (string)$size_name,
+                    'generated_file' => (string)$size['file'],
+                ]);
+            }
+
+            if (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
+                $original_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$metadata['original_image']);
+                if ($original_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment original_image file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.original_image',
+                        'role' => 'original-image',
+                        'attached_file' => $attached_file_raw,
+                        'original_image' => (string)$metadata['original_image'],
+                    ]);
+                } else {
+                    $check_file($original_path, '_wp_attachment_metadata.original_image', 'original-image', [
+                        'original_image' => (string)$metadata['original_image'],
+                    ]);
+                }
+            }
+
+            $backup_sizes = is_array($metadata['backup_sizes'] ?? null) ? $metadata['backup_sizes'] : [];
+            foreach ($backup_sizes as $backup_name => $backup) {
+                if (!is_array($backup) || !isset($backup['file']) || !is_string($backup['file'])) {
+                    continue;
+                }
+                $backup_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$backup['file']);
+                if ($backup_path === null) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment backup-size file is not a safe upload path', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file',
+                        'role' => 'backup-size',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'backup_file' => (string)$backup['file'],
+                    ]);
+                    continue;
+                }
+                $check_file($backup_path, '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.file', 'backup-size', [
+                    'backup_size' => (string)$backup_name,
+                    'backup_file' => (string)$backup['file'],
+                ]);
+            }
+        }
+        cow_merge_result_finalize_checked($res, 'failed to finalize WordPress attachment upload inspection');
+        return $issues;
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_collect_wordpress_attachment_upload_findings(
+    string $target_db,
+    string $target_root,
+    ?string $target_before_db = null,
+    ?string $target_before_root = null
+): array {
+    $current_issues = cow_merge_wordpress_attachment_upload_issues($target_db, $target_root);
+    if ($current_issues === []) {
+        return [];
+    }
+    $before_issues = [];
+    if (
+        is_string($target_before_db)
+        && $target_before_db !== ''
+        && is_file($target_before_db)
+        && is_string($target_before_root)
+        && $target_before_root !== ''
+        && is_dir($target_before_root)
+    ) {
+        $before_issues = cow_merge_wordpress_attachment_upload_issues($target_before_db, $target_before_root);
+    }
+    return array_values(array_diff_key($current_issues, $before_issues));
+}
+
 function cow_merge_collect_wordpress_semantic_findings(
     string $target_db,
     ?string $target_before_db = null,
@@ -9613,6 +9870,12 @@ function cow_merge_collect_wordpress_semantic_findings(
         cow_merge_collect_wordpress_duplicate_user_login_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_global_styles_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_site_editor_object_findings($target_db, $target_before_db),
+        is_string($target_root) ? cow_merge_collect_wordpress_attachment_upload_findings(
+            $target_db,
+            $target_root,
+            $target_before_db,
+            $target_before_root
+        ) : [],
         cow_merge_wordpress_block_asset_findings($target_db, $target_root, $target_before_root)
     );
 }

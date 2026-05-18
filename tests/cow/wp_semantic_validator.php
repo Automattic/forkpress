@@ -364,6 +364,53 @@ function create_wp_featured_media_db(string $path): void {
     $db->close();
 }
 
+function create_wp_attachment_upload_metadata_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT '',
+        guid TEXT NOT NULL DEFAULT ''
+    )");
+    $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, guid) VALUES
+        (63, 'Attachment with generated files', '', 'inherit', 'attachment', 'generated-attachment', 'wp-content/uploads/2026/05/generated-image.jpg')");
+    $metadata = serialize([
+        'file' => '2026/05/generated-image.jpg',
+        'width' => 1200,
+        'height' => 800,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'generated-image-150x150.jpg',
+                'width' => 150,
+                'height' => 150,
+            ],
+            'medium' => [
+                'file' => 'generated-image-300x200.jpg',
+                'width' => 300,
+                'height' => 200,
+            ],
+        ],
+        'original_image' => 'generated-image-original.jpg',
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'generated-image-backup.jpg',
+                'width' => 1200,
+                'height' => 800,
+            ],
+        ],
+    ]);
+    $stmt = $db->prepare("INSERT INTO wp_postmeta (meta_id, post_id, meta_key, meta_value) VALUES
+        (6300, 63, '_wp_attached_file', '2026/05/generated-image.jpg'),
+        (6301, 63, '_wp_attachment_metadata', :metadata)");
+    $stmt->bindValue(':metadata', $metadata, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
 function create_wp_image_block_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_posts (
@@ -2273,6 +2320,117 @@ PHP);
     $featured_preview = (string)($featured_audit['conflicts'][0]['chosen_preview'] ?? '');
     assert_true(str_contains($featured_preview, '"missing_object_id":61'), 'WordPress featured image audit includes the missing attachment ID');
     assert_true(str_contains($featured_preview, '"field":"_thumbnail_id"'), 'WordPress featured image audit includes the thumbnail field');
+
+    $attachment_upload_base_root = $tmp . '/attachment-upload-base';
+    $attachment_upload_source_root = $tmp . '/attachment-upload-source';
+    $attachment_upload_target_root = $tmp . '/attachment-upload-target';
+    $attachment_upload_base = $attachment_upload_base_root . '/wp-content/database/.ht.sqlite';
+    $attachment_upload_source = $attachment_upload_source_root . '/wp-content/database/.ht.sqlite';
+    $attachment_upload_target = $attachment_upload_target_root . '/wp-content/database/.ht.sqlite';
+    $attachment_upload_metadata = $tmp . '/.forkpress/cow/merge/wp-attachment-upload-validator-metadata.sqlite';
+    $attachment_upload_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-attachment-upload-validator.json';
+
+    mkdir($attachment_upload_base_root . '/wp-content/database', 0777, true);
+    create_wp_attachment_upload_metadata_db($attachment_upload_base);
+    foreach ([
+        'generated-image.jpg',
+        'generated-image-150x150.jpg',
+        'generated-image-300x200.jpg',
+        'generated-image-original.jpg',
+        'generated-image-backup.jpg',
+    ] as $filename) {
+        write_test_file($attachment_upload_base_root . '/wp-content/uploads/2026/05/' . $filename, $filename . ' bytes');
+    }
+    copy_tree_for_test($attachment_upload_base_root, $attachment_upload_source_root);
+    copy_tree_for_test($attachment_upload_base_root, $attachment_upload_target_root);
+    cow_merge_capture_file_base($attachment_upload_base_root, $attachment_upload_file_base);
+    cow_merge_allocate_autoincrement_bands($attachment_upload_source, $attachment_upload_metadata, 'feature-wp-attachment-upload-source');
+    cow_merge_allocate_autoincrement_bands($attachment_upload_target, $attachment_upload_metadata, 'main');
+
+    unlink($attachment_upload_source_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg');
+
+    $db = open_db($attachment_upload_target);
+    $db->exec("UPDATE wp_posts SET post_title = 'Target attachment keeps generated metadata' WHERE ID = 63");
+    $db->close();
+
+    $attachment_upload_result = cow_merge_branch_state(
+        $attachment_upload_base,
+        $attachment_upload_source,
+        $attachment_upload_target,
+        $attachment_upload_metadata,
+        'feature-wp-attachment-upload-source',
+        'main',
+        $attachment_upload_file_base,
+        $attachment_upload_source_root,
+        $attachment_upload_target_root
+    );
+
+    assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload validator holds missing generated files for review');
+    assert_same((int)($attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), 1, 'built-in WordPress attachment upload validator records the generated file conflict');
+    assert_same((int)($attachment_upload_result['plugin_validator_conflicts'] ?? 0), 1, 'built-in WordPress attachment upload validator contributes to plugin-scoped conflict totals');
+    assert_true(!file_exists($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-150x150.jpg'), 'built-in WordPress attachment upload validator leaves the source generated-file deletion staged for review');
+    assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image.jpg'), 'built-in WordPress attachment upload validator preserves the original upload file');
+    assert_true(is_file($attachment_upload_target_root . '/wp-content/uploads/2026/05/generated-image-300x200.jpg'), 'built-in WordPress attachment upload validator preserves unrelated generated files');
+    assert_same(scalar($attachment_upload_target, 'SELECT post_title FROM wp_posts WHERE ID = 63'), 'Target attachment keeps generated metadata', 'built-in WordPress attachment upload validator preserves the target attachment edit');
+
+    $attachment_upload_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'semantic_scope' => 'wordpress',
+        'conflict_type' => 'plugin-wp-attachment-upload-missing-file',
+        'plugin_file' => 'wp-content/uploads/2026/05/generated-image-150x150.jpg',
+    ]);
+    assert_same(count($attachment_upload_audit['conflicts']), 1, 'built-in WordPress attachment upload validator exposes missing generated files as WordPress-scoped audit conflicts');
+    $attachment_upload_preview = (string)($attachment_upload_audit['conflicts'][0]['chosen_preview'] ?? '');
+    $attachment_upload_payload = cow_merge_audit_decode_payload(json_decode((string)($attachment_upload_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_true(str_contains($attachment_upload_preview, '"attachment_id":63'), 'built-in WordPress attachment upload audit includes the attachment ID');
+    assert_same($attachment_upload_payload['candidate']['role'] ?? null, 'generated-size', 'built-in WordPress attachment upload audit identifies generated-size files');
+    assert_same($attachment_upload_payload['candidate']['missing_file'] ?? null, 'wp-content/uploads/2026/05/generated-image-150x150.jpg', 'built-in WordPress attachment upload audit includes the missing upload path');
+    assert_same($attachment_upload_audit['conflicts'][0]['plugin_files'] ?? null, ['wp-content/uploads/2026/05/generated-image-150x150.jpg'], 'built-in WordPress attachment upload audit exposes the missing generated file filter');
+
+    $existing_attachment_upload_base_root = $tmp . '/existing-attachment-upload-base';
+    $existing_attachment_upload_source_root = $tmp . '/existing-attachment-upload-source';
+    $existing_attachment_upload_target_root = $tmp . '/existing-attachment-upload-target';
+    $existing_attachment_upload_base = $existing_attachment_upload_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_attachment_upload_source = $existing_attachment_upload_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_attachment_upload_target = $existing_attachment_upload_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_attachment_upload_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-attachment-upload-validator-metadata.sqlite';
+    $existing_attachment_upload_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-attachment-upload-validator.json';
+
+    mkdir($existing_attachment_upload_base_root . '/wp-content/database', 0777, true);
+    create_wp_attachment_upload_metadata_db($existing_attachment_upload_base);
+    foreach ([
+        'generated-image.jpg',
+        'generated-image-300x200.jpg',
+        'generated-image-original.jpg',
+        'generated-image-backup.jpg',
+    ] as $filename) {
+        write_test_file($existing_attachment_upload_base_root . '/wp-content/uploads/2026/05/' . $filename, $filename . ' bytes');
+    }
+    copy_tree_for_test($existing_attachment_upload_base_root, $existing_attachment_upload_source_root);
+    copy_tree_for_test($existing_attachment_upload_base_root, $existing_attachment_upload_target_root);
+    cow_merge_capture_file_base($existing_attachment_upload_base_root, $existing_attachment_upload_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_attachment_upload_source, $existing_attachment_upload_metadata, 'feature-wp-existing-attachment-upload-source');
+    cow_merge_allocate_autoincrement_bands($existing_attachment_upload_target, $existing_attachment_upload_metadata, 'main');
+
+    $db = open_db($existing_attachment_upload_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name, guid) VALUES ('Unrelated source page', '<!-- wp:paragraph --><p>Unrelated</p><!-- /wp:paragraph -->', 'publish', 'page', 'unrelated-source-page', '')");
+    $db->close();
+
+    $existing_attachment_upload_result = cow_merge_branch_state(
+        $existing_attachment_upload_base,
+        $existing_attachment_upload_source,
+        $existing_attachment_upload_target,
+        $existing_attachment_upload_metadata,
+        'feature-wp-existing-attachment-upload-source',
+        'main',
+        $existing_attachment_upload_file_base,
+        $existing_attachment_upload_source_root,
+        $existing_attachment_upload_target_root
+    );
+
+    assert_same($existing_attachment_upload_result['status'], 'completed', 'built-in WordPress attachment upload validator ignores preexisting missing generated files');
+    assert_same((int)($existing_attachment_upload_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress attachment upload validator only records newly introduced missing generated files');
 
     $image_block_base_root = $tmp . '/image-block-base';
     $image_block_source_root = $tmp . '/image-block-source';
