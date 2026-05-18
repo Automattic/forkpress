@@ -10325,6 +10325,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'field' => $candidate['field'] ?? null,
                     'role' => $candidate['role'] ?? null,
                 ],
+                'resolution_policy' => 'review-only',
                 'manual_review_reason' => 'WordPress attachment metadata points at upload files that are not present in the merged filesystem.',
                 'suggested_action' => 'Restore the missing upload file, update the attachment metadata, or regenerate media derivatives in WordPress before accepting the merged state.',
                 'candidate' => [
@@ -10493,6 +10494,29 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 continue;
             }
 
+            $metadata_width = $metadata['width'] ?? null;
+            $metadata_height = $metadata['height'] ?? null;
+            if (!is_numeric($metadata_width) || !is_numeric($metadata_height) || (int)$metadata_width <= 0 || (int)$metadata_height <= 0) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment original dimensions are invalid', [
+                    'field' => '_wp_attachment_metadata.dimensions',
+                    'role' => 'metadata-dimensions',
+                    'attached_file' => $attached_file_raw,
+                    'width' => $metadata_width,
+                    'height' => $metadata_height,
+                ], [$attached_path]);
+            }
+            $attached_absolute_path = rtrim($target_root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $attached_path);
+            $declared_filesize = $metadata['filesize'] ?? null;
+            if ($declared_filesize !== null && is_file($attached_absolute_path) && (!is_numeric($declared_filesize) || (int)$declared_filesize !== (int)filesize($attached_absolute_path))) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-filesize-drift', 'attachment original filesize metadata does not match the upload file', [
+                    'field' => '_wp_attachment_metadata.filesize',
+                    'role' => 'metadata-filesize',
+                    'attached_file' => $attached_file_raw,
+                    'declared_filesize' => $declared_filesize,
+                    'actual_filesize' => (int)filesize($attached_absolute_path),
+                ], [$attached_path]);
+            }
+
             $base_path = $attached_path;
             if (isset($metadata['file']) && is_string($metadata['file']) && trim($metadata['file']) !== '') {
                 $metadata_path = cow_merge_wordpress_upload_relative_path((string)$metadata['file']);
@@ -10554,6 +10578,32 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'size' => (string)$size_name,
                     'generated_file' => (string)$size['file'],
                 ]);
+                $size_width = $size['width'] ?? null;
+                $size_height = $size['height'] ?? null;
+                if (!is_numeric($size_width) || !is_numeric($size_height) || (int)$size_width <= 0 || (int)$size_height <= 0) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment generated-size dimensions are invalid', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.dimensions',
+                        'role' => 'generated-size-dimensions',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'generated_file' => (string)$size['file'],
+                        'width' => $size_width,
+                        'height' => $size_height,
+                    ], [$size_path]);
+                }
+                $size_absolute_path = rtrim($target_root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $size_path);
+                $declared_size_filesize = $size['filesize'] ?? null;
+                if ($declared_size_filesize !== null && is_file($size_absolute_path) && (!is_numeric($declared_size_filesize) || (int)$declared_size_filesize !== (int)filesize($size_absolute_path))) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-filesize-drift', 'attachment generated-size filesize metadata does not match the upload file', [
+                        'field' => '_wp_attachment_metadata.sizes.' . (string)$size_name . '.filesize',
+                        'role' => 'generated-size-filesize',
+                        'size' => (string)$size_name,
+                        'attached_file' => $attached_file_raw,
+                        'generated_file' => (string)$size['file'],
+                        'declared_filesize' => $declared_size_filesize,
+                        'actual_filesize' => (int)filesize($size_absolute_path),
+                    ], [$size_path]);
+                }
             }
 
             if (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
@@ -10636,6 +10686,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'kind' => 'wordpress-attachment-upload-ownership',
                     'file' => $path,
                 ],
+                'resolution_policy' => 'review-only',
                 'manual_review_reason' => 'WordPress attachment metadata assigns one upload file to multiple attachments.',
                 'suggested_action' => 'Review the attachment rows and metadata, then keep one owner or create distinct upload files before accepting the merged state.',
                 'candidate' => [
@@ -10676,6 +10727,7 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'kind' => 'wordpress-attachment-upload-case-collision',
                     'case_insensitive_file' => $case_key,
                 ],
+                'resolution_policy' => 'review-only',
                 'manual_review_reason' => 'Default macOS and Windows filesystems treat these upload paths as the same file, making attachment ownership ambiguous across platforms.',
                 'suggested_action' => 'Rename or regenerate one upload path so attachment metadata is distinct after case folding before accepting the merged state.',
                 'candidate' => [
