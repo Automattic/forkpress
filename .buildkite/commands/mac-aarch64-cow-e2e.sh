@@ -84,5 +84,8 @@ FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
 echo "--- :crab: cargo build --release forkpress ($TARGET)"
 cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
 
+echo "--- :outbox_tray: Uploading forkpress ($TARGET)"
+buildkite-agent artifact upload "target/$TARGET/release/forkpress"
+
 echo "--- :cow: COW strategy e2e (APFS sparsebundle)"
 FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE=1 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
