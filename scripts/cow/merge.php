@@ -10640,6 +10640,15 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                         'metadata_file' => (string)$metadata['file'],
                     ]);
                 }
+            } else {
+                $metadata_file = $metadata['file'] ?? null;
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-metadata-file-drift', 'attachment metadata file field is missing or empty', [
+                    'field' => '_wp_attachment_metadata.file',
+                    'role' => 'metadata-file',
+                    'attached_file' => $attached_file_raw,
+                    'metadata_file_present' => array_key_exists('file', $metadata),
+                    'metadata_file' => is_scalar($metadata_file) || $metadata_file === null ? $metadata_file : get_debug_type($metadata_file),
+                ], [$attached_path]);
             }
 
             if (isset($metadata['sizes']) && !is_array($metadata['sizes'])) {

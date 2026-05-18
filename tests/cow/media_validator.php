@@ -1580,7 +1580,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 113, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 115, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -2116,6 +2116,18 @@ PHP);
     assert_true($empty_metadata_file_field_recorded, 'media validator mismatch audit payload identifies an empty metadata file field');
     assert_true($url_metadata_file_recorded, 'media validator mismatch audit payload identifies the URL-like metadata file attachment');
     assert_true($drive_metadata_file_recorded, 'media validator mismatch audit payload identifies the drive-letter metadata file attachment');
+
+    $builtin_metadata_file_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-attachment-upload-metadata-file-drift',
+    ]);
+    assert_same(count($builtin_metadata_file_audit['conflicts']), 3, 'built-in WordPress upload validator exposes mismatched, missing, and empty attachment metadata file fields');
+    $builtin_metadata_file_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $builtin_metadata_file_audit['conflicts']));
+    assert_true(str_contains($builtin_metadata_file_preview, 'source-missing-metadata-file-field.jpg'), 'built-in upload validator includes the missing metadata file field attachment');
+    assert_true(str_contains($builtin_metadata_file_preview, (string)$missing_metadata_file_field_id), 'built-in upload validator includes the missing metadata file field attachment ID');
+    assert_true(str_contains($builtin_metadata_file_preview, 'source-empty-metadata-file-field.jpg'), 'built-in upload validator includes the empty metadata file field attachment');
+    assert_true(str_contains($builtin_metadata_file_preview, (string)$empty_metadata_file_field_id), 'built-in upload validator includes the empty metadata file field attachment ID');
 
     $unsafe_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 20, [
         'scope' => 'plugin',
