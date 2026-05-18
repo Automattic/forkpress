@@ -66,6 +66,10 @@ Recent additions in the current merge-reliability work:
 - Source page and attachment deletes are held when the target branch changes
   scalar WordPress options that point at them, currently `page_on_front`,
   `page_for_posts`, and `site_icon`.
+- Source post, term, and menu-item deletes are held when target-edited nav menu
+  metadata points at them through `_menu_item_object_id` or
+  `_menu_item_menu_item_parent`, with type-aware sibling metadata checks to
+  avoid conflating taxonomy IDs with post IDs.
 - Reviewed table rebuild conflicts now retain rebuild-plan evidence for direct
   source indexes/triggers, dependent views, and dependent view triggers.
   `tests/cow/schema_review.php` proves dependency-only source drift returns the
@@ -298,7 +302,9 @@ usermeta rows left pointing at deleted users, and nav menu items left pointing
 at deleted parent menu items or deleted pages, plus featured-image postmeta left pointing at deleted
 attachments/files, target-added or target-edited `_thumbnail_id` metadata
 pointing at source-deleted attachments, target-edited `page_on_front`,
-`page_for_posts`, or `site_icon` options pointing at source-deleted objects, and `core/audio`, `core/cover`, `core/file`, `core/image`,
+`page_for_posts`, or `site_icon` options pointing at source-deleted objects,
+target-edited `_menu_item_object_id` or `_menu_item_menu_item_parent` metadata
+pointing at source-deleted menu objects, and `core/audio`, `core/cover`, `core/file`, `core/image`,
   `core/video`, `core/media-text`, or `core/gallery` block JSON left pointing at
 deleted attachments/files from content-bearing custom post types as well as
 posts/pages, `core/query` block JSON including `taxQuery` and `core/latest-posts` filters left pointing at deleted author

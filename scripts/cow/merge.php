@@ -6195,6 +6195,26 @@ function cow_merge_wordpress_delete_reference_violation(
                     'filter_value' => 'site_icon',
                 ];
             }
+            if (($base_row['post_type'] ?? null) === 'nav_menu_item') {
+                $dependent_specs[] = [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_menu_item_menu_item_parent',
+                ];
+            }
+            if (($base_row['post_type'] ?? null) !== 'nav_menu_item') {
+                $dependent_specs[] = [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_menu_item_object_id',
+                    'sibling_meta_key' => '_menu_item_type',
+                    'sibling_meta_value' => 'post_type',
+                ];
+            }
             if (($base_row['post_type'] ?? null) === 'page') {
                 $dependent_specs[] = [
                     'table' => 'wp_options',
@@ -6235,6 +6255,15 @@ function cow_merge_wordpress_delete_reference_violation(
             $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_terms', (int)$term_id, [
                 ['table' => 'wp_termmeta', 'pk' => 'meta_id', 'owner_column' => 'term_id'],
                 ['table' => 'wp_term_taxonomy', 'pk' => 'term_taxonomy_id', 'owner_column' => 'term_id'],
+                [
+                    'table' => 'wp_postmeta',
+                    'pk' => 'meta_id',
+                    'reference_column' => 'meta_value',
+                    'filter_column' => 'meta_key',
+                    'filter_value' => '_menu_item_object_id',
+                    'sibling_meta_key' => '_menu_item_type',
+                    'sibling_meta_value' => 'taxonomy',
+                ],
             ]);
             if ($target_dependent_violation !== null) {
                 return $target_dependent_violation;
@@ -6334,6 +6363,17 @@ function cow_merge_wordpress_target_changed_dependents_for_deleted_owner(SQLite3
         if ($filter_column !== '') {
             $where .= ' AND ' . cow_merge_quote_ident($filter_column) . ' = :filter_value';
         }
+        if ($dependent_table === 'wp_postmeta' && isset($spec['sibling_meta_key'], $spec['sibling_meta_value'])) {
+            if (!in_array('post_id', $target_columns, true)) {
+                continue;
+            }
+            $where .= ' AND EXISTS ('
+                . 'SELECT 1 FROM wp_postmeta sibling '
+                . 'WHERE sibling.post_id = ' . cow_merge_quote_ident($dependent_table) . '.post_id '
+                . "AND sibling.meta_key = :sibling_meta_key "
+                . "AND sibling.meta_value = :sibling_meta_value"
+                . ')';
+        }
         $columns = cow_merge_all_columns($target_columns, $base_columns);
         $stmt = cow_merge_prepare_checked(
             $target,
@@ -6349,6 +6389,10 @@ function cow_merge_wordpress_target_changed_dependents_for_deleted_owner(SQLite3
         }
         if ($filter_column !== '') {
             cow_merge_bind($stmt, ':filter_value', $filter_value);
+        }
+        if ($dependent_table === 'wp_postmeta' && isset($spec['sibling_meta_key'], $spec['sibling_meta_value'])) {
+            cow_merge_bind($stmt, ':sibling_meta_key', $spec['sibling_meta_key']);
+            cow_merge_bind($stmt, ':sibling_meta_value', $spec['sibling_meta_value']);
         }
         $res = cow_merge_execute_checked($stmt, $target, "failed to inspect target $dependent_table dependencies");
         try {

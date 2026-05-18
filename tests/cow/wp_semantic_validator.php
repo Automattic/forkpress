@@ -2258,6 +2258,104 @@ PHP);
     assert_true(str_contains($menu_preview, '"menu_item_type":"taxonomy"'), 'WordPress menu-reference audit includes the taxonomy menu item type');
     assert_true(str_contains($menu_preview, '"object_type":"category"'), 'WordPress menu-reference audit includes the taxonomy object type');
 
+    $menu_guard_base_root = $tmp . '/menu-metadata-owner-guard-base';
+    $menu_guard_source_root = $tmp . '/menu-metadata-owner-guard-source';
+    $menu_guard_target_root = $tmp . '/menu-metadata-owner-guard-target';
+    $menu_guard_base = $menu_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $menu_guard_source = $menu_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $menu_guard_target = $menu_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $menu_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-metadata-owner-guard-metadata.sqlite';
+
+    mkdir($menu_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_menu_ref_db($menu_guard_base);
+    copy_tree_for_test($menu_guard_base_root, $menu_guard_source_root);
+    copy_tree_for_test($menu_guard_base_root, $menu_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($menu_guard_source, $menu_guard_metadata, 'feature-wp-menu-metadata-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($menu_guard_target, $menu_guard_metadata, 'main');
+
+    $db = open_db($menu_guard_source);
+    $db->exec('DELETE FROM wp_posts WHERE ID = 40');
+    $db->exec('DELETE FROM wp_term_taxonomy WHERE term_id = 43');
+    $db->exec('DELETE FROM wp_terms WHERE term_id = 43');
+    $db->close();
+
+    $db = open_db($menu_guard_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = '40 ' WHERE post_id = 41 AND meta_key = '_menu_item_object_id'");
+    $db->exec("UPDATE wp_postmeta SET meta_value = '43 ' WHERE post_id = 42 AND meta_key = '_menu_item_object_id'");
+    $db->close();
+
+    $menu_guard_result = cow_merge_branch_state(
+        $menu_guard_base,
+        $menu_guard_source,
+        $menu_guard_target,
+        $menu_guard_metadata,
+        'feature-wp-menu-metadata-owner-guard-source',
+        'main'
+    );
+
+    assert_same($menu_guard_result['status'], 'completed_with_conflicts', 'WordPress menu object metadata owner deletes with target-edited value refs stay reviewable');
+    assert_same((int)scalar($menu_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 40'), 1, 'WordPress menu object owner guard keeps the referenced page before review');
+    assert_same((int)scalar($menu_guard_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 43'), 1, 'WordPress menu object owner guard keeps the referenced term before review');
+    assert_same(scalar($menu_guard_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 41 AND meta_key = '_menu_item_object_id'"), '40 ', 'WordPress menu object owner guard preserves target-edited page menu metadata');
+    assert_same(scalar($menu_guard_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 42 AND meta_key = '_menu_item_object_id'"), '43 ', 'WordPress menu object owner guard preserves target-edited taxonomy menu metadata');
+
+    $menu_guard_audit = cow_merge_audit_report($menu_guard_metadata, (int)$menu_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($menu_guard_audit['conflicts']), 2, 'WordPress menu object owner guard records one row constraint per guarded object');
+    $menu_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $menu_guard_audit['conflicts']));
+    foreach (['40', '43'] as $needle) {
+        assert_true(str_contains($menu_guard_preview, $needle), 'WordPress menu object owner guard audit includes ' . $needle);
+    }
+    $menu_guard_reasons = (string)scalar($menu_guard_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_terms') AND decision = 'target-wins'");
+    assert_true(str_contains($menu_guard_reasons, 'target has changed wp_postmeta rows'), 'WordPress menu object owner guard audit explains changed menu metadata blockers');
+
+    $menu_parent_guard_base_root = $tmp . '/menu-parent-metadata-owner-guard-base';
+    $menu_parent_guard_source_root = $tmp . '/menu-parent-metadata-owner-guard-source';
+    $menu_parent_guard_target_root = $tmp . '/menu-parent-metadata-owner-guard-target';
+    $menu_parent_guard_base = $menu_parent_guard_base_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_guard_source = $menu_parent_guard_source_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_guard_target = $menu_parent_guard_target_root . '/wp-content/database/.ht.sqlite';
+    $menu_parent_guard_metadata = $tmp . '/.forkpress/cow/merge/wp-menu-parent-metadata-owner-guard-metadata.sqlite';
+
+    mkdir($menu_parent_guard_base_root . '/wp-content/database', 0777, true);
+    create_wp_menu_parent_reference_db($menu_parent_guard_base);
+    copy_tree_for_test($menu_parent_guard_base_root, $menu_parent_guard_source_root);
+    copy_tree_for_test($menu_parent_guard_base_root, $menu_parent_guard_target_root);
+    cow_merge_allocate_autoincrement_bands($menu_parent_guard_source, $menu_parent_guard_metadata, 'feature-wp-menu-parent-metadata-owner-guard-source');
+    cow_merge_allocate_autoincrement_bands($menu_parent_guard_target, $menu_parent_guard_metadata, 'main');
+
+    $db = open_db($menu_parent_guard_source);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 47');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 47');
+    $db->close();
+
+    $db = open_db($menu_parent_guard_target);
+    $db->exec("UPDATE wp_postmeta SET meta_value = '47 ' WHERE post_id = 48 AND meta_key = '_menu_item_menu_item_parent'");
+    $db->close();
+
+    $menu_parent_guard_result = cow_merge_branch_state(
+        $menu_parent_guard_base,
+        $menu_parent_guard_source,
+        $menu_parent_guard_target,
+        $menu_parent_guard_metadata,
+        'feature-wp-menu-parent-metadata-owner-guard-source',
+        'main'
+    );
+
+    assert_same($menu_parent_guard_result['status'], 'completed_with_conflicts', 'WordPress menu-parent metadata owner delete with target-edited value refs stays reviewable');
+    assert_same((int)scalar($menu_parent_guard_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 47'), 1, 'WordPress menu-parent owner guard keeps the referenced menu item before review');
+    assert_same(scalar($menu_parent_guard_target, "SELECT meta_value FROM wp_postmeta WHERE post_id = 48 AND meta_key = '_menu_item_menu_item_parent'"), '47 ', 'WordPress menu-parent owner guard preserves target-edited parent metadata');
+
+    $menu_parent_guard_audit = cow_merge_audit_report($menu_parent_guard_metadata, (int)$menu_parent_guard_result['run_id'], 10, [
+        'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
+    ]);
+    assert_same(count($menu_parent_guard_audit['conflicts']), 1, 'WordPress menu-parent owner guard records one row constraint conflict');
+    $menu_parent_guard_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $menu_parent_guard_audit['conflicts']));
+    assert_true(str_contains($menu_parent_guard_preview, '47'), 'WordPress menu-parent owner guard audit includes the guarded menu item ID');
+
     $featured_base_root = $tmp . '/featured-media-base';
     $featured_source_root = $tmp . '/featured-media-source';
     $featured_target_root = $tmp . '/featured-media-target';
