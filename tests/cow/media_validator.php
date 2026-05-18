@@ -1010,6 +1010,7 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-subdir.jpg', "source generated subdir original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/nested/source-generated-subdir-150x150.jpg', "source generated subdir thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-missing-scaled.jpg', "source missing original_image scaled bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-empty-scaled.jpg', "source empty original_image scaled bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-unsafe-scaled.jpg', "source unsafe original_image scaled bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-original-image-subdir-scaled.jpg', "source subdir original_image scaled bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/nested/source-original-image-subdir-original.jpg', "source subdir original_image original bytes\n");
@@ -1307,6 +1308,13 @@ PHP);
         'original_image' => 'source-original-image-missing-original.jpg',
         'sizes' => [],
     ]);
+    $original_image_empty_id = insert_attachment($db, 'Source media empty original image field', '2026/05/source-original-image-empty-scaled.jpg', [
+        'file' => '2026/05/source-original-image-empty-scaled.jpg',
+        'width' => 640,
+        'height' => 480,
+        'original_image' => '',
+        'sizes' => [],
+    ]);
     $original_image_unsafe_id = insert_attachment($db, 'Source media unsafe original image path', '2026/05/source-original-image-unsafe-scaled.jpg', [
         'file' => '2026/05/source-original-image-unsafe-scaled.jpg',
         'width' => 640,
@@ -1580,7 +1588,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 116, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 118, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1638,7 +1646,7 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-generated-file-drift',
     ]);
-    assert_same(count($audit['conflicts']), 4, 'media validator exposes malformed, incomplete, non-basename generated-size, and non-basename original_image metadata as plugin-scoped audit conflicts');
+    assert_same(count($audit['conflicts']), 5, 'media validator exposes malformed, incomplete, non-empty, and non-basename generated-size/original_image metadata as plugin-scoped audit conflicts');
     $preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $audit['conflicts']));
     assert_true(str_contains($preview, 'source-generated-missing-file-key.jpg'), 'media validator audit includes the affected attachment');
     assert_true(str_contains($preview, '"generated_file":null'), 'media validator audit records the missing generated file field');
@@ -1647,7 +1655,9 @@ PHP);
     assert_true(str_contains($preview, (string)$sizes_not_array_id), 'media validator audit includes the malformed generated sizes attachment ID');
     assert_true(str_contains($preview, 'nested/source-generated-subdir-150x150.jpg'), 'media validator audit includes the non-basename generated filename');
     assert_true(str_contains($preview, (string)$generated_subdir_id), 'media validator audit includes the non-basename generated attachment ID');
+    assert_true(str_contains($preview, (string)$original_image_empty_id), 'media validator audit includes the empty original_image attachment ID');
     $original_image_subdir_recorded = false;
+    $original_image_empty_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-generated-file-drift'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
@@ -1655,9 +1665,13 @@ PHP);
         if (($decoded['candidate']['original_image'] ?? null) === 'nested/source-original-image-subdir-original.jpg') {
             $original_image_subdir_recorded = true;
         }
+        if (($decoded['candidate']['attachment_id'] ?? null) === $original_image_empty_id && ($decoded['candidate']['original_image'] ?? null) === '') {
+            $original_image_empty_recorded = true;
+        }
     }
     $payloads->finalize();
     $meta_db->close();
+    assert_true($original_image_empty_recorded, 'media validator audit payload identifies the empty original_image filename');
     assert_true($original_image_subdir_recorded, 'media validator audit payload identifies the non-basename original_image filename');
     assert_true(str_contains($preview, (string)$original_image_subdir_id), 'media validator audit includes the non-basename original_image attachment ID');
 
@@ -1666,7 +1680,7 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-attachment-metadata-invalid-shape',
     ]);
-    assert_same(count($invalid_shape_audit['conflicts']), 11, 'media validator exposes malformed image_meta, generated-size, original_image, and backup-size metadata shapes as plugin-scoped audit conflicts');
+    assert_same(count($invalid_shape_audit['conflicts']), 12, 'media validator exposes malformed image_meta, generated-size, original_image, and backup-size metadata shapes as plugin-scoped audit conflicts');
     $invalid_shape_payloads = array_map(
         fn($conflict) => cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'media validator invalid-shape payload'),
         $invalid_shape_audit['conflicts']
@@ -1685,6 +1699,7 @@ PHP);
         '_wp_attachment_metadata.backup_sizes.full-orig.file',
         '_wp_attachment_metadata.dimensions',
         '_wp_attachment_metadata.image_meta',
+        '_wp_attachment_metadata.original_image',
         '_wp_attachment_metadata.original_image',
         '_wp_attachment_metadata.sizes',
         '_wp_attachment_metadata.sizes.thumbnail.dimensions',
@@ -1707,6 +1722,7 @@ PHP);
     $invalid_shape_payload_preview = implode("\n", array_map(fn($payload) => json_encode($payload, JSON_UNESCAPED_SLASHES), $invalid_shape_payloads));
     assert_true(str_contains($invalid_shape_payload_preview, (string)$generated_subdir_id), 'built-in WordPress upload invalid-shape audit includes the generated subdir attachment ID');
     assert_true(str_contains($invalid_shape_payload_preview, (string)$image_meta_drift_id), 'built-in WordPress upload invalid-shape audit includes the malformed image_meta attachment ID');
+    assert_true(str_contains($invalid_shape_payload_preview, (string)$original_image_empty_id), 'built-in WordPress upload invalid-shape audit includes the empty original_image attachment ID');
     assert_true(str_contains($invalid_shape_payload_preview, (string)$original_image_subdir_id), 'built-in WordPress upload invalid-shape audit includes the original_image subdir attachment ID');
     assert_true(str_contains($invalid_shape_payload_preview, (string)$backup_subdir_id), 'built-in WordPress upload invalid-shape audit includes the backup subdir attachment ID');
 

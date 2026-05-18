@@ -10745,7 +10745,15 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                 }
             }
 
-            if (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
+            if (array_key_exists('original_image', $metadata) && (!is_string($metadata['original_image']) || trim($metadata['original_image']) === '')) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment original_image file is empty or not a string', [
+                    'field' => '_wp_attachment_metadata.original_image',
+                    'role' => 'original-image',
+                    'attached_file' => $attached_file_raw,
+                    'original_image' => is_scalar($metadata['original_image']) || $metadata['original_image'] === null ? $metadata['original_image'] : get_debug_type($metadata['original_image']),
+                    'value_type' => get_debug_type($metadata['original_image']),
+                ], [$attached_path]);
+            } elseif (isset($metadata['original_image']) && is_string($metadata['original_image']) && trim($metadata['original_image']) !== '') {
                 $original_path = cow_merge_wordpress_upload_child_relative_path($base_path, (string)$metadata['original_image']);
                 if ($original_path === null) {
                     $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-invalid-path', 'attachment original_image file is not a safe upload path', [
