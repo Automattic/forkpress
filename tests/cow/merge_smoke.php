@@ -3644,6 +3644,146 @@ try {
         'page-plus-audio-cover-video smoke merge audits target upload files'
     );
 
+    $media_refs_edit_delete_base_root = $tmp . '/media-refs-edit-delete-base-root';
+    $media_refs_edit_delete_source_root = $tmp . '/media-refs-edit-delete-source-root';
+    $media_refs_edit_delete_target_root = $tmp . '/media-refs-edit-delete-target-root';
+    $media_refs_edit_delete_base = $media_refs_edit_delete_base_root . '/wp-content/database/.ht.sqlite';
+    $media_refs_edit_delete_source = $media_refs_edit_delete_source_root . '/wp-content/database/.ht.sqlite';
+    $media_refs_edit_delete_target = $media_refs_edit_delete_target_root . '/wp-content/database/.ht.sqlite';
+    $media_refs_edit_delete_file_base = $tmp . '/.forkpress/cow/merge/file-bases/feature-smoke-page-media-refs-edit-delete.json';
+    $media_refs_edit_delete_metadata = $tmp . '/.forkpress/cow/merge/media-refs-edit-delete-metadata.sqlite';
+
+    mkdir(dirname($media_refs_edit_delete_base), 0777, true);
+    mkdir(dirname($media_refs_edit_delete_source), 0777, true);
+    mkdir(dirname($media_refs_edit_delete_target), 0777, true);
+    smoke_create_posts_db($media_refs_edit_delete_base);
+
+    $base_media_refs_content = '<!-- wp:audio {"id":17000341} --><figure class="wp-block-audio"><audio controls src="http://example.test/wp-content/uploads/2026/05/shared-audio.mp3"></audio></figure><!-- /wp:audio -->' .
+        '<!-- wp:cover {"url":"http://example.test/wp-content/uploads/2026/05/shared-cover.jpg","id":17000351,"dimRatio":40} --><div class="wp-block-cover"><img class="wp-block-cover__image-background wp-image-17000351" alt="" src="http://example.test/wp-content/uploads/2026/05/shared-cover.jpg"/><div class="wp-block-cover__inner-container"><!-- wp:paragraph --><p>Base cover copy</p><!-- /wp:paragraph --></div></div><!-- /wp:cover -->' .
+        '<!-- wp:video {"id":17000361} --><figure class="wp-block-video"><video controls src="http://example.test/wp-content/uploads/2026/05/shared-video.mp4"></video></figure><!-- /wp:video -->';
+    $source_media_refs_content = '<!-- wp:audio {"id":17000341} --><figure class="wp-block-audio"><audio controls src="http://example.test/wp-content/uploads/2026/05/shared-audio.mp3"></audio><figcaption>Source audio edit</figcaption></figure><!-- /wp:audio -->' .
+        '<!-- wp:cover {"url":"http://example.test/wp-content/uploads/2026/05/shared-cover.jpg","id":17000351,"dimRatio":65} --><div class="wp-block-cover"><img class="wp-block-cover__image-background wp-image-17000351" alt="" src="http://example.test/wp-content/uploads/2026/05/shared-cover.jpg"/><div class="wp-block-cover__inner-container"><!-- wp:paragraph --><p>Source cover edit</p><!-- /wp:paragraph --></div></div><!-- /wp:cover -->' .
+        '<!-- wp:video {"id":17000361} --><figure class="wp-block-video"><video controls src="http://example.test/wp-content/uploads/2026/05/shared-video.mp4"></video><figcaption>Source video edit</figcaption></figure><!-- /wp:video -->';
+    $base_media_ref_rows = [
+        [
+            'attachment_id' => 17000341,
+            'attached_meta_id' => 17000342,
+            'metadata_meta_id' => 17000343,
+            'title' => 'shared-audio.mp3',
+            'slug' => 'shared-audio-mp3',
+            'file' => '2026/05/shared-audio.mp3',
+            'mime' => 'audio/mpeg',
+            'base_bytes' => 'base shared audio bytes',
+            'source_bytes' => 'source edited shared audio bytes',
+            'base_metadata' => serialize(['file' => '2026/05/shared-audio.mp3', 'length' => 10]),
+            'source_metadata' => serialize(['file' => '2026/05/shared-audio.mp3', 'length' => 12]),
+        ],
+        [
+            'attachment_id' => 17000351,
+            'attached_meta_id' => 17000352,
+            'metadata_meta_id' => 17000353,
+            'title' => 'shared-cover.jpg',
+            'slug' => 'shared-cover-jpg',
+            'file' => '2026/05/shared-cover.jpg',
+            'mime' => 'image/jpeg',
+            'base_bytes' => 'base shared cover bytes',
+            'source_bytes' => 'source edited shared cover bytes',
+            'base_metadata' => serialize(['file' => '2026/05/shared-cover.jpg', 'width' => 640, 'height' => 480]),
+            'source_metadata' => serialize(['file' => '2026/05/shared-cover.jpg', 'width' => 1024, 'height' => 768]),
+        ],
+        [
+            'attachment_id' => 17000361,
+            'attached_meta_id' => 17000362,
+            'metadata_meta_id' => 17000363,
+            'title' => 'shared-video.mp4',
+            'slug' => 'shared-video-mp4',
+            'file' => '2026/05/shared-video.mp4',
+            'mime' => 'video/mp4',
+            'base_bytes' => 'base shared video bytes',
+            'source_bytes' => 'source edited shared video bytes',
+            'base_metadata' => serialize(['file' => '2026/05/shared-video.mp4', 'length' => 20]),
+            'source_metadata' => serialize(['file' => '2026/05/shared-video.mp4', 'length' => 25]),
+        ],
+    ];
+    $db = smoke_open_db($media_refs_edit_delete_base);
+    smoke_insert_post($db, 17000340, 'Shared Page With Media Blocks', $base_media_refs_content, 'page', 'shared-page-with-media-blocks');
+    foreach ($base_media_ref_rows as $row) {
+        $guid = 'http://example.test/wp-content/uploads/' . $row['file'];
+        smoke_insert_post($db, (int)$row['attachment_id'], (string)$row['title'], '', 'attachment', (string)$row['slug'], 'inherit', 17000340, (string)$row['mime'], $guid);
+        smoke_insert_postmeta($db, (int)$row['attached_meta_id'], (int)$row['attachment_id'], '_wp_attached_file', (string)$row['file']);
+        smoke_insert_postmeta($db, (int)$row['metadata_meta_id'], (int)$row['attachment_id'], '_wp_attachment_metadata', (string)$row['base_metadata']);
+        smoke_write_file($media_refs_edit_delete_base_root . '/wp-content/uploads/' . $row['file'], (string)$row['base_bytes']);
+    }
+    $db->close();
+    copy($media_refs_edit_delete_base, $media_refs_edit_delete_source);
+    copy($media_refs_edit_delete_base, $media_refs_edit_delete_target);
+    foreach ($base_media_ref_rows as $row) {
+        smoke_write_file($media_refs_edit_delete_source_root . '/wp-content/uploads/' . $row['file'], (string)$row['base_bytes']);
+        smoke_write_file($media_refs_edit_delete_target_root . '/wp-content/uploads/' . $row['file'], (string)$row['base_bytes']);
+    }
+    cow_merge_capture_file_base($media_refs_edit_delete_base_root, $media_refs_edit_delete_file_base);
+
+    $db = smoke_open_db($media_refs_edit_delete_source);
+    $stmt = $db->prepare("UPDATE wp_posts SET post_title = :title, post_content = :content WHERE ID = 17000340");
+    $stmt->bindValue(':title', 'Source Edited Page With Media Blocks', SQLITE3_TEXT);
+    $stmt->bindValue(':content', $source_media_refs_content, SQLITE3_TEXT);
+    $stmt->execute();
+    foreach ($base_media_ref_rows as $row) {
+        $db->exec('UPDATE wp_posts SET post_title = ' . "'" . SQLite3::escapeString('Source Edited ' . (string)$row['title']) . "'" . ' WHERE ID = ' . (int)$row['attachment_id']);
+        $stmt = $db->prepare("UPDATE wp_postmeta SET meta_value = :metadata WHERE meta_id = :meta_id");
+        $stmt->bindValue(':metadata', (string)$row['source_metadata'], SQLITE3_TEXT);
+        $stmt->bindValue(':meta_id', (int)$row['metadata_meta_id'], SQLITE3_INTEGER);
+        $stmt->execute();
+        smoke_write_file($media_refs_edit_delete_source_root . '/wp-content/uploads/' . $row['file'], (string)$row['source_bytes']);
+    }
+    $db->close();
+
+    $db = smoke_open_db($media_refs_edit_delete_target);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id IN (17000341, 17000351, 17000361)');
+    $db->exec('DELETE FROM wp_posts WHERE ID IN (17000340, 17000341, 17000351, 17000361)');
+    $db->close();
+    foreach ($base_media_ref_rows as $row) {
+        unlink($media_refs_edit_delete_target_root . '/wp-content/uploads/' . $row['file']);
+    }
+
+    $media_refs_edit_delete_result = cow_merge_branch_state(
+        $media_refs_edit_delete_base,
+        $media_refs_edit_delete_source,
+        $media_refs_edit_delete_target,
+        $media_refs_edit_delete_metadata,
+        'feature-smoke-page-media-refs-edit-delete',
+        'main',
+        $media_refs_edit_delete_file_base,
+        $media_refs_edit_delete_source_root,
+        $media_refs_edit_delete_target_root
+    );
+    assert_same($media_refs_edit_delete_result['status'], 'completed_with_conflicts', 'media block page edit/delete graph stays reviewable');
+    assert_same((int)smoke_scalar($media_refs_edit_delete_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID IN (17000340, 17000341, 17000351, 17000361)'), 0, 'media block page edit/delete preserves target page and attachment deletion before review');
+    assert_same((int)smoke_scalar($media_refs_edit_delete_target, 'SELECT COUNT(*) FROM wp_postmeta WHERE post_id IN (17000341, 17000351, 17000361)'), 0, 'media block page edit/delete preserves target attachment metadata deletion before review');
+    foreach ($base_media_ref_rows as $row) {
+        assert_same(file_exists($media_refs_edit_delete_target_root . '/wp-content/uploads/' . $row['file']), false, 'media block page edit/delete preserves target upload deletion for ' . $row['file']);
+    }
+    assert_same(
+        (int)smoke_scalar($media_refs_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_posts' AND conflict_type = 'row-target-deleted'"),
+        4,
+        'media block page edit/delete records the page and attachment row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = 'wp_postmeta' AND conflict_type = 'row-target-deleted'"),
+        3,
+        'media block page edit/delete records the edited attachment metadata row conflicts'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_edit_delete_metadata, "SELECT COUNT(*) FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-target-deleted'"),
+        3,
+        'media block page edit/delete records each edited upload file conflict'
+    );
+    assert_same(
+        (int)smoke_scalar($media_refs_edit_delete_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_postmeta', '__files__') AND decision = 'target-wins'"),
+        10,
+        'media block page edit/delete defaults the changed source media graph to target-wins before review'
+    );
+
     $options_base = $tmp . '/options-base.sqlite';
     $options_source = $tmp . '/options-source.sqlite';
     $options_target = $tmp . '/options-target.sqlite';

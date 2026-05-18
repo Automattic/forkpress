@@ -185,7 +185,7 @@ metadata, `core/image`/`core/gallery`/`core/file`/`core/media-text`/
 and serialized payloads without rewrite.
 It also includes page/postmeta, child page, revision, user, comment, threaded
 comment, taxonomy term, reusable block, synced pattern, navigation block,
-template part, template, menu, attachment, and option edit/delete conflict cases that must stay reviewable and
+template part, template, menu, attachment, media block page, and option edit/delete conflict cases that must stay reviewable and
 keep the target deletion until review. The page/postmeta case covers the
 `wp_posts` row and its `wp_postmeta` graph, the child page case covers a deleted
 child `wp_posts` row while preserving the unchanged parent page, the revision
@@ -200,6 +200,9 @@ the deleted `wp_template_part` row and target page cleanup, the template case co
 the deleted `wp_template` row and target page template assignment cleanup, the menu case covers menu
 terms, taxonomy rows, menu item posts, menu item metadata, relationships, and
 theme-mod location cleanup, the attachment case covers the DB and file graph,
+the media block page case covers a deleted page plus `core/audio`,
+`core/cover`, and `core/video` attachment rows, attachment metadata, and upload
+files,
 and the option cases cover JSON and serialized `wp_options` rows plus global
 front/posts page singleton, serialized sticky-post, and scalar site-icon option
 disagreements, plus serialized theme-mod custom-logo and media-image widget
