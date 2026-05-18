@@ -145,7 +145,10 @@ reviewed conflicts back to `needs-action`. Source-added index, view, and
 trigger conflicts can be classified as `compatible-schema-*-target-drift` when
 the source object still matches review, the original target had no same-name
 object, target drifted to a same-name object, and a dry-run source replacement
-validates over the current target. Dropped-table restore conflicts can be
+validates over the current target. Source-added or source-changed index, view,
+and trigger conflicts can be classified as `compatible-source-drift` when the
+target side still matches review and the current source object validates over
+the current target. Dropped-table restore conflicts can be
 classified as `compatible-source-drift` when the target table is still absent
 and a dry-run restore of the current source table, rows, and dependencies
 validates; source indexes or triggers that already have their own schema

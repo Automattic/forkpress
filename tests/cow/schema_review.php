@@ -2311,6 +2311,10 @@ SQL);
     $db->exec('CREATE UNIQUE INDEX plugin_index_revalidate_label_idx ON plugin_index_revalidate(upper(label))');
     $db->close();
 
+    $db = open_db($index_revalidate_target);
+    $db->exec('DELETE FROM plugin_index_revalidate WHERE id = 2');
+    $db->close();
+
     $index_revalidated = cow_merge_revalidate_reviewed_conflicts($index_revalidate_metadata, $index_revalidate_run_id, 'cow-revalidate');
     assert_same($index_revalidated['checked'], 1, 'schema index revalidation checks the reviewed index conflict');
     assert_same($index_revalidated['reviewed'], 1, 'schema index revalidation sees the reviewed index conflict');
@@ -2318,8 +2322,8 @@ SQL);
     assert_same($index_revalidated['carried'], 1, 'schema index revalidation carries changed source index evidence to needs-action');
     assert_same(
         scalar($index_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
-        'unclassified',
-        'schema index source drift remains unclassified until a schema planner proves compatibility'
+        'compatible-source-drift',
+        'schema index source drift is classified compatible when the current source index validates'
     );
     assert_true(
         str_contains((string)scalar($index_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $index_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
@@ -2339,7 +2343,22 @@ SQL);
     ]);
     $index_revalidate_conflicts = array_values(array_filter($index_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $index_revalidate_conflict_id));
     assert_same(count($index_revalidate_conflicts), 1, 'schema index source drift returns the reviewed conflict to the needs-action audit queue');
-    assert_same($index_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema index audit exposes the conservative unclassified revalidation');
+    assert_same($index_revalidate_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'schema index audit exposes compatible source-drift revalidation');
+    assert_true($index_revalidate_conflicts[0]['after_revalidate_supported'] ?? false, 'schema index source drift advertises guarded after-revalidate support');
+    $index_revalidate_resolution = cow_merge_resolve_conflict(
+        $index_revalidate_metadata,
+        $index_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply current source index after compatible source drift.',
+        'cow-test',
+        true
+    );
+    assert_same($index_revalidate_resolution['status'], 'applied', 'compatible schema index source drift resolves after revalidation');
+    assert_true(
+        str_contains((string)scalar($index_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_index_revalidate_label_idx'"), 'upper(label)'),
+        'compatible schema index source drift applies the current source index SQL'
+    );
 } finally {
     remove_tree($tmp);
 }

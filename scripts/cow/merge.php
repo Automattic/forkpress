@@ -14041,7 +14041,7 @@ function cow_merge_resolve_schema_conflict(
                 throw new RuntimeException("schema conflict #$conflict_id does not contain a source index SQL payload");
             }
             $current_source_sql = cow_merge_index_sql($source, $object);
-            if (!cow_merge_values_equal($current_source_sql, $source_sql)) {
+            if (!$after_revalidate && !cow_merge_values_equal($current_source_sql, $source_sql)) {
                 throw new RuntimeException('source index no longer matches the audited conflict source value; rerun merge before resolving');
             }
             $current_target_sql = cow_merge_index_sql($target, $object);
@@ -14051,9 +14051,10 @@ function cow_merge_resolve_schema_conflict(
                 $current_target_payload = cow_merge_payload_json($current_target_sql);
                 cow_merge_require_after_revalidate($meta, $conflict_id, $current_source_payload, $current_target_payload);
                 $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
-                if ((string)($latest_revalidation['revalidation_class'] ?? '') !== 'compatible-schema-index-target-drift') {
+                if (!in_array((string)($latest_revalidation['revalidation_class'] ?? ''), ['compatible-schema-index-target-drift', 'compatible-source-drift'], true)) {
                     throw new RuntimeException('latest schema revalidation did not prove this source-added index drift is compatible');
                 }
+                $source_sql = $current_source_sql;
             } else {
                 if ($target_payload === null) {
                     if ($current_target_sql !== null) {
@@ -17722,14 +17723,18 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 $revalidation_class = 'unclassified';
                 if (
                     in_array($conflict_type, ['schema-source-added-index', 'schema-source-changed-index'], true) &&
-                    $source_fresh &&
-                    !$target_fresh &&
+                    (
+                        ($source_fresh && !$target_fresh) ||
+                        (!$source_fresh && $target_fresh)
+                    ) &&
                     $current_source_sql !== null
                 ) {
                     $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
                     try {
                         cow_merge_apply_source_index_schema_resolution($target, $object, $current_source_sql, false);
-                        $revalidation_class = 'compatible-schema-index-target-drift';
+                        $revalidation_class = $source_fresh
+                            ? 'compatible-schema-index-target-drift'
+                            : 'compatible-source-drift';
                     } catch (Throwable) {
                         $revalidation_class = 'unclassified';
                     } finally {
