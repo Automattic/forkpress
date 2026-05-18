@@ -27,43 +27,33 @@ php --version | head -1
 echo "--- :crab: rustup target add $TARGET"
 rustup target add "$TARGET"
 
-# static-php-cli's `doctor` runs two musl checks that fail on a stock Debian
-# host and would otherwise drop to an interactive "Do you want to fix it?"
-# prompt the BK agent can't answer. `tests/release/build-dist-preflight.sh`
-# forbids passing `--auto-fix` to `doctor`, so we install both upfront with
-# the same commands `doctor` would run:
-#
-#   1. musl-wrapper: musl-1.2.5 built from source, installed to /usr/local/musl
-#   2. musl-cross-make: prebuilt cross toolchain tarball from static-php.dev
-#
-# On GHA `ubuntu-24.04` these are restored from the `.build/` cache;
-# we don't cache yet, so we pay the install cost each run.
-echo "--- :hammer: Installing musl-wrapper (musl 1.2.5)"
-if [ ! -f /usr/local/musl/lib/libc.a ]; then
-  tmpdir="$(mktemp -d)"
-  curl -sSLo "$tmpdir/musl-1.2.5.tar.gz" https://musl.libc.org/releases/musl-1.2.5.tar.gz
-  tar -xzf "$tmpdir/musl-1.2.5.tar.gz" -C "$tmpdir"
-  (
-    cd "$tmpdir/musl-1.2.5"
-    CC=gcc CXX=g++ AR=ar LD=ld ./configure --disable-gcc-wrapper >/dev/null
-    CC=gcc CXX=g++ AR=ar LD=ld make -j"$(nproc)" >/dev/null
-    CC=gcc CXX=g++ AR=ar LD=ld make install >/dev/null
-  )
-  rm -rf "$tmpdir"
-else
-  echo "/usr/local/musl/lib/libc.a already present"
+# `scripts/build-dist.sh` (correctly) refuses to pass `--auto-fix` to
+# static-php-cli's `doctor` — `tests/release/build-dist-preflight.sh`
+# enforces that policy so the operator stays in charge of the tooling
+# baked into the release artifact. The "operator" on BK is this CI script,
+# so we pre-clone the same spc revision into the same `BUILD_DIR` the
+# release script will use and run `doctor --auto-fix` here. By the time
+# `build-dist.sh` runs its own `doctor` invocation, every prereq it would
+# ask about (musl-wrapper, musl-cross-make, pkg-config, ...) is already
+# installed, so no interactive prompt is reached.
+echo "--- :hammer: Pre-running spc doctor --auto-fix"
+# Keep this in sync with `SPC_REF` in `scripts/build-dist.sh`. If it drifts,
+# build-dist.sh will fetch+checkout the right ref afterward, but the doctor
+# we run here might be from an older spc revision. Loose coupling, not strict.
+SPC_REF="8d038f435da7845926ba425dfbae0278cd0e0746"
+BUILD_DIR=".build/$TARGET"
+SPC_DIR="$BUILD_DIR/static-php-cli"
+mkdir -p "$BUILD_DIR"
+if [ ! -d "$SPC_DIR/.git" ]; then
+  git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
 fi
-
-echo "--- :hammer: Installing musl-cross-make (prebuilt toolchain)"
-if [ ! -f /usr/local/musl/bin/x86_64-linux-musl-gcc ]; then
-  mkdir -p /usr/local/musl
-  curl -sSLo /tmp/x86_64-musl-toolchain.tgz \
-    https://dl.static-php.dev/static-php-cli/deps/musl-toolchain/x86_64-musl-toolchain.tgz
-  tar -xzf /tmp/x86_64-musl-toolchain.tgz -C /usr/local/musl
-  rm -f /tmp/x86_64-musl-toolchain.tgz
-else
-  echo "/usr/local/musl/bin/x86_64-linux-musl-gcc already present"
-fi
+git -C "$SPC_DIR" fetch --depth 1 origin "$SPC_REF"
+git -C "$SPC_DIR" checkout --detach FETCH_HEAD
+(
+  cd "$SPC_DIR"
+  composer install --no-dev --no-interaction --quiet
+  ./bin/spc doctor --auto-fix
+)
 
 echo "--- :package: Building static PHP runtime bundle ($TARGET)"
 FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
