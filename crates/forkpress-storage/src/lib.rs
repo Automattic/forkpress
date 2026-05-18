@@ -288,6 +288,7 @@ pub fn ensure_cow_file_view_ready(layout: &Layout) -> Result<FileViewStrategy> {
     let mut manifest = read_site_manifest(layout)?;
     if let Some(file_view) = manifest.as_ref().and_then(|manifest| manifest.file_view) {
         ensure_cow_file_view_available(layout, file_view)?;
+        reconcile_cow_public_branch_links(layout, file_view)?;
         return Ok(file_view);
     }
 
@@ -411,6 +412,39 @@ pub fn write_cow_branch_list(layout: &Layout) -> Result<()> {
     }
     fs::write(&layout.cow_branch_list, out)
         .with_context(|| format!("failed to write {}", layout.cow_branch_list.display()))
+}
+
+pub fn reconcile_cow_public_branch_links(
+    layout: &Layout,
+    file_view: FileViewStrategy,
+) -> Result<()> {
+    let storage_branches_dir = match file_view {
+        FileViewStrategy::MacosApfsSparsebundle => &layout.macos_cow_branches_dir,
+        FileViewStrategy::LinuxXfsLoop => &layout.linux_xfs_branches_dir,
+        FileViewStrategy::Reflink | FileViewStrategy::Copy => return Ok(()),
+    };
+    let Ok(entries) = fs::read_dir(storage_branches_dir) else {
+        return Ok(());
+    };
+
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read branch storage entry under {}",
+                storage_branches_dir.display()
+            )
+        })?;
+        let branch = entry.file_name().to_string_lossy().into_owned();
+        if validate_branch_name(&branch).is_err() {
+            continue;
+        }
+        let storage_root = entry.path();
+        if !storage_root.join("wp-load.php").is_file() {
+            continue;
+        }
+        ensure_cow_public_branch_root(layout, &branch, &storage_root, file_view)?;
+    }
+    Ok(())
 }
 
 pub fn create_cow_branch(
@@ -4561,6 +4595,42 @@ mod tests {
         ensure_mount_backed_cow_public_branch_link(&public_root, &storage_root, "test").unwrap();
 
         assert_eq!(fs::read_link(&public_root).unwrap(), storage_root);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reconcile_mount_backed_public_branch_links_recovers_orphan_storage_branch() {
+        let root = std::env::temp_dir().join(format!(
+            "forkpress-storage-link-reconcile-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let storage_root = layout.macos_cow_branches_dir.join("feature");
+        fs::create_dir_all(&storage_root).unwrap();
+        fs::write(storage_root.join("wp-load.php"), b"<?php\n").unwrap();
+        fs::create_dir_all(layout.macos_cow_branches_dir.join("not-a-branch")).unwrap();
+        fs::create_dir_all(layout.macos_cow_branches_dir.join("missing-wp")).unwrap();
+
+        reconcile_cow_public_branch_links(&layout, FileViewStrategy::MacosApfsSparsebundle)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(cow_branch_root(&layout, "feature")).unwrap(),
+            storage_root
+        );
+        assert!(!path_exists_no_follow(&cow_branch_root(
+            &layout,
+            "not-a-branch"
+        )));
+        assert!(!path_exists_no_follow(&cow_branch_root(
+            &layout,
+            "missing-wp"
+        )));
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -104,8 +104,9 @@ The Git server suite covers these publication classes:
   publication can leave unpublished birth metadata; a retry clears those stale
   branch-birth artifacts before publishing the branch from the pushed ref.
 - Process exit after Git-created storage publication but before public branch
-  linking can leave orphan storage; a retry removes the unpublished storage and
-  stale birth artifacts, then recreates and links the branch from the pushed ref.
+  linking can leave orphan storage; mount-backed file-view startup relinks the
+  finalized storage branch into the public branch directory, refreshes
+  `branches.txt`, and preserves finalized birth metadata.
 - Process exit after separate-storage Git-created public branch linking but
   before branch-list publication can leave a visible public symlink and stale
   branch list; the next Git apply reconciles the branch list while preserving
@@ -157,21 +158,24 @@ The Git server suite covers these publication classes:
   public reset and verifies fresh DB/file merge bases and ID-band metadata.
 - The product E2E suite drives actual smart-HTTP Git pushes for Git-created
   branches with the server exiting before branch-birth metadata, after
-  branch-birth metadata but before branch tree publication, before branch-list
-  publication, and immediately after branch-list publication. The pre-metadata
-  crash restarts ForkPress in a fresh process, verifies the branch is not
-  visible and has no ID-band or row-identity metadata, then retries the push,
-  verifies stale temp paths are cleaned, and merges it into `main`. The
-  post-metadata crash restarts ForkPress in a fresh process, verifies the branch
-  is not visible before the branch tree is published, verifies DB/file merge
-  bases plus finalized ID-band and row-identity metadata survived, retries the
-  push, and merges it into `main`. The pre-list crash restarts ForkPress in a
-  fresh process, verifies the branch tree and DB/file bases are visible,
-  verifies `branches.txt` has been reconciled by restart, verifies finalized
-  ID-band and row-identity metadata, and merges it into `main`. The post-list
-  crash restarts ForkPress in a fresh process, then verifies the branch is
-  visible, has DB/file merge-base artifacts, has a matching Git ref, and can
-  merge into `main`.
+  branch-birth metadata but before branch tree publication, after storage
+  publication but before public branch linking, before branch-list publication,
+  and immediately after branch-list publication. The pre-metadata crash restarts
+  ForkPress in a fresh process, verifies the branch is not visible and has no
+  ID-band or row-identity metadata, then retries the push, verifies stale temp
+  paths are cleaned, and merges it into `main`. The post-metadata crash restarts
+  ForkPress in a fresh process, verifies the branch is not visible before the
+  branch tree is published, verifies DB/file merge bases plus finalized ID-band
+  and row-identity metadata survived, retries the push, and merges it into
+  `main`. The storage-publication crash restarts ForkPress in a fresh process,
+  verifies mount-backed storage relinked the branch, verifies DB/file merge
+  bases plus finalized ID-band and row-identity metadata, and merges it into
+  `main`. The pre-list crash restarts ForkPress in a fresh process, verifies the
+  branch tree and DB/file bases are visible, verifies `branches.txt` has been
+  reconciled by restart, verifies finalized ID-band and row-identity metadata,
+  and merges it into `main`. The post-list crash restarts ForkPress in a fresh
+  process, then verifies the branch is visible, has DB/file merge-base
+  artifacts, has a matching Git ref, and can merge into `main`.
 
 ## Missing Fault Injection
 
@@ -190,10 +194,11 @@ publish, after branch-delete staging, and after object pruning.
 The remaining release-hardening work is:
 
 - Broaden actual Git push failpoint coverage beyond the representative
-  Git-created pre-metadata, post-metadata, pre-branch-list, and
-  post-branch-list checkpoints, then restart in a new process and verify the
+  Git-created pre-metadata, post-metadata, storage-publication, pre-branch-list,
+  and post-branch-list checkpoints, then restart in a new process and verify the
   public audit/recovery commands report the same state as the lower-level
-  harnesses.
+  harnesses for remaining public-link, existing-update, delete, and object-prune
+  checkpoints.
 - Add platform-specific kill coverage around APFS sparsebundle detach/compact.
 - Add kill coverage around cleanup of rollback artifacts outside the Git
   object-pruning and crash-recovery restore paths.
