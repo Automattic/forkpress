@@ -753,6 +753,49 @@ add_action('init', function () {
             wp_send_json_error(['error' => $synced_pattern_id->get_error_message()], 500);
         }
         update_post_meta((int)$synced_pattern_id, 'wp_pattern_sync_status', 'synced');
+        $template_part_slug = "semantic-$branch-part";
+        $template_part_id = wp_insert_post([
+            'post_type' => 'wp_template_part',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Template Part",
+            'post_name' => "forkpress-e2e//$template_part_slug",
+            'post_content' => "<!-- wp:paragraph --><p>Template part for $branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($template_part_id)) {
+            wp_send_json_error(['error' => $template_part_id->get_error_message()], 500);
+        }
+        $template_id = wp_insert_post([
+            'post_type' => 'wp_template',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Template",
+            'post_name' => "forkpress-e2e//semantic-$branch-template",
+            'post_content' => "<!-- wp:template-part {\"slug\":\"$template_part_slug\",\"theme\":\"forkpress-e2e\",\"tagName\":\"header\"} /-->\n<!-- wp:paragraph --><p>Template for $branch</p><!-- /wp:paragraph -->",
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($template_id)) {
+            wp_send_json_error(['error' => $template_id->get_error_message()], 500);
+        }
+        $global_styles_id = wp_insert_post([
+            'post_type' => 'wp_global_styles',
+            'post_status' => 'publish',
+            'post_title' => "Semantic $suffix Global Styles",
+            'post_name' => "wp-global-styles-forkpress-e2e-$branch",
+            'post_content' => wp_json_encode([
+                'version' => 3,
+                'isGlobalStylesUserThemeJSON' => true,
+                'settings' => [],
+                'styles' => [
+                    'color' => [
+                        'text' => $branch === 'source' ? '#135e96' : '#008a20',
+                    ],
+                ],
+            ]),
+            'post_author' => $user_id,
+        ], true);
+        if (is_wp_error($global_styles_id)) {
+            wp_send_json_error(['error' => $global_styles_id->get_error_message()], 500);
+        }
         $page_update = wp_update_post([
             'ID' => (int)$page_id,
             'post_content' => "<!-- wp:paragraph --><p>Semantic $branch page body</p><!-- /wp:paragraph -->\n"
@@ -881,6 +924,9 @@ add_action('init', function () {
             'note_id' => (int)$note_id,
             'block_id' => (int)$block_id,
             'synced_pattern_id' => (int)$synced_pattern_id,
+            'template_part_id' => (int)$template_part_id,
+            'template_id' => (int)$template_id,
+            'global_styles_id' => (int)$global_styles_id,
             'menu_id' => (int)$menu_id,
             'attachment_id' => (int)$attachment_id,
             'comment_id' => $comment_id,
@@ -942,7 +988,7 @@ add_action('init', function () {
     }
 
     $posts = get_posts([
-        'post_type' => ['page', 'forkpress_note', 'wp_block', 'attachment'],
+        'post_type' => ['page', 'forkpress_note', 'wp_block', 'wp_template_part', 'wp_template', 'wp_global_styles', 'attachment'],
         'post_status' => 'any',
         'numberposts' => -1,
         'orderby' => 'ID',
@@ -2040,6 +2086,12 @@ $required = [
     "Semantic Target Block" => "wp_block",
     "Semantic Source Synced Pattern" => "wp_block",
     "Semantic Target Synced Pattern" => "wp_block",
+    "Semantic Source Template Part" => "wp_template_part",
+    "Semantic Target Template Part" => "wp_template_part",
+    "Semantic Source Template" => "wp_template",
+    "Semantic Target Template" => "wp_template",
+    "Semantic Source Global Styles" => "wp_global_styles",
+    "Semantic Target Global Styles" => "wp_global_styles",
     "Semantic Source Media" => "attachment",
     "Semantic Target Media" => "attachment",
 ];
@@ -2055,6 +2107,9 @@ $optionRefsValid = static function (array $option, string $branch, string $suffi
         && ((int)($option["note_id"] ?? 0) === (int)($posts["Semantic $suffix Note"]["id"] ?? 0))
         && ((int)($option["block_id"] ?? 0) === (int)($posts["Semantic $suffix Block"]["id"] ?? 0))
         && ((int)($option["synced_pattern_id"] ?? 0) === (int)($posts["Semantic $suffix Synced Pattern"]["id"] ?? 0))
+        && ((int)($option["template_part_id"] ?? 0) === (int)($posts["Semantic $suffix Template Part"]["id"] ?? 0))
+        && ((int)($option["template_id"] ?? 0) === (int)($posts["Semantic $suffix Template"]["id"] ?? 0))
+        && ((int)($option["global_styles_id"] ?? 0) === (int)($posts["Semantic $suffix Global Styles"]["id"] ?? 0))
         && ((int)($option["attachment_id"] ?? 0) === (int)($posts["Semantic $suffix Media"]["id"] ?? 0))
         && ((int)($option["comment_id"] ?? 0) > 0)
         && ((int)($option["reply_id"] ?? 0) > 0);
@@ -2127,6 +2182,18 @@ $syncedPatternValid = static function (array $posts, string $suffix): bool {
         && (($pattern["pattern_sync_status"] ?? null) === "synced")
         && in_array($patternId, $refs, true);
 };
+$siteEditorValid = static function (array $posts, string $branch, string $suffix): bool {
+    $templatePart = $posts["Semantic $suffix Template Part"] ?? [];
+    $template = $posts["Semantic $suffix Template"] ?? [];
+    $globalStyles = $posts["Semantic $suffix Global Styles"] ?? [];
+    $expectedPartContent = "<!-- wp:paragraph --><p>Template part for $branch</p><!-- /wp:paragraph -->";
+    $expectedTemplateMarker = "\"slug\":\"semantic-$branch-part\"";
+    $styles = json_decode((string)($globalStyles["content"] ?? ""), true);
+    return (($templatePart["content"] ?? null) === $expectedPartContent)
+        && str_contains((string)($template["content"] ?? ""), $expectedTemplateMarker)
+        && (($styles["isGlobalStylesUserThemeJSON"] ?? null) === true)
+        && (($styles["styles"]["color"]["text"] ?? null) === ($branch === "source" ? "#135e96" : "#008a20"));
+};
 $termGraphValid = static function (array $termGraphs, array $posts, string $suffix): bool {
     $topic = $termGraphs["Semantic $suffix Topic"] ?? [];
     $parent = $termGraphs["Semantic $suffix Parent Topic"] ?? [];
@@ -2196,6 +2263,8 @@ $ok = $ok
     && $reusableBlockValid($posts, "Target")
     && $syncedPatternValid($posts, "Source")
     && $syncedPatternValid($posts, "Target")
+    && $siteEditorValid($posts, "source", "Source")
+    && $siteEditorValid($posts, "target", "Target")
     && $termGraphValid($data["term_graphs"] ?? [], $posts, "Source")
     && $termGraphValid($data["term_graphs"] ?? [], $posts, "Target")
     && $optionRefsValid($data["source_option"] ?? [], "source", "Source")
