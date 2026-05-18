@@ -9322,13 +9322,200 @@ function cow_merge_collect_wordpress_duplicate_site_editor_object_findings(strin
     }
 }
 
-function cow_merge_collect_wordpress_semantic_findings(string $target_db, ?string $target_before_db = null): array {
+function cow_merge_find_wordpress_block_json_files(string $root, string $plugin_root_rel): array {
+    $plugin_root = rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $plugin_root_rel);
+    if (!is_dir($plugin_root)) {
+        return [];
+    }
+
+    $files = [];
+    $stack = [$plugin_root];
+    while ($stack) {
+        $dir = array_pop($stack);
+        $children = @scandir($dir);
+        if ($children === false) {
+            continue;
+        }
+        foreach ($children as $child) {
+            if ($child === '.' || $child === '..') {
+                continue;
+            }
+            if (in_array($child, ['.git', 'node_modules', 'vendor'], true)) {
+                continue;
+            }
+            $path = $dir . DIRECTORY_SEPARATOR . $child;
+            if (is_dir($path) && !is_link($path)) {
+                $stack[] = $path;
+                continue;
+            }
+            if ($child === 'block.json' && is_file($path)) {
+                $files[] = cow_merge_path_to_unix(substr($path, strlen(rtrim($root, DIRECTORY_SEPARATOR)) + 1));
+            }
+        }
+    }
+    sort($files, SORT_STRING);
+    return $files;
+}
+
+function cow_merge_wordpress_block_json_file_references(mixed $value, array $path = []): array {
+    if (is_string($value)) {
+        return str_starts_with($value, 'file:')
+            ? [[
+                'path' => $path,
+                'value' => $value,
+            ]]
+            : [];
+    }
+    if (!is_array($value)) {
+        return [];
+    }
+
+    $refs = [];
+    foreach ($value as $key => $child) {
+        $child_path = $path;
+        $child_path[] = is_int($key) ? (string)$key : (string)$key;
+        $refs = array_merge($refs, cow_merge_wordpress_block_json_file_references($child, $child_path));
+    }
+    return $refs;
+}
+
+function cow_merge_wordpress_block_file_reference_is_unsafe(string $path): bool {
+    $path = trim(cow_merge_symlink_target_to_unix($path));
+    if ($path === '' || str_contains($path, "\0") || cow_merge_relative_path_is_absolute($path)) {
+        return true;
+    }
+    return preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:\/\//', $path) === 1;
+}
+
+function cow_merge_wordpress_block_asset_findings(
+    string $target_db,
+    ?string $target_root,
+    ?string $target_before_root = null
+): array {
+    if ($target_root === null || $target_root === '' || !is_dir($target_root)) {
+        return [];
+    }
+
+    $findings = [];
+    $active_plugins = array_unique(array_merge(
+        cow_merge_active_wordpress_plugins($target_db),
+        cow_merge_active_sitewide_wordpress_plugins($target_db)
+    ));
+    sort($active_plugins, SORT_STRING);
+    foreach ($active_plugins as $active_plugin) {
+        $active_plugin = cow_merge_normalize_relative_path($active_plugin);
+        if ($active_plugin === null || $active_plugin === '') {
+            continue;
+        }
+        $plugin_dir = dirname($active_plugin);
+        if ($plugin_dir === '.' || $plugin_dir === '') {
+            continue;
+        }
+        $plugin_root_rel = 'wp-content/plugins/' . $plugin_dir;
+        foreach (cow_merge_find_wordpress_block_json_files($target_root, $plugin_root_rel) as $block_json_rel) {
+            $decoded = json_decode((string)file_get_contents(rtrim($target_root, DIRECTORY_SEPARATOR) . '/' . $block_json_rel), true);
+            if (!is_array($decoded)) {
+                continue;
+            }
+            $block_name = is_string($decoded['name'] ?? null) ? (string)$decoded['name'] : $plugin_dir;
+            $block_dir = dirname($block_json_rel);
+            $block_dir = $block_dir === '.' ? '' : $block_dir;
+            foreach (cow_merge_wordpress_block_json_file_references($decoded) as $ref) {
+                $raw = trim(substr((string)$ref['value'], strlen('file:')));
+                $path_label = '/' . implode('/', $ref['path']);
+                $raw_is_unsafe = cow_merge_wordpress_block_file_reference_is_unsafe($raw);
+                $resolved = $raw_is_unsafe
+                    ? null
+                    : cow_merge_normalize_relative_path(($block_dir === '' ? '' : $block_dir . '/') . $raw);
+                if ($resolved === null || !str_starts_with($resolved, $plugin_root_rel . '/')) {
+                    $findings[] = [
+                        'plugin' => $plugin_dir,
+                        'object' => 'block-asset:' . $block_json_rel . ':' . $path_label,
+                        'reason' => 'block.json contains an unsafe file reference',
+                        'type' => 'plugin-wp-block-asset-reference',
+                        'files' => [$block_json_rel, (string)$ref['value']],
+                        'validator' => 'forkpress-wordpress-block-assets@1',
+                        'severity' => 'error',
+                        'semantic_scope' => 'wordpress',
+                        'logical_identity' => [
+                            'kind' => 'wordpress-block-asset-reference',
+                            'plugin' => $plugin_dir,
+                            'block' => $block_name,
+                            'block_json' => $block_json_rel,
+                            'json_path' => $path_label,
+                        ],
+                        'manual_review_reason' => 'WordPress block metadata file references must stay inside the active plugin and cannot be repaired by a generic merge.',
+                        'suggested_action' => 'Restore the referenced block asset or edit block.json to reference a valid plugin-local asset before accepting the merged state.',
+                        'candidate' => [
+                            'active_plugin' => $active_plugin,
+                            'block' => $block_name,
+                            'block_json' => $block_json_rel,
+                            'json_path' => $path_label,
+                            'file_reference' => (string)$ref['value'],
+                        ],
+                    ];
+                    continue;
+                }
+
+                $target_path = rtrim($target_root, DIRECTORY_SEPARATOR) . '/' . $resolved;
+                if (is_file($target_path)) {
+                    continue;
+                }
+                $before_exists = false;
+                if (is_string($target_before_root) && $target_before_root !== '' && is_dir($target_before_root)) {
+                    $before_exists = is_file(rtrim($target_before_root, DIRECTORY_SEPARATOR) . '/' . $resolved);
+                    if (!$before_exists) {
+                        continue;
+                    }
+                }
+                $findings[] = [
+                    'plugin' => $plugin_dir,
+                    'object' => 'block-asset:' . $resolved,
+                    'reason' => 'block.json references a missing plugin asset file after merge',
+                    'type' => 'plugin-wp-block-asset-reference',
+                    'files' => [$block_json_rel, $resolved],
+                    'validator' => 'forkpress-wordpress-block-assets@1',
+                    'severity' => 'error',
+                    'semantic_scope' => 'wordpress',
+                    'logical_identity' => [
+                        'kind' => 'wordpress-block-asset-reference',
+                        'plugin' => $plugin_dir,
+                        'block' => $block_name,
+                        'block_json' => $block_json_rel,
+                        'json_path' => $path_label,
+                        'file' => $resolved,
+                    ],
+                    'manual_review_reason' => 'WordPress will not be able to register this block asset deterministically while block.json points at a missing file.',
+                    'suggested_action' => 'Restore the referenced block asset or edit block.json to reference an existing asset before accepting the merged state.',
+                    'candidate' => [
+                        'active_plugin' => $active_plugin,
+                        'block' => $block_name,
+                        'block_json' => $block_json_rel,
+                        'json_path' => $path_label,
+                        'file_reference' => (string)$ref['value'],
+                        'resolved_file' => $resolved,
+                        'target_before_had_file' => $before_exists,
+                    ],
+                ];
+            }
+        }
+    }
+    return $findings;
+}
+
+function cow_merge_collect_wordpress_semantic_findings(
+    string $target_db,
+    ?string $target_before_db = null,
+    ?string $target_root = null,
+    ?string $target_before_root = null
+): array {
     return array_merge(
         cow_merge_collect_wordpress_duplicate_page_route_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_term_route_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_user_login_findings($target_db, $target_before_db),
         cow_merge_collect_wordpress_duplicate_global_styles_findings($target_db, $target_before_db),
-        cow_merge_collect_wordpress_duplicate_site_editor_object_findings($target_db, $target_before_db)
+        cow_merge_collect_wordpress_duplicate_site_editor_object_findings($target_db, $target_before_db),
+        cow_merge_wordpress_block_asset_findings($target_db, $target_root, $target_before_root)
     );
 }
 
@@ -20653,7 +20840,9 @@ function cow_merge_branch_state(
             cow_merge_set_run_status($metadata_db, (int)$result['run_id'], $result['status']);
             $wordpress_semantic_findings = cow_merge_collect_wordpress_semantic_findings(
                 $target_db,
-                isset($validator_context['target_before_db']) ? (string)$validator_context['target_before_db'] : null
+                isset($validator_context['target_before_db']) ? (string)$validator_context['target_before_db'] : null,
+                $target_root,
+                isset($validator_context['target_before_root']) ? (string)$validator_context['target_before_root'] : null
             );
             if ($wordpress_semantic_findings !== []) {
                 $wordpress_semantic_result = cow_merge_record_plugin_validator_conflicts(
