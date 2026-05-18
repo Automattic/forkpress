@@ -1580,7 +1580,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 115, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 116, 'media validator records missing required metadata, invalid metadata, invalid shapes, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, duplicate upload conflicts, and built-in WordPress upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1661,12 +1661,12 @@ PHP);
     assert_true($original_image_subdir_recorded, 'media validator audit payload identifies the non-basename original_image filename');
     assert_true(str_contains($preview, (string)$original_image_subdir_id), 'media validator audit includes the non-basename original_image attachment ID');
 
-    $invalid_shape_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+    $invalid_shape_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 20, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-attachment-metadata-invalid-shape',
     ]);
-    assert_same(count($invalid_shape_audit['conflicts']), 10, 'media validator exposes malformed generated-size, original_image, and backup-size metadata shapes as plugin-scoped audit conflicts');
+    assert_same(count($invalid_shape_audit['conflicts']), 11, 'media validator exposes malformed image_meta, generated-size, original_image, and backup-size metadata shapes as plugin-scoped audit conflicts');
     $invalid_shape_payloads = array_map(
         fn($conflict) => cow_merge_decode_payload_json((string)$conflict['chosen_payload'], 'media validator invalid-shape payload'),
         $invalid_shape_audit['conflicts']
@@ -1684,6 +1684,7 @@ PHP);
         '_wp_attachment_metadata.backup_sizes.full-orig.file',
         '_wp_attachment_metadata.backup_sizes.full-orig.file',
         '_wp_attachment_metadata.dimensions',
+        '_wp_attachment_metadata.image_meta',
         '_wp_attachment_metadata.original_image',
         '_wp_attachment_metadata.sizes',
         '_wp_attachment_metadata.sizes.thumbnail.dimensions',
@@ -1705,6 +1706,7 @@ PHP);
     assert_same($invalid_shape_files_by_field['_wp_attachment_metadata.backup_sizes.full-orig.dimensions'][0] ?? null, ['wp-content/uploads/2026/05/source-backup-dimensions-original.jpg'], 'media validator invalid-shape audit exposes the real backup upload path for invalid dimensions');
     $invalid_shape_payload_preview = implode("\n", array_map(fn($payload) => json_encode($payload, JSON_UNESCAPED_SLASHES), $invalid_shape_payloads));
     assert_true(str_contains($invalid_shape_payload_preview, (string)$generated_subdir_id), 'built-in WordPress upload invalid-shape audit includes the generated subdir attachment ID');
+    assert_true(str_contains($invalid_shape_payload_preview, (string)$image_meta_drift_id), 'built-in WordPress upload invalid-shape audit includes the malformed image_meta attachment ID');
     assert_true(str_contains($invalid_shape_payload_preview, (string)$original_image_subdir_id), 'built-in WordPress upload invalid-shape audit includes the original_image subdir attachment ID');
     assert_true(str_contains($invalid_shape_payload_preview, (string)$backup_subdir_id), 'built-in WordPress upload invalid-shape audit includes the backup subdir attachment ID');
 

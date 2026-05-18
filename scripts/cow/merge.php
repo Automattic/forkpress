@@ -10604,6 +10604,14 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'height' => $metadata_height,
                 ], [$attached_path]);
             }
+            if (array_key_exists('image_meta', $metadata) && !is_array($metadata['image_meta'])) {
+                $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment image metadata is not an array', [
+                    'field' => '_wp_attachment_metadata.image_meta',
+                    'role' => 'image-meta',
+                    'attached_file' => $attached_file_raw,
+                    'value_type' => get_debug_type($metadata['image_meta']),
+                ], [$attached_path]);
+            }
             $attached_absolute_path = rtrim($target_root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $attached_path);
             $declared_filesize = $metadata['filesize'] ?? null;
             if ($declared_filesize !== null && is_file($attached_absolute_path) && (!is_numeric($declared_filesize) || (int)$declared_filesize !== (int)filesize($attached_absolute_path))) {
