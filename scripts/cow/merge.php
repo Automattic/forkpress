@@ -6164,6 +6164,7 @@ function cow_merge_wordpress_row_reference_violation(
 }
 
 function cow_merge_wordpress_delete_reference_violation(
+    SQLite3 $base,
     SQLite3 $source,
     SQLite3 $target,
     SQLite3 $meta,
@@ -6171,6 +6172,55 @@ function cow_merge_wordpress_delete_reference_violation(
     string $table,
     array $base_row
 ): ?string {
+    if ($table === 'wp_posts') {
+        $post_id = $base_row['ID'] ?? null;
+        if (is_int($post_id) || (is_string($post_id) && preg_match('/^-?\d+$/', $post_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_posts', (int)$post_id, [
+                ['table' => 'wp_postmeta', 'pk' => 'meta_id', 'owner_column' => 'post_id'],
+                ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'comment_post_ID'],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+        }
+    }
+    if ($table === 'wp_users') {
+        $user_id = $base_row['ID'] ?? null;
+        if (is_int($user_id) || (is_string($user_id) && preg_match('/^-?\d+$/', $user_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_users', (int)$user_id, [
+                ['table' => 'wp_usermeta', 'pk' => 'umeta_id', 'owner_column' => 'user_id'],
+                ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'user_id'],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+        }
+    }
+    if ($table === 'wp_terms') {
+        $term_id = $base_row['term_id'] ?? null;
+        if (is_int($term_id) || (is_string($term_id) && preg_match('/^-?\d+$/', $term_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_terms', (int)$term_id, [
+                ['table' => 'wp_termmeta', 'pk' => 'meta_id', 'owner_column' => 'term_id'],
+                ['table' => 'wp_term_taxonomy', 'pk' => 'term_taxonomy_id', 'owner_column' => 'term_id'],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+        }
+    }
+    if ($table === 'wp_comments') {
+        $comment_id = $base_row['comment_ID'] ?? null;
+        if (is_int($comment_id) || (is_string($comment_id) && preg_match('/^-?\d+$/', $comment_id))) {
+            $target_dependent_violation = cow_merge_wordpress_target_changed_dependents_for_deleted_owner($base, $target, 'wp_comments', (int)$comment_id, [
+                ['table' => 'wp_commentmeta', 'pk' => 'meta_id', 'owner_column' => 'comment_id'],
+                ['table' => 'wp_comments', 'pk' => 'comment_ID', 'owner_column' => 'comment_parent'],
+            ]);
+            if ($target_dependent_violation !== null) {
+                return $target_dependent_violation;
+            }
+        }
+    }
+
     if ($table !== 'wp_term_relationships' || !cow_merge_schema_object_exists($source, 'wp_term_relationships')) {
         return null;
     }
@@ -6208,6 +6258,54 @@ function cow_merge_wordpress_delete_reference_violation(
         cow_merge_result_finalize_checked($res, 'failed to finalize WordPress source term relationship replacement lookup');
     }
 
+    return null;
+}
+
+function cow_merge_wordpress_target_changed_dependents_for_deleted_owner(SQLite3 $base, SQLite3 $target, string $owner_table, int $owner_id, array $dependent_specs): ?string {
+    foreach ($dependent_specs as $spec) {
+        $dependent_table = (string)($spec['table'] ?? '');
+        $dependent_pk = (string)($spec['pk'] ?? '');
+        $owner_column = (string)($spec['owner_column'] ?? '');
+        if ($dependent_table === '' || $dependent_pk === '' || $owner_column === '') {
+            continue;
+        }
+        if (!cow_merge_schema_object_exists($base, $dependent_table) || !cow_merge_schema_object_exists($target, $dependent_table)) {
+            continue;
+        }
+        $base_columns = cow_merge_table_columns($base, $dependent_table);
+        $target_columns = cow_merge_table_columns($target, $dependent_table);
+        if (
+            !in_array($dependent_pk, $base_columns, true)
+            || !in_array($dependent_pk, $target_columns, true)
+            || !in_array($owner_column, $target_columns, true)
+        ) {
+            continue;
+        }
+        $columns = cow_merge_all_columns($target_columns, $base_columns);
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'SELECT * FROM ' . cow_merge_quote_ident($dependent_table)
+                . ' WHERE ' . cow_merge_quote_ident($owner_column) . ' = :owner_id'
+                . ' ORDER BY ' . cow_merge_quote_ident($dependent_pk),
+            "failed to prepare target $dependent_table dependency lookup"
+        );
+        cow_merge_bind($stmt, ':owner_id', $owner_id);
+        $res = cow_merge_execute_checked($stmt, $target, "failed to inspect target $dependent_table dependencies");
+        try {
+            while ($target_row = $res->fetchArray(SQLITE3_ASSOC)) {
+                $dependent_id = $target_row[$dependent_pk] ?? null;
+                if (!is_int($dependent_id) && !(is_string($dependent_id) && preg_match('/^-?\d+$/', (string)$dependent_id))) {
+                    continue;
+                }
+                $base_row = cow_merge_wordpress_source_row($base, $dependent_table, $dependent_pk, $dependent_id);
+                if ($base_row === null || !cow_merge_row_values_equal($target_row, $base_row, $columns)) {
+                    return "source deleted $owner_table row $owner_id while target has changed $dependent_table rows referencing it";
+                }
+            }
+        } finally {
+            cow_merge_result_finalize_checked($res, "failed to finalize target $dependent_table dependency lookup");
+        }
+    }
     return null;
 }
 
@@ -19642,7 +19740,7 @@ function cow_merge_table_rows(
         }
 
         if ($base_row !== null && $source_row === null && cow_merge_row_values_equal($target_row, $base_row, $row_columns)) {
-            $wp_delete_reference_violation = cow_merge_wordpress_delete_reference_violation($source, $target, $meta, $source_branch, $table, $base_row);
+            $wp_delete_reference_violation = cow_merge_wordpress_delete_reference_violation($base, $source, $target, $meta, $source_branch, $table, $base_row);
             if ($wp_delete_reference_violation !== null) {
                 if (cow_merge_record_row_target_constraint(
                     $meta,

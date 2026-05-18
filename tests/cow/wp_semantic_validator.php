@@ -1884,23 +1884,22 @@ PHP);
         $postmeta_target_root
     );
 
-    assert_same($postmeta_result['status'], 'completed_with_conflicts', 'WordPress postmeta validator holds missing post owners for review');
+    assert_same($postmeta_result['status'], 'completed_with_conflicts', 'WordPress postmeta owner delete with target-edited metadata stays reviewable');
     assert_same((int)($postmeta_result['plugin_validators'] ?? 0), 1, 'WordPress postmeta validator is discovered from mu-plugins during merge');
-    assert_same((int)($postmeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress postmeta validator records missing post owners for scalar and JSON metadata');
-    assert_same((int)scalar($postmeta_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 0, 'WordPress postmeta validator leaves the source post deletion staged for review');
+    assert_same((int)($postmeta_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress postmeta owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($postmeta_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 52'), 1, 'WordPress postmeta owner delete guard keeps the parent post before review');
     assert_same(scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 53'), 'Target postmeta still pointing at deleted post', 'WordPress postmeta validator preserves the target scalar postmeta edit');
     assert_same(scalar($postmeta_target, 'SELECT meta_value FROM wp_postmeta WHERE meta_id = 54'), '{"favorite":"target"}', 'WordPress postmeta validator preserves the target JSON postmeta edit');
 
     $postmeta_audit = cow_merge_audit_report($postmeta_metadata, (int)$postmeta_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-postmeta-missing-post',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($postmeta_audit['conflicts']), 2, 'WordPress postmeta validator exposes missing posts as plugin-scoped audit conflicts');
+    assert_same(count($postmeta_audit['conflicts']), 1, 'WordPress postmeta owner delete guard records one row constraint conflict');
     $postmeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $postmeta_audit['conflicts']));
-    assert_true(str_contains($postmeta_preview, '"missing_post_id":52'), 'WordPress postmeta audit includes the missing post ID');
-    assert_true(str_contains($postmeta_preview, '"field":"post_id"'), 'WordPress postmeta audit includes the stale field name');
-    assert_true(str_contains($postmeta_preview, '"meta_key":"_forkpress_meta_json"'), 'WordPress postmeta audit includes JSON metadata');
+    assert_true(str_contains($postmeta_preview, '52'), 'WordPress postmeta audit includes the guarded post ID');
+    $postmeta_blocker_reason = (string)scalar($postmeta_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_posts' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($postmeta_blocker_reason, 'target has changed wp_postmeta rows'), 'WordPress postmeta audit explains the changed dependent metadata blocker');
 
     $usermeta_base_root = $tmp . '/usermeta-base';
     $usermeta_source_root = $tmp . '/usermeta-source';
@@ -1970,23 +1969,22 @@ PHP);
         $usermeta_target_root
     );
 
-    assert_same($usermeta_result['status'], 'completed_with_conflicts', 'WordPress usermeta validator holds missing user owners for review');
+    assert_same($usermeta_result['status'], 'completed_with_conflicts', 'WordPress usermeta owner delete with target-edited metadata stays reviewable');
     assert_same((int)($usermeta_result['plugin_validators'] ?? 0), 1, 'WordPress usermeta validator is discovered from mu-plugins during merge');
-    assert_same((int)($usermeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress usermeta validator records missing user owners for scalar and JSON metadata');
-    assert_same((int)scalar($usermeta_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 49'), 0, 'WordPress usermeta validator leaves the source user deletion staged for review');
+    assert_same((int)($usermeta_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress usermeta owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($usermeta_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 49'), 1, 'WordPress usermeta owner delete guard keeps the parent user before review');
     assert_same(scalar($usermeta_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 50'), 'Target user description still pointing at deleted user', 'WordPress usermeta validator preserves the target scalar usermeta edit');
     assert_same(scalar($usermeta_target, 'SELECT meta_value FROM wp_usermeta WHERE umeta_id = 51'), '{"favorite":"target"}', 'WordPress usermeta validator preserves the target JSON usermeta edit');
 
     $usermeta_audit = cow_merge_audit_report($usermeta_metadata, (int)$usermeta_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-usermeta-missing-user',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($usermeta_audit['conflicts']), 2, 'WordPress usermeta validator exposes missing users as plugin-scoped audit conflicts');
+    assert_same(count($usermeta_audit['conflicts']), 1, 'WordPress usermeta owner delete guard records one row constraint conflict');
     $usermeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $usermeta_audit['conflicts']));
-    assert_true(str_contains($usermeta_preview, '"missing_user_id":49'), 'WordPress usermeta audit includes the missing user ID');
-    assert_true(str_contains($usermeta_preview, '"field":"user_id"'), 'WordPress usermeta audit includes the stale field name');
-    assert_true(str_contains($usermeta_preview, '"meta_key":"forkpress_profile_json"'), 'WordPress usermeta audit includes JSON metadata');
+    assert_true(str_contains($usermeta_preview, '49'), 'WordPress usermeta audit includes the guarded user ID');
+    $usermeta_blocker_reason = (string)scalar($usermeta_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_users' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($usermeta_blocker_reason, 'target has changed wp_usermeta rows'), 'WordPress usermeta audit explains the changed dependent metadata blocker');
 
     $menu_parent_base_root = $tmp . '/menu-parent-base';
     $menu_parent_source_root = $tmp . '/menu-parent-source';
@@ -3227,23 +3225,22 @@ PHP);
         $term_taxonomy_target_root
     );
 
-    assert_same($term_taxonomy_result['status'], 'completed_with_conflicts', 'WordPress term-taxonomy validator holds missing terms for review');
+    assert_same($term_taxonomy_result['status'], 'completed_with_conflicts', 'WordPress term-taxonomy owner delete with target-edited taxonomies stays reviewable');
     assert_same((int)($term_taxonomy_result['plugin_validators'] ?? 0), 1, 'WordPress term-taxonomy validator is discovered from mu-plugins during merge');
-    assert_same((int)($term_taxonomy_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress term-taxonomy validator records missing term owners for multiple taxonomies');
-    assert_same((int)scalar($term_taxonomy_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 89'), 0, 'WordPress term-taxonomy validator leaves the source term deletion staged for review');
+    assert_same((int)($term_taxonomy_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress term-taxonomy owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($term_taxonomy_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 89'), 1, 'WordPress term-taxonomy owner delete guard keeps the parent term before review');
     assert_same(scalar($term_taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 90'), 'Target category taxonomy still pointing at deleted term', 'WordPress term-taxonomy validator preserves the target category taxonomy edit');
     assert_same(scalar($term_taxonomy_target, 'SELECT description FROM wp_term_taxonomy WHERE term_taxonomy_id = 91'), 'Target tag taxonomy still pointing at deleted term', 'WordPress term-taxonomy validator preserves the target tag taxonomy edit');
 
     $term_taxonomy_audit = cow_merge_audit_report($term_taxonomy_metadata, (int)$term_taxonomy_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-term-taxonomy-missing-term',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($term_taxonomy_audit['conflicts']), 2, 'WordPress term-taxonomy validator exposes missing terms as plugin-scoped audit conflicts');
+    assert_same(count($term_taxonomy_audit['conflicts']), 1, 'WordPress term-taxonomy owner delete guard records one row constraint conflict');
     $term_taxonomy_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $term_taxonomy_audit['conflicts']));
-    assert_true(str_contains($term_taxonomy_preview, '"missing_term_id":89'), 'WordPress term-taxonomy audit includes the missing term ID');
-    assert_true(str_contains($term_taxonomy_preview, '"field":"term_id"'), 'WordPress term-taxonomy audit includes the stale field name');
-    assert_true(str_contains($term_taxonomy_preview, '"taxonomy":"post_tag"'), 'WordPress term-taxonomy audit includes the affected taxonomy');
+    assert_true(str_contains($term_taxonomy_preview, '89'), 'WordPress term-taxonomy audit includes the guarded term ID');
+    $term_taxonomy_blocker_reason = (string)scalar($term_taxonomy_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_terms' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($term_taxonomy_blocker_reason, 'target has changed wp_term_taxonomy rows'), 'WordPress term-taxonomy audit explains the changed dependent taxonomy blocker');
 
     $term_parent_base_root = $tmp . '/term-parent-base';
     $term_parent_source_root = $tmp . '/term-parent-source';
@@ -3404,23 +3401,22 @@ PHP);
         $termmeta_target_root
     );
 
-    assert_same($termmeta_result['status'], 'completed_with_conflicts', 'WordPress termmeta validator holds missing term owners for review');
+    assert_same($termmeta_result['status'], 'completed_with_conflicts', 'WordPress termmeta owner delete with target-edited metadata stays reviewable');
     assert_same((int)($termmeta_result['plugin_validators'] ?? 0), 1, 'WordPress termmeta validator is discovered from mu-plugins during merge');
-    assert_same((int)($termmeta_result['plugin_validator_conflicts'] ?? 0), 2, 'WordPress termmeta validator records missing term owners for scalar and JSON metadata');
-    assert_same((int)scalar($termmeta_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 87'), 0, 'WordPress termmeta validator leaves the source term deletion staged for review');
+    assert_same((int)($termmeta_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress termmeta owner delete guard prevents missing-owner validator fallout');
+    assert_same((int)scalar($termmeta_target, 'SELECT COUNT(*) FROM wp_terms WHERE term_id = 87'), 1, 'WordPress termmeta owner delete guard keeps the parent term before review');
     assert_same(scalar($termmeta_target, 'SELECT meta_value FROM wp_termmeta WHERE meta_id = 88'), 'Target termmeta still pointing at deleted term', 'WordPress termmeta validator preserves the target scalar termmeta edit');
     assert_same(scalar($termmeta_target, 'SELECT meta_value FROM wp_termmeta WHERE meta_id = 89'), '{"favorite":"target"}', 'WordPress termmeta validator preserves the target JSON termmeta edit');
 
     $termmeta_audit = cow_merge_audit_report($termmeta_metadata, (int)$termmeta_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
-        'conflict_type' => 'plugin-wp-termmeta-missing-term',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($termmeta_audit['conflicts']), 2, 'WordPress termmeta validator exposes missing terms as plugin-scoped audit conflicts');
+    assert_same(count($termmeta_audit['conflicts']), 1, 'WordPress termmeta owner delete guard records one row constraint conflict');
     $termmeta_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $termmeta_audit['conflicts']));
-    assert_true(str_contains($termmeta_preview, '"missing_term_id":87'), 'WordPress termmeta audit includes the missing term ID');
-    assert_true(str_contains($termmeta_preview, '"field":"term_id"'), 'WordPress termmeta audit includes the stale field name');
-    assert_true(str_contains($termmeta_preview, '"meta_key":"_forkpress_term_json"'), 'WordPress termmeta audit includes JSON metadata');
+    assert_true(str_contains($termmeta_preview, '87'), 'WordPress termmeta audit includes the guarded term ID');
+    $termmeta_blocker_reason = (string)scalar($termmeta_metadata, "SELECT reason FROM merge_decisions WHERE table_name = 'wp_terms' AND decision = 'target-wins' ORDER BY id DESC LIMIT 1");
+    assert_true(str_contains($termmeta_blocker_reason, 'target has changed wp_termmeta rows'), 'WordPress termmeta audit explains the changed dependent metadata blocker');
 
     $comment_base_root = $tmp . '/comment-ref-base';
     $comment_source_root = $tmp . '/comment-ref-source';
@@ -3552,29 +3548,29 @@ PHP);
         $comment_target_root
     );
 
-    assert_same($comment_result['status'], 'completed_with_conflicts', 'WordPress comment-reference validator holds missing post/user/comment refs for review');
+    assert_same($comment_result['status'], 'completed_with_conflicts', 'WordPress comment-reference owner deletes with target-edited dependents stay reviewable');
     assert_same((int)($comment_result['plugin_validators'] ?? 0), 1, 'WordPress comment-reference validator is discovered from mu-plugins during merge');
-    assert_same((int)($comment_result['plugin_validator_conflicts'] ?? 0), 4, 'WordPress comment-reference validator records missing post, user, parent comment, and commentmeta refs');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 120'), 0, 'WordPress comment-reference validator leaves the source post deletion staged for review');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 121'), 0, 'WordPress comment-reference validator leaves the source user deletion staged for review');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 123'), 0, 'WordPress comment-reference validator leaves the source comment deletion staged for review');
-    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 125'), 0, 'WordPress comment-reference validator leaves the source parent comment deletion staged for review');
+    assert_same((int)($comment_result['plugin_validator_conflicts'] ?? 0), 0, 'WordPress comment-reference owner delete guards prevent missing-reference validator fallout');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_posts WHERE ID = 120'), 1, 'WordPress comment-reference owner delete guard keeps the referenced post before review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_users WHERE ID = 121'), 1, 'WordPress comment-reference owner delete guard keeps the referenced user before review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 123'), 1, 'WordPress comment-reference owner delete guard keeps the comment before review');
+    assert_same((int)scalar($comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_ID = 125'), 1, 'WordPress comment-reference owner delete guard keeps the parent comment before review');
     assert_same(scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 122'), 'Target comment still pointing at deleted post and user', 'WordPress comment-reference validator preserves target comment edits');
     assert_same(scalar($comment_target, 'SELECT comment_content FROM wp_comments WHERE comment_ID = 126'), 'Target child comment still pointing at deleted parent', 'WordPress comment-reference validator preserves target child comment edits');
     assert_same(scalar($comment_target, 'SELECT meta_value FROM wp_commentmeta WHERE meta_id = 124'), 'target metadata still pointing at deleted comment', 'WordPress comment-reference validator preserves target commentmeta edits');
 
     $comment_audit = cow_merge_audit_report($comment_metadata, (int)$comment_result['run_id'], 10, [
-        'scope' => 'plugin',
         'records' => 'conflicts',
+        'conflict_type' => 'row-target-constraint',
     ]);
-    assert_same(count($comment_audit['conflicts']), 4, 'WordPress comment-reference validator exposes missing refs as plugin-scoped audit conflicts');
+    assert_same(count($comment_audit['conflicts']), 4, 'WordPress comment-reference owner delete guards record one row constraint per guarded owner');
     $comment_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $comment_audit['conflicts']));
-    foreach (['"object_type":"post"', '"object_type":"user"', '"object_type":"comment"', '"missing_object_id":120', '"missing_object_id":121', '"missing_object_id":123', '"missing_object_id":125'] as $needle) {
+    foreach (['120', '121', '123', '125'] as $needle) {
         assert_true(str_contains($comment_preview, $needle), 'WordPress comment-reference audit includes ' . $needle);
     }
-    foreach (['comment_post_ID', 'user_id', 'comment_parent', 'comment_id'] as $needle) {
-        assert_true(str_contains($comment_preview, $needle), 'WordPress comment-reference audit includes ' . $needle);
-    }
+    $comment_blocker_reasons = (string)scalar($comment_metadata, "SELECT group_concat(reason, '\n') FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments') AND decision = 'target-wins'");
+    assert_true(str_contains($comment_blocker_reasons, 'target has changed wp_comments rows'), 'WordPress comment-reference audit explains the changed dependent comment blockers');
+    assert_true(str_contains($comment_blocker_reasons, 'target has changed wp_commentmeta rows'), 'WordPress comment-reference audit explains the changed dependent comment metadata blocker');
 
     $option_base_root = $tmp . '/option-ref-base';
     $option_source_root = $tmp . '/option-ref-source';

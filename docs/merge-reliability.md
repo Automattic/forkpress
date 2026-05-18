@@ -48,6 +48,12 @@ Recent additions in the current merge-reliability work:
   graph validator case where a deleted CPT row leaves plugin custom-table JSON,
   serialized PHP, and option references stale. The merge stays reviewable and
   plugin-scoped audit output identifies both stale graph owners.
+- Source deletes of core WordPress owner rows are now held when target-edited
+  dependent rows still point at them, including posts/postmeta, posts/comments,
+  users/usermeta, users/comments, terms/term taxonomy, terms/termmeta,
+  comments/commentmeta, and threaded comment parents. The target remains
+  coherent before review instead of deleting the owner row and relying on a
+  later missing-owner validator finding.
 - Reviewed table rebuild conflicts now retain rebuild-plan evidence for direct
   source indexes/triggers, dependent views, and dependent view triggers.
   `tests/cow/schema_review.php` proves dependency-only source drift returns the
