@@ -213,6 +213,33 @@ marketing/         # marketing WordPress tree
 
 `main` cannot be deleted. Resetting `main` requires `--force`.
 
+## Remote sites
+
+Bring an existing ForkPress-compatible WordPress root into a local branch over
+SSH:
+
+```bash
+forkpress remote clone production \
+  --ssh deploy@example.com \
+  --ssh-key ~/.ssh/id_ed25519 \
+  --ssh-port 2222 \
+  --path /srv/www/example \
+  --url https://example.com \
+  --branch production-main
+```
+
+The first sync is thin by default: uploads, caches, backups, logs, and upgrade
+temp files are skipped so the branch can boot quickly. Use `--include-uploads`
+or `--full-sync` when you need more of the remote tree locally.
+
+Install plugins from the branch's WordPress admin at
+`/wp-admin/plugin-install.php`. ForkPress tracks the WordPress.org top 100
+popular plugins as an explicit compatibility target and includes a package
+smoke test for those plugin downloads.
+
+See [Remote Sites](docs/remote-sites.md) and
+[Top Plugin Support](docs/top-plugin-support.md).
+
 ## Merging
 
 ForkPress merges WordPress files and branch-local SQLite database changes. Clean

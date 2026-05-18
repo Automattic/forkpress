@@ -45,6 +45,25 @@ http://marketing.wp.localhost:18080/wp-admin/
 The WordPress admin bar shows the current branch and lets you switch between
 local branches.
 
+## Start From A Remote Site
+
+If your source site already exists on another server, clone a remote
+ForkPress-compatible WordPress root into a local branch:
+
+```bash
+forkpress remote clone production \
+  --ssh deploy@example.com \
+  --ssh-key ~/.ssh/id_ed25519 \
+  --ssh-port 2222 \
+  --path /srv/www/example \
+  --url https://example.com \
+  --branch production-main
+```
+
+Remote clones use a boot cache by default and skip uploads, caches, backups,
+logs, and upgrade temp files. See [Remote Sites](./remote-sites.md) for the
+full workflow, including when to use `--include-uploads` or `--full-sync`.
+
 ## Inspect branches
 
 ```bash
