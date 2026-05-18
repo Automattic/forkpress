@@ -182,13 +182,16 @@ $findings = [];
 $claimed_uploads = [];
 $unsafe_upload_path = static function (string $relative_file): bool {
     $normalized_file = str_replace('\\', '/', $relative_file);
+    $segments = explode('/', $normalized_file);
     return $relative_file === '' ||
         str_starts_with($relative_file, '/') ||
         preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:\/\//', $relative_file) === 1 ||
         preg_match('/^[A-Za-z]:[\/\\\\]/', $relative_file) === 1 ||
         str_contains($relative_file, '\\') ||
         str_contains($relative_file, "\0") ||
-        in_array('..', explode('/', $normalized_file), true);
+        in_array('..', $segments, true) ||
+        in_array('.', $segments, true) ||
+        in_array('', $segments, true);
 };
 $review_only_regeneration_decision = static function (string $missing_kind): array {
     return [
@@ -214,6 +217,41 @@ $invalid_upload_entry_type = static function (string $path): ?string {
     }
     if (file_exists($path) && !is_file($path)) {
         return filetype($path);
+    }
+    return null;
+};
+$expected_mime_by_extension = [
+    'jpg' => 'image/jpeg',
+    'jpeg' => 'image/jpeg',
+    'png' => 'image/png',
+    'gif' => 'image/gif',
+    'webp' => 'image/webp',
+    'avif' => 'image/avif',
+    'pdf' => 'application/pdf',
+    'txt' => 'text/plain',
+];
+$detect_upload_mime_type = static function (string $path): ?string {
+    $bytes = @file_get_contents($path, false, null, 0, 32);
+    if (!is_string($bytes) || $bytes === '') {
+        return null;
+    }
+    if (str_starts_with($bytes, "\xFF\xD8\xFF")) {
+        return 'image/jpeg';
+    }
+    if (str_starts_with($bytes, "\x89PNG\r\n\x1A\n")) {
+        return 'image/png';
+    }
+    if (str_starts_with($bytes, 'GIF87a') || str_starts_with($bytes, 'GIF89a')) {
+        return 'image/gif';
+    }
+    if (strlen($bytes) >= 12 && substr($bytes, 0, 4) === 'RIFF' && substr($bytes, 8, 4) === 'WEBP') {
+        return 'image/webp';
+    }
+    if (strlen($bytes) >= 12 && substr($bytes, 4, 4) === 'ftyp' && str_starts_with(substr($bytes, 8), 'avif')) {
+        return 'image/avif';
+    }
+    if (str_starts_with($bytes, '%PDF-')) {
+        return 'application/pdf';
     }
     return null;
 };
@@ -271,16 +309,6 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ];
     }
-    $expected_mime_by_extension = [
-        'jpg' => 'image/jpeg',
-        'jpeg' => 'image/jpeg',
-        'png' => 'image/png',
-        'gif' => 'image/gif',
-        'webp' => 'image/webp',
-        'avif' => 'image/avif',
-        'pdf' => 'application/pdf',
-        'txt' => 'text/plain',
-    ];
     $extension = strtolower((string)pathinfo(str_replace('\\', '/', $attached_file), PATHINFO_EXTENSION));
     $expected_mime_type = $expected_mime_by_extension[$extension] ?? null;
     $post_mime_type = strtolower((string)($row['post_mime_type'] ?? ''));
@@ -383,6 +411,23 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
             ],
         ] + $review_only_regeneration_decision('original');
     } elseif ($uploads_root !== '') {
+        $detected_mime_type = $detect_upload_mime_type($uploads_root . '/' . $attached_file);
+        if ($expected_mime_type !== null && $detected_mime_type !== null && $detected_mime_type !== $expected_mime_type) {
+            $findings[] = [
+                'plugin' => 'forkpress-wp-media',
+                'object' => 'attachment:' . $row['ID'],
+                'reason' => 'attachment original upload bytes do not match the uploaded file extension',
+                'type' => 'plugin-wp-media-mime-drift',
+                'tables' => ['wp_posts', 'wp_postmeta'],
+                'validator' => 'forkpress-wp-media@1',
+                'candidate' => [
+                    'attachment_id' => (int)$row['ID'],
+                    'attached_file' => $attached_file,
+                    'expected_mime_type' => $expected_mime_type,
+                    'detected_mime_type' => $detected_mime_type,
+                ],
+            ];
+        }
         $declared_filesize = $metadata['filesize'] ?? null;
         $actual_filesize = is_file($uploads_root . '/' . $attached_file) ? filesize($uploads_root . '/' . $attached_file) : false;
         if ($declared_filesize !== null && $actual_filesize !== false && (!is_numeric($declared_filesize) || (int)$declared_filesize !== (int)$actual_filesize)) {
@@ -606,6 +651,27 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         ],
                     ];
                 }
+                $backup_extension = strtolower((string)pathinfo($backup_relative_file, PATHINFO_EXTENSION));
+                $expected_backup_content_mime_type = $expected_mime_by_extension[$backup_extension] ?? null;
+                $detected_backup_mime_type = $detect_upload_mime_type($uploads_root . '/' . $backup_relative_file);
+                if ($expected_backup_content_mime_type !== null && $detected_backup_mime_type !== null && $detected_backup_mime_type !== $expected_backup_content_mime_type) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-media',
+                        'object' => 'attachment:' . $row['ID'],
+                        'reason' => 'attachment backup size bytes do not match the backup file extension',
+                        'type' => 'plugin-wp-media-mime-drift',
+                        'tables' => ['wp_posts', 'wp_postmeta'],
+                        'validator' => 'forkpress-wp-media@1',
+                        'candidate' => [
+                            'attachment_id' => (int)$row['ID'],
+                            'attached_file' => $attached_file,
+                            'backup_size' => (string)$backup_name,
+                            'backup_file' => $backup_relative_file,
+                            'expected_mime_type' => $expected_backup_content_mime_type,
+                            'detected_mime_type' => $detected_backup_mime_type,
+                        ],
+                    ];
+                }
             }
             if (array_key_exists('mime-type', $backup_size)) {
                 $backup_extension = strtolower((string)pathinfo($backup_relative_file, PATHINFO_EXTENSION));
@@ -804,6 +870,27 @@ while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
                         ],
                     ];
                 }
+                $generated_extension = strtolower((string)pathinfo($generated_file, PATHINFO_EXTENSION));
+                $expected_generated_content_mime_type = $expected_mime_by_extension[$generated_extension] ?? null;
+                $detected_generated_mime_type = $detect_upload_mime_type($uploads_root . '/' . $generated_file);
+                if ($expected_generated_content_mime_type !== null && $detected_generated_mime_type !== null && $detected_generated_mime_type !== $expected_generated_content_mime_type) {
+                    $findings[] = [
+                        'plugin' => 'forkpress-wp-media',
+                        'object' => 'attachment:' . $row['ID'],
+                        'reason' => 'attachment generated size bytes do not match the generated file extension',
+                        'type' => 'plugin-wp-media-mime-drift',
+                        'tables' => ['wp_posts', 'wp_postmeta'],
+                        'validator' => 'forkpress-wp-media@1',
+                        'candidate' => [
+                            'attachment_id' => (int)$row['ID'],
+                            'attached_file' => $attached_file,
+                            'size' => (string)$size_name,
+                            'generated_file' => $generated_file,
+                            'expected_mime_type' => $expected_generated_content_mime_type,
+                            'detected_mime_type' => $detected_generated_mime_type,
+                        ],
+                    ];
+                }
             }
             $size_width = $size['width'] ?? null;
             $size_height = $size['height'] ?? null;
@@ -913,8 +1000,11 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-mime-drift.jpg', "source MIME drift image bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-avif-mime-drift.avif', "source AVIF MIME drift image bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-pdf-mime-drift.pdf', "%PDF-1.4 source PDF MIME drift bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-content-mime-drift.jpg', "%PDF-1.4 source content MIME drift bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-mime.jpg', "source generated MIME original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-mime-thumb.png', "source generated MIME thumb bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-content-mime.jpg', "source generated content MIME original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-content-mime-thumb.jpg', "%PDF-1.4 generated content MIME drift bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions.jpg', "source invalid generated dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-dimensions-150x150.jpg', "source invalid generated dimensions thumb bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-subdir.jpg', "source generated subdir original bytes\n");
@@ -930,10 +1020,14 @@ PHP);
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-filesize-original.jpg', "source backup filesize original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-mime-current.jpg', "source backup MIME current bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-mime-original.png', "source backup MIME original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-content-mime-current.jpg', "source backup content MIME current bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-content-mime-original.jpg', "%PDF-1.4 backup content MIME drift bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-dimensions-current.jpg', "source backup dimensions current bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-dimensions-original.jpg', "source backup dimensions original bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-backup-unsafe-current.jpg', "source unsafe backup current bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-generated-url.jpg', "source URL-like generated path original bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-dot-segment-attached.jpg', "source dot-segment attached path bytes\n");
+    write_test_file($source_root . '/wp-content/uploads/2026/05/source-empty-segment-attached.jpg', "source empty-segment attached path bytes\n");
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-symlink-target.jpg', "source symlink target bytes\n");
     create_test_symlink('source-symlink-target.jpg', $source_root . '/wp-content/uploads/2026/05/source-symlink-original.jpg');
     write_test_file($source_root . '/wp-content/uploads/2026/05/source-symlink-generated.jpg', "source symlink generated original bytes\n");
@@ -1106,6 +1200,12 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ], 'image/jpeg');
+    $content_mime_drift_id = insert_attachment($db, 'Source media content MIME type drift', '2026/05/source-content-mime-drift.jpg', [
+        'file' => '2026/05/source-content-mime-drift.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ], 'image/jpeg');
     $generated_mime_drift_id = insert_attachment($db, 'Source media generated MIME type drift', '2026/05/source-generated-mime.jpg', [
         'file' => '2026/05/source-generated-mime.jpg',
         'width' => 640,
@@ -1113,6 +1213,19 @@ PHP);
         'sizes' => [
             'thumbnail' => [
                 'file' => 'source-generated-mime-thumb.png',
+                'width' => 150,
+                'height' => 150,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+    ]);
+    $generated_content_mime_drift_id = insert_attachment($db, 'Source media generated content MIME type drift', '2026/05/source-generated-content-mime.jpg', [
+        'file' => '2026/05/source-generated-content-mime.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [
+            'thumbnail' => [
+                'file' => 'source-generated-content-mime-thumb.jpg',
                 'width' => 150,
                 'height' => 150,
                 'mime-type' => 'image/jpeg',
@@ -1268,6 +1381,20 @@ PHP);
         ],
         'sizes' => [],
     ]);
+    $backup_content_mime_drift_id = insert_attachment($db, 'Source media backup content MIME drift', '2026/05/source-backup-content-mime-current.jpg', [
+        'file' => '2026/05/source-backup-content-mime-current.jpg',
+        'width' => 640,
+        'height' => 480,
+        'backup_sizes' => [
+            'full-orig' => [
+                'file' => 'source-backup-content-mime-original.jpg',
+                'width' => 1200,
+                'height' => 900,
+                'mime-type' => 'image/jpeg',
+            ],
+        ],
+        'sizes' => [],
+    ]);
     $backup_dimensions_drift_id = insert_attachment($db, 'Source media backup dimensions drift', '2026/05/source-backup-dimensions-current.jpg', [
         'file' => '2026/05/source-backup-dimensions-current.jpg',
         'width' => 640,
@@ -1386,6 +1513,18 @@ PHP);
         'height' => 480,
         'sizes' => [],
     ]);
+    $unsafe_dot_segment_attached_id = insert_attachment($db, 'Source media unsafe dot-segment attached path', '2026/05/./source-dot-segment-attached.jpg', [
+        'file' => '2026/05/./source-dot-segment-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
+    $unsafe_empty_segment_attached_id = insert_attachment($db, 'Source media unsafe empty-segment attached path', '2026/05//source-empty-segment-attached.jpg', [
+        'file' => '2026/05//source-empty-segment-attached.jpg',
+        'width' => 640,
+        'height' => 480,
+        'sizes' => [],
+    ]);
     $invalid_metadata_id = insert_attachment_raw_metadata(
         $db,
         'Source media invalid serialized metadata',
@@ -1425,7 +1564,7 @@ PHP);
 
     assert_same($result['status'], 'completed_with_conflicts', 'media validator holds incomplete generated-size metadata for review');
     assert_same((int)($result['plugin_validators'] ?? 0), 1, 'media validator is discovered from mu-plugins during merge');
-    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 54, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
+    assert_same((int)($result['plugin_validator_conflicts'] ?? 0), 59, 'media validator records missing required metadata, invalid metadata, dimensions, image metadata, filesize and MIME drift, invalid file entries, generated-size, original-image, backup-size, missing-file, metadata-file drift, unsafe path, and duplicate upload conflicts');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $attachment_id AND meta_key = '_wp_attached_file'"),
         '2026/05/source-generated-missing-file-key.jpg',
@@ -1633,7 +1772,7 @@ PHP);
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-mime-drift',
     ]);
-    assert_same(count($mime_audit['conflicts']), 5, 'media validator exposes image, AVIF, PDF, generated-size, and backup-size MIME drift as plugin-scoped audit conflicts');
+    assert_same(count($mime_audit['conflicts']), 8, 'media validator exposes image, AVIF, PDF, content-signature, generated-size, and backup-size MIME drift as plugin-scoped audit conflicts');
     $mime_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $mime_audit['conflicts']));
     assert_true(str_contains($mime_preview, 'source-mime-drift.jpg'), 'media validator MIME drift audit includes the affected attachment');
     assert_true(str_contains($mime_preview, 'application/pdf'), 'media validator MIME drift audit includes the declared MIME type');
@@ -1645,25 +1784,49 @@ PHP);
     assert_true(str_contains($mime_preview, 'source-pdf-mime-drift.pdf'), 'media validator MIME drift audit includes the affected PDF attachment');
     assert_true(str_contains($mime_preview, 'application/pdf'), 'media validator MIME drift audit includes the expected PDF MIME type');
     assert_true(str_contains($mime_preview, (string)$pdf_mime_drift_id), 'media validator MIME drift audit includes the affected PDF attachment ID');
+    assert_true(str_contains($mime_preview, 'source-content-mime-drift.jpg'), 'media validator MIME drift audit includes the affected content-signature attachment');
+    assert_true(str_contains($mime_preview, (string)$content_mime_drift_id), 'media validator MIME drift audit includes the content-signature attachment ID');
     assert_true(str_contains($mime_preview, 'image/png'), 'media validator MIME drift audit includes the expected generated MIME type');
     assert_true(str_contains($mime_preview, (string)$generated_mime_drift_id), 'media validator MIME drift audit includes the generated-size attachment ID');
+    assert_true(str_contains($mime_preview, (string)$generated_content_mime_drift_id), 'media validator MIME drift audit includes the generated content-signature attachment ID');
     $generated_mime_recorded = false;
     $backup_mime_recorded = false;
+    $content_mime_recorded = false;
+    $generated_content_mime_recorded = false;
+    $backup_content_mime_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-mime-drift'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
         $decoded = cow_merge_decode_payload_json((string)$payload['chosen_payload'], 'media validator MIME payload');
+        if (($decoded['candidate']['attached_file'] ?? null) === '2026/05/source-content-mime-drift.jpg') {
+            $content_mime_recorded =
+                ($decoded['candidate']['expected_mime_type'] ?? null) === 'image/jpeg' &&
+                ($decoded['candidate']['detected_mime_type'] ?? null) === 'application/pdf';
+        }
         if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-generated-mime-thumb.png') {
             $generated_mime_recorded = true;
+        }
+        if (($decoded['candidate']['generated_file'] ?? null) === '2026/05/source-generated-content-mime-thumb.jpg') {
+            $generated_content_mime_recorded =
+                ($decoded['candidate']['expected_mime_type'] ?? null) === 'image/jpeg' &&
+                ($decoded['candidate']['detected_mime_type'] ?? null) === 'application/pdf';
         }
         if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-backup-mime-original.png') {
             $backup_mime_recorded = true;
         }
+        if (($decoded['candidate']['backup_file'] ?? null) === '2026/05/source-backup-content-mime-original.jpg') {
+            $backup_content_mime_recorded =
+                ($decoded['candidate']['expected_mime_type'] ?? null) === 'image/jpeg' &&
+                ($decoded['candidate']['detected_mime_type'] ?? null) === 'application/pdf';
+        }
     }
     $payloads->finalize();
     $meta_db->close();
+    assert_true($content_mime_recorded, 'media validator MIME drift audit payload identifies content bytes that disagree with the upload extension');
     assert_true($generated_mime_recorded, 'media validator MIME drift audit payload identifies the affected generated size');
+    assert_true($generated_content_mime_recorded, 'media validator MIME drift audit payload identifies generated bytes that disagree with the generated extension');
     assert_true($backup_mime_recorded, 'media validator MIME drift audit payload identifies the affected backup size');
+    assert_true($backup_content_mime_recorded, 'media validator MIME drift audit payload identifies backup bytes that disagree with the backup extension');
     assert_true(str_contains($mime_preview, (string)$backup_mime_drift_id), 'media validator MIME drift audit includes the backup-size attachment ID');
 
     $generated_dimension_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
@@ -1818,12 +1981,12 @@ PHP);
     assert_true($url_metadata_file_recorded, 'media validator mismatch audit payload identifies the URL-like metadata file attachment');
     assert_true($drive_metadata_file_recorded, 'media validator mismatch audit payload identifies the drive-letter metadata file attachment');
 
-    $unsafe_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 10, [
+    $unsafe_audit = cow_merge_audit_report($metadata, (int)$result['run_id'], 20, [
         'scope' => 'plugin',
         'records' => 'conflicts',
         'conflict_type' => 'plugin-wp-media-unsafe-path',
     ]);
-    assert_same(count($unsafe_audit['conflicts']), 10, 'media validator exposes unsafe primary, URL, drive, metadata, generated, original_image, and backup upload paths as plugin-scoped audit conflicts');
+    assert_same(count($unsafe_audit['conflicts']), 12, 'media validator exposes unsafe primary, URL, drive, dot-segment, empty-segment, metadata, generated, original_image, and backup upload paths as plugin-scoped audit conflicts');
     $unsafe_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $unsafe_audit['conflicts']));
     assert_true(str_contains($unsafe_preview, 'source-unsafe-generated.jpg'), 'media validator unsafe-path audit includes the affected attachment');
     assert_true(str_contains($unsafe_preview, '../source-unsafe-generated-150x150.jpg'), 'media validator unsafe-path audit includes the rejected generated path');
@@ -1838,6 +2001,8 @@ PHP);
     $unsafe_metadata_url_recorded = false;
     $unsafe_metadata_drive_recorded = false;
     $unsafe_generated_url_recorded = false;
+    $unsafe_dot_segment_recorded = false;
+    $unsafe_empty_segment_recorded = false;
     $meta_db = open_db($metadata);
     $payloads = $meta_db->query("SELECT chosen_payload FROM merge_conflicts WHERE conflict_type = 'plugin-wp-media-unsafe-path'");
     while ($payload = $payloads->fetchArray(SQLITE3_ASSOC)) {
@@ -1863,6 +2028,12 @@ PHP);
         if (($decoded['candidate']['generated_file'] ?? null) === 'https://example.test/source-generated-url-150x150.jpg') {
             $unsafe_generated_url_recorded = true;
         }
+        if (($decoded['candidate']['attached_file'] ?? null) === '2026/05/./source-dot-segment-attached.jpg') {
+            $unsafe_dot_segment_recorded = ($decoded['object'] ?? null) === 'attachment:' . $unsafe_dot_segment_attached_id;
+        }
+        if (($decoded['candidate']['attached_file'] ?? null) === '2026/05//source-empty-segment-attached.jpg') {
+            $unsafe_empty_segment_recorded = ($decoded['object'] ?? null) === 'attachment:' . $unsafe_empty_segment_attached_id;
+        }
     }
     $payloads->finalize();
     $meta_db->close();
@@ -1876,6 +2047,8 @@ PHP);
     assert_true($unsafe_metadata_drive_recorded, 'media validator unsafe-path audit payload identifies the rejected drive-letter metadata file path');
     assert_true($unsafe_generated_url_recorded, 'media validator unsafe-path audit payload identifies the rejected URL-like generated path');
     assert_true(str_contains($unsafe_preview, (string)$unsafe_generated_url_id), 'media validator unsafe-path audit includes the URL-like generated attachment ID');
+    assert_true($unsafe_dot_segment_recorded, 'media validator unsafe-path audit payload identifies the rejected dot-segment upload path');
+    assert_true($unsafe_empty_segment_recorded, 'media validator unsafe-path audit payload identifies the rejected empty-segment upload path');
     assert_true(is_file($target_root . '/wp-content/uploads/2026/05/source-unsafe-generated.jpg'), 'media validator keeps the unsafe-path attachment original file for review');
     assert_same(
         scalar($target, "SELECT meta_value FROM wp_postmeta WHERE post_id = $unsafe_generated_id AND meta_key = '_wp_attached_file'"),
