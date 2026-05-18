@@ -411,6 +411,12 @@ function create_events_calendar_validator_db(string $path): void {
         post_parent INTEGER NOT NULL DEFAULT 0
     )");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
     $db->exec("INSERT INTO wp_posts (ID, post_title, post_content, post_status, post_type, post_name, post_parent) VALUES
         (90, 'Spring Conference', '', 'publish', 'tribe_events', 'spring-conference', 0),
         (91, 'Main Hall', '', 'publish', 'tribe_venue', 'main-hall', 0),
@@ -419,6 +425,10 @@ function create_events_calendar_validator_db(string $path): void {
         (100, 90, '_EventVenueID', '91'),
         (101, 90, '_EventStartDate', '2026-06-01 09:00:00'),
         (102, 90, '_EventOrganizerID', '92')");
+    $recent_events = json_encode(['recent_event_ids' => [90]], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('tribe_events_recent_event_ids', :value, 'yes')");
+    $stmt->bindValue(':value', $recent_events, SQLITE3_TEXT);
+    $stmt->execute();
     $db->close();
 }
 
@@ -3975,6 +3985,46 @@ while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
         ],
     ];
 }
+$option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'tribe_events_recent_event_ids'");
+$option_payload = is_string($option_value) ? json_decode($option_value, true) : null;
+if (is_array($option_payload) && is_array($option_payload['recent_event_ids'] ?? null)) {
+    foreach (array_values($option_payload['recent_event_ids']) as $index => $event_id) {
+        if (!is_int($event_id) && !(is_string($event_id) && ctype_digit($event_id))) {
+            continue;
+        }
+        $event_id = (int)$event_id;
+        if ($event_id <= 0) {
+            continue;
+        }
+        $event_exists = (int)$db->querySingle("SELECT COUNT(*) FROM wp_posts WHERE ID = $event_id AND post_type = 'tribe_events'");
+        if ($event_exists === 1) {
+            continue;
+        }
+        $findings[] = [
+            'plugin' => 'the-events-calendar',
+            'object' => 'option:tribe_events_recent_event_ids:event:' . $event_id,
+            'reason' => 'The Events Calendar option cache references an event post that no longer exists after merge',
+            'type' => 'plugin-the-events-calendar-missing-event-option-ref',
+            'tables' => ['wp_posts', 'wp_options'],
+            'validator' => 'the-events-calendar-option-cache@forkpress-test',
+            'severity' => 'error',
+            'logical_identity' => [
+                'plugin' => 'the-events-calendar',
+                'kind' => 'event_option_ref',
+                'option_name' => 'tribe_events_recent_event_ids',
+                'event_id' => $event_id,
+                'index' => $index,
+            ],
+            'candidate' => [
+                'option_name' => 'tribe_events_recent_event_ids',
+                'event_id' => $event_id,
+                'index' => $index,
+                'option_value' => $option_payload,
+                'event_exists' => $event_exists,
+            ],
+        ];
+    }
+}
 echo json_encode([
     'status' => $findings ? 'conflicts' : 'valid',
     'findings' => $findings,
@@ -4061,6 +4111,78 @@ PHP);
     assert_same($events_organizer_payload['object'] ?? null, 'event:90:organizer:92', 'The Events Calendar audit identifies the stale event organizer reference');
     assert_same($events_organizer_payload['candidate']['event_title'] ?? null, 'Target Spring Conference', 'The Events Calendar organizer audit includes the preserved target event edit');
     assert_same($events_organizer_payload['candidate']['organizer_exists'] ?? null, 0, 'The Events Calendar audit records the missing organizer evidence');
+
+    $events_option_base_root = $tmp . '/events-option-base';
+    $events_option_source_root = $tmp . '/events-option-source';
+    $events_option_target_root = $tmp . '/events-option-target';
+    $events_option_base = $events_option_base_root . '/wp-content/database/.ht.sqlite';
+    $events_option_source = $events_option_source_root . '/wp-content/database/.ht.sqlite';
+    $events_option_target = $events_option_target_root . '/wp-content/database/.ht.sqlite';
+    $events_option_metadata = $tmp . '/.forkpress/cow/merge/plugin-events-calendar-option-validator-metadata.sqlite';
+    $events_option_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-events-calendar-option-validator.json';
+
+    copy_tree_for_test($events_base_root, $events_option_base_root);
+    copy_tree_for_test($events_option_base_root, $events_option_source_root);
+    copy_tree_for_test($events_option_base_root, $events_option_target_root);
+    cow_merge_capture_file_base($events_option_base_root, $events_option_file_base);
+    cow_merge_allocate_autoincrement_bands($events_option_source, $events_option_metadata, 'feature-plugin-events-calendar-option-source');
+    cow_merge_allocate_autoincrement_bands($events_option_target, $events_option_metadata, 'main');
+
+    $db = open_db($events_option_source);
+    $db->exec('DELETE FROM wp_postmeta WHERE post_id = 90');
+    $db->exec('DELETE FROM wp_posts WHERE ID = 90');
+    $db->close();
+
+    $events_option_value = json_encode([
+        'recent_event_ids' => [90],
+        'target_note' => 'edited on main',
+    ], JSON_UNESCAPED_SLASHES);
+    $db = open_db($events_option_target);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'tribe_events_recent_event_ids'");
+    $stmt->bindValue(':value', $events_option_value, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $events_option_result = cow_merge_branch_state(
+        $events_option_base,
+        $events_option_source,
+        $events_option_target,
+        $events_option_metadata,
+        'feature-plugin-events-calendar-option-source',
+        'main',
+        $events_option_file_base,
+        $events_option_source_root,
+        $events_option_target_root
+    );
+
+    assert_same($events_option_result['status'], 'completed_with_conflicts', 'The Events Calendar validator holds option caches pointing at deleted events for review');
+    assert_same((int)($events_option_result['plugin_validators'] ?? 0), 1, 'The Events Calendar option-cache validator is discovered from mu-plugins during merge');
+    assert_same((int)($events_option_result['plugin_validator_conflicts'] ?? 0), 1, 'The Events Calendar validator records stale event option references');
+    assert_same((int)scalar($events_option_target, "SELECT COUNT(*) FROM wp_posts WHERE ID = 90 AND post_type = 'tribe_events'"), 0, 'The Events Calendar option validator leaves the source event deletion staged for review');
+    $events_merged_option = json_decode((string)scalar($events_option_target, "SELECT option_value FROM wp_options WHERE option_name = 'tribe_events_recent_event_ids'"), true);
+    assert_same($events_merged_option['target_note'] ?? null, 'edited on main', 'The Events Calendar option validator preserves target option edits for review');
+    assert_same($events_merged_option['recent_event_ids'] ?? null, [90], 'The Events Calendar option validator keeps stale event IDs visible');
+
+    $events_option_identity = json_encode([
+        'plugin' => 'the-events-calendar',
+        'kind' => 'event_option_ref',
+        'option_name' => 'tribe_events_recent_event_ids',
+        'event_id' => 90,
+        'index' => 0,
+    ], JSON_UNESCAPED_SLASHES);
+    $events_option_audit = cow_merge_audit_report($events_option_metadata, (int)$events_option_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'the-events-calendar',
+        'conflict_type' => 'plugin-the-events-calendar-missing-event-option-ref',
+        'plugin_logical_identity' => $events_option_identity,
+    ]);
+    assert_same(count($events_option_audit['conflicts']), 1, 'The Events Calendar audit filters stale event option refs by plugin, conflict type, and logical identity');
+    assert_same($events_option_audit['conflicts'][0]['plugin_logical_identity']['event_id'] ?? null, 90, 'The Events Calendar audit exposes the missing event option identity');
+    $events_option_payload = cow_merge_decode_payload_json((string)($events_option_audit['conflicts'][0]['chosen_payload'] ?? ''), 'The Events Calendar option-cache validator payload');
+    assert_same($events_option_payload['object'] ?? null, 'option:tribe_events_recent_event_ids:event:90', 'The Events Calendar audit identifies the stale option event reference');
+    assert_same($events_option_payload['candidate']['option_value']['target_note'] ?? null, 'edited on main', 'The Events Calendar option audit includes the preserved target option edit');
+    assert_same($events_option_payload['candidate']['event_exists'] ?? null, 0, 'The Events Calendar option audit records the missing event evidence');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'
