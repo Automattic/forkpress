@@ -14,3 +14,19 @@ steps:
     notify:
       - github_commit_status:
           context: "Buildkite / COW changed preflight"
+
+  - label: ":crab: Linux build (workspace, excl. CLI)"
+    key: linux-build
+    command: .buildkite/commands/linux-build.sh
+    plugins:
+      - $CI_TOOLKIT_PLUGIN
+      - $DOCKER_PLUGIN:
+          image: "$DOCKER_RUST_IMAGE"
+          propagate-environment: true
+          environment:
+            - "CARGO_TERM_COLOR=always"
+    agents:
+      queue: default
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Linux build"
