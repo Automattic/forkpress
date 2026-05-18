@@ -766,6 +766,10 @@ function forkpress_branch_action_url(): string {
     return function_exists('admin_url') ? admin_url('admin-post.php') : '/wp-admin/admin-post.php';
 }
 
+function forkpress_branch_admin_page_url(): string {
+    return function_exists('admin_url') ? admin_url('admin.php?page=forkpress-branches') : '/wp-admin/admin.php?page=forkpress-branches';
+}
+
 function forkpress_branch_switcher_data(string $current): array {
     $branches = array_values(array_unique(forkpress_local_branches($current)));
     return array_map(function (string $branch) use ($current): array {
@@ -1647,6 +1651,111 @@ function forkpress_handle_branch_run_plugin_driver(): void {
 }
 add_action('admin_post_forkpress_branch_run_plugin_driver', 'forkpress_handle_branch_run_plugin_driver');
 
+function forkpress_branch_nonce_field(string $action): void {
+    if (function_exists('wp_nonce_field')) {
+        wp_nonce_field($action);
+        return;
+    }
+
+    $nonce = function_exists('wp_create_nonce') ? wp_create_nonce($action) : '';
+    echo '<input type="hidden" name="_wpnonce" value="' . esc_attr($nonce) . '">';
+}
+
+function forkpress_branch_options_html(array $branches, string $selected): string {
+    $html = '';
+    foreach ($branches as $branch) {
+        if (!is_string($branch) || $branch === '') {
+            continue;
+        }
+        $html .= '<option value="' . esc_attr($branch) . '"' . ($branch === $selected ? ' selected' : '') . '>' . esc_html($branch) . '</option>';
+    }
+    return $html;
+}
+
+function forkpress_register_branch_admin_page(): void {
+    if (!function_exists('add_menu_page')) {
+        return;
+    }
+
+    add_menu_page(
+        'ForkPress Branches',
+        'ForkPress',
+        'manage_options',
+        'forkpress-branches',
+        'forkpress_render_branch_admin_page',
+        'dashicons-networking',
+        3
+    );
+}
+add_action('admin_menu', 'forkpress_register_branch_admin_page');
+
+function forkpress_render_branch_admin_page(): void {
+    if (!function_exists('current_user_can') || !current_user_can('manage_options')) {
+        if (function_exists('wp_die')) {
+            wp_die('You cannot manage ForkPress branches from this site.');
+        }
+        echo '<div class="wrap"><h1>ForkPress Branches</h1><div class="notice notice-error"><p>You cannot manage ForkPress branches from this site.</p></div></div>';
+        return;
+    }
+
+    $current = forkpress_current_branch() ?: 'main';
+    $branches = forkpress_local_branches($current);
+    $can_manage = forkpress_branch_can_manage();
+    $action_url = forkpress_branch_action_url();
+    $default_source = $current === 'main' && count($branches) > 1 ? ($branches[1] ?? $current) : $current;
+    $disabled = $can_manage ? '' : ' disabled';
+    ?>
+    <div class="wrap forkpress-branches-admin">
+        <h1>ForkPress Branches</h1>
+        <?php if (!$can_manage): ?>
+            <div class="notice notice-error">
+                <p>ForkPress branch actions are unavailable because this server is missing the ForkPress binary, work directory, or PHP process execution support.</p>
+            </div>
+        <?php endif; ?>
+        <div class="notice notice-info">
+            <p>Current branch: <strong><?php echo esc_html($current); ?></strong></p>
+        </div>
+        <h2>Create Branch</h2>
+        <form method="post" action="<?php echo esc_attr($action_url); ?>">
+            <input type="hidden" name="action" value="forkpress_branch_create">
+            <?php forkpress_branch_nonce_field('forkpress_branch_create'); ?>
+            <table class="form-table" role="presentation">
+                <tbody>
+                    <tr>
+                        <th scope="row"><label for="forkpress-branch-create-name">Name</label></th>
+                        <td><input id="forkpress-branch-create-name" class="regular-text" name="branch" type="text" autocomplete="off" pattern="[a-zA-Z0-9_-]{1,63}" required<?php echo $disabled; ?>></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="forkpress-branch-create-from">From</label></th>
+                        <td><select id="forkpress-branch-create-from" name="from"<?php echo $disabled; ?>><?php echo forkpress_branch_options_html($branches, $current); ?></select></td>
+                    </tr>
+                </tbody>
+            </table>
+            <p><button class="button button-primary" type="submit"<?php echo $disabled; ?>>Create branch</button></p>
+        </form>
+        <hr>
+        <h2>Merge Branches</h2>
+        <form method="post" action="<?php echo esc_attr($action_url); ?>">
+            <input type="hidden" name="action" value="forkpress_branch_merge">
+            <?php forkpress_branch_nonce_field('forkpress_branch_merge'); ?>
+            <table class="form-table" role="presentation">
+                <tbody>
+                    <tr>
+                        <th scope="row"><label for="forkpress-branch-merge-source">Source</label></th>
+                        <td><select id="forkpress-branch-merge-source" name="source"<?php echo $disabled; ?>><?php echo forkpress_branch_options_html($branches, $default_source); ?></select></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="forkpress-branch-merge-target">Target</label></th>
+                        <td><select id="forkpress-branch-merge-target" name="target"<?php echo $disabled; ?>><?php echo forkpress_branch_options_html($branches, 'main'); ?></select></td>
+                    </tr>
+                </tbody>
+            </table>
+            <p><button class="button button-primary" type="submit"<?php echo $disabled; ?>>Merge branches</button></p>
+        </form>
+    </div>
+    <?php
+}
+
 add_action('admin_bar_menu', function ($wp_admin_bar) {
     $branch = forkpress_current_branch();
     if (!$branch) {
@@ -1746,6 +1855,18 @@ function forkpress_branch_switcher_assets(): void {
             gap: 10px;
             margin-top: 10px;
             padding-top: 10px;
+        }
+        #wpadminbar .forkpress-switcher-admin-link {
+            color: #72aee6 !important;
+            display: inline-block;
+            font-size: 12px;
+            line-height: 1.3;
+            text-decoration: none;
+        }
+        #wpadminbar .forkpress-switcher-admin-link:hover,
+        #wpadminbar .forkpress-switcher-admin-link:focus {
+            color: #9ecbff !important;
+            text-decoration: underline;
         }
         #wpadminbar .forkpress-switcher-form {
             background: #2c3338;
@@ -1991,6 +2112,7 @@ function forkpress_render_branch_switcher(): void {
         $actions = [
             'url'         => forkpress_branch_action_url(),
             'current'     => $current,
+            'adminPageUrl' => forkpress_branch_admin_page_url(),
             'createNonce' => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_create') : '',
             'mergeNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_merge') : '',
             'auditNonce'  => function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_conflicts') : '',
@@ -2827,6 +2949,13 @@ function forkpress_render_branch_switcher(): void {
 
             var tools = document.createElement('div');
             tools.className = 'forkpress-switcher-tools';
+            if (actions.adminPageUrl) {
+                var adminLink = document.createElement('a');
+                adminLink.className = 'forkpress-switcher-admin-link';
+                adminLink.href = actions.adminPageUrl;
+                adminLink.textContent = 'Open branch manager';
+                tools.appendChild(adminLink);
+            }
 
             var createForm = document.createElement('form');
             createForm.className = 'forkpress-switcher-form';

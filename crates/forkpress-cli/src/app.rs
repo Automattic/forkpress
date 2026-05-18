@@ -5571,10 +5571,12 @@ define('NONCE_SALT',       'forkpress-cas-s4-xxxxxxxxxxxxxxxx');
 define('WP_DEBUG', true);
 define('WP_DEBUG_LOG', getenv('FORKPRESS_CAS_DEBUG_LOG') ?: '/tmp/forkpress-cas-wp-debug.log');
 define('WP_DEBUG_DISPLAY', false);
-define('DISALLOW_FILE_MODS', true);
+define('FS_METHOD', 'direct');
+define('DISALLOW_FILE_MODS', false);
+define('DISALLOW_FILE_EDIT', true);
 define('WP_AUTO_UPDATE_CORE', false);
 define('AUTOMATIC_UPDATER_DISABLED', true);
-define('WP_HTTP_BLOCK_EXTERNAL', true);
+define('WP_HTTP_BLOCK_EXTERNAL', false);
 if (!defined('DISABLE_WP_CRON')) {
     define('DISABLE_WP_CRON', true);
 }

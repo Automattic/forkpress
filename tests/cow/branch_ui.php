@@ -47,6 +47,14 @@ umask(0022);
 $tmp = sys_get_temp_dir() . '/forkpress-cow-branch-ui-' . getmypid() . '-' . bin2hex(random_bytes(4));
 $plugin = realpath(__DIR__ . '/../../wp-plugin/forkpress-wp.php');
 assert_true($plugin !== false, 'ForkPress WordPress plugin fixture exists');
+$cow_bootstrap = realpath(__DIR__ . '/../../runtime/cow/bootstrap_wp.php');
+assert_true($cow_bootstrap !== false, 'ForkPress COW bootstrap fixture exists');
+if ($cow_bootstrap !== false) {
+    $bootstrap_config = file_get_contents($cow_bootstrap);
+    assert_true(str_contains($bootstrap_config, "define('DISALLOW_FILE_MODS', false);"), 'ForkPress COW bootstrap allows wp-admin plugin installation screens');
+    assert_true(str_contains($bootstrap_config, "define('FS_METHOD', 'direct');"), 'ForkPress COW bootstrap enables direct plugin writes');
+    assert_true(str_contains($bootstrap_config, "define('WP_HTTP_BLOCK_EXTERNAL', false);"), 'ForkPress COW bootstrap allows plugin download HTTP requests');
+}
 mkdir($tmp, 0777, true);
 register_shutdown_function(static function () use ($tmp): void {
     rm_tree($tmp);
@@ -121,10 +129,16 @@ if (is_string($mu_plugin_dir) && $mu_plugin_dir !== '' && !defined('WPMU_PLUGIN_
 
 function add_action($tag, $callback, $priority = 10, $accepted_args = 1) { return true; }
 function add_filter($tag, $callback, $priority = 10, $accepted_args = 1) { return true; }
+function add_menu_page($page_title, $menu_title, $capability, $menu_slug, $callback = '', $icon_url = '', $position = null) {
+    $GLOBALS['forkpress_test_menu_pages'][] = compact('page_title', 'menu_title', 'capability', 'menu_slug', 'callback', 'icon_url', 'position');
+    return $menu_slug;
+}
+function admin_url($path = '') { return '/wp-admin/' . ltrim((string) $path, '/'); }
 function current_user_can($capability) { return getenv('FORKPRESS_TEST_CAN_MANAGE') !== '0'; }
 function check_admin_referer($action) { return true; }
 function is_admin_bar_showing() { return true; }
 function wp_create_nonce($action) { return 'nonce-' . $action; }
+function wp_nonce_field($action) { echo '<input type="hidden" name="_wpnonce" value="nonce-' . htmlspecialchars((string) $action, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '">'; }
 function is_ssl() { return false; }
 function wp_json_encode($payload) { return json_encode($payload, JSON_UNESCAPED_SLASHES); }
 function wp_unslash($value) { return $value; }
@@ -218,6 +232,14 @@ if ($action === 'forkpress_branch_switcher_render') {
     forkpress_render_branch_switcher();
     $html = ob_get_clean();
     echo json_encode(['html' => $html], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+if ($action === 'forkpress_branch_admin_page') {
+    ob_start();
+    forkpress_register_branch_admin_page();
+    forkpress_render_branch_admin_page();
+    $html = ob_get_clean();
+    echo json_encode(['html' => $html, 'menus' => $GLOBALS['forkpress_test_menu_pages'] ?? []], JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -1035,6 +1057,9 @@ $switcher_render = run_branch_ui_action(
 );
 $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
+assert_true(str_contains($switcher_html, 'Open branch manager'), 'branch switcher links to the full branch manager page');
+assert_true(str_contains($switcher_html, '/wp-admin/admin.php?page=forkpress-branches'), 'branch switcher uses the wp-admin branch manager URL');
+assert_true(str_contains($switcher_html, 'Create branch'), 'branch switcher renders branch create controls');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-list'), 'branch switcher renders conflict audit list container');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-summary'), 'branch switcher renders conflict summary container');
 assert_true(str_contains($switcher_html, 'forkpress-conflict-summary-button'), 'branch switcher renders conflict summary queue buttons');
@@ -1093,6 +1118,24 @@ assert_true(str_contains($switcher_html, 'pluginDrivers'), 'branch switcher expo
 assert_true(str_contains($switcher_html, 'function driverForConflict'), 'branch switcher renders plugin driver matching helper');
 assert_true(str_contains($switcher_html, 'function fetchPluginDriver'), 'branch switcher renders plugin driver client handler');
 assert_true(str_contains($switcher_html, 'Run plugin driver'), 'branch switcher renders plugin driver button text');
+
+$admin_page = run_branch_ui_action(
+    ['action' => 'forkpress_branch_admin_page'],
+    ['main', 'feature']
+);
+$admin_page_payload = decode_branch_ui_payload($admin_page);
+$admin_page_html = (string)($admin_page_payload['html'] ?? '');
+$admin_page_menus = $admin_page_payload['menus'] ?? [];
+assert_same($admin_page['status'], 0, 'branch manager admin page renders cleanly');
+assert_true(str_contains($admin_page_html, '<h1>ForkPress Branches</h1>'), 'branch manager admin page has a wp-admin page title');
+assert_true(str_contains($admin_page_html, 'action="\/wp-admin\/admin-post.php"') || str_contains($admin_page_html, 'action="/wp-admin/admin-post.php"'), 'branch manager admin page posts to admin-post.php');
+assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_create"'), 'branch manager admin page renders create form action');
+assert_true(str_contains($admin_page_html, 'id="forkpress-branch-create-name"'), 'branch manager admin page renders branch name input');
+assert_true(str_contains($admin_page_html, 'name="from"'), 'branch manager admin page renders source branch selector for creates');
+assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_merge"'), 'branch manager admin page renders merge form action');
+assert_true(str_contains($admin_page_html, 'name="source"'), 'branch manager admin page renders merge source selector');
+assert_true(str_contains($admin_page_html, 'name="target"'), 'branch manager admin page renders merge target selector');
+assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],
