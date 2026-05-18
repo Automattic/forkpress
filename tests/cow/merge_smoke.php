@@ -174,7 +174,8 @@ function smoke_create_posts_db(string $path): void {
         post_parent INTEGER NOT NULL DEFAULT 0,
         post_author INTEGER NOT NULL DEFAULT 0,
         post_mime_type TEXT NOT NULL DEFAULT '',
-        guid TEXT NOT NULL DEFAULT ''
+        guid TEXT NOT NULL DEFAULT '',
+        comment_count INTEGER NOT NULL DEFAULT 0
     )");
     $db->exec("CREATE TABLE wp_postmeta (
         meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,7 +232,8 @@ function smoke_create_posts_db(string $path): void {
         user_id INTEGER NOT NULL DEFAULT 0,
         comment_author TEXT NOT NULL DEFAULT '',
         comment_content TEXT NOT NULL DEFAULT '',
-        comment_parent INTEGER NOT NULL DEFAULT 0
+        comment_parent INTEGER NOT NULL DEFAULT 0,
+        comment_approved TEXT NOT NULL DEFAULT '1'
     )");
     $db->exec("CREATE TABLE wp_commentmeta (
         meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -795,7 +797,7 @@ try {
         'page-plus-comment smoke merge records no WordPress graph conflicts'
     );
     assert_same(
-        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied'"),
+        (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied' AND reason <> 'recomputed WordPress post comment count from merged comments'"),
         5,
         'page-plus-comment smoke merge audits all source graph inserts'
     );
@@ -803,6 +805,40 @@ try {
         (int)smoke_scalar($comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_usermeta', 'wp_comments', 'wp_commentmeta') AND decision = 'target-kept' AND reason = 'target inserted row and source did not have it'"),
         5,
         'page-plus-comment smoke merge audits all target graph inserts'
+    );
+
+    $comment_count_base = $tmp . '/comment-count-base.sqlite';
+    $comment_count_source = $tmp . '/comment-count-source.sqlite';
+    $comment_count_target = $tmp . '/comment-count-target.sqlite';
+    $comment_count_metadata = $tmp . '/.forkpress/cow/merge/comment-count-metadata.sqlite';
+
+    smoke_create_posts_db($comment_count_base);
+    $db = smoke_open_db($comment_count_base);
+    smoke_insert_post($db, 16000080, 'Shared Comment Count Page', 'Shared comment count content', 'page', 'shared-comment-count-page');
+    $db->close();
+    copy($comment_count_base, $comment_count_source);
+    copy($comment_count_base, $comment_count_target);
+
+    $db = smoke_open_db($comment_count_source);
+    smoke_insert_user($db, 16000081, 'branch-count-commenter', 'branch-count-commenter@example.test', 'Branch Count Commenter');
+    smoke_insert_comment($db, 16000082, 16000080, 16000081, 'Branch Count Commenter', 'Branch count comment body');
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000080');
+    $db->close();
+
+    $db = smoke_open_db($comment_count_target);
+    smoke_insert_user($db, 16000083, 'main-count-commenter', 'main-count-commenter@example.test', 'Main Count Commenter');
+    smoke_insert_comment($db, 16000084, 16000080, 16000083, 'Main Count Commenter', 'Main count comment body');
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000080');
+    $db->close();
+
+    $comment_count_result = cow_merge_databases($comment_count_base, $comment_count_source, $comment_count_target, $comment_count_metadata, 'feature-smoke-comment-count', 'main');
+    assert_same($comment_count_result['status'], 'completed', 'same-post comment inserts complete cleanly');
+    assert_same((int)smoke_scalar($comment_count_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 16000080'), 2, 'same-post comment merge preserves both branch comments');
+    assert_same((int)smoke_scalar($comment_count_target, 'SELECT comment_count FROM wp_posts WHERE ID = 16000080'), 2, 'same-post comment merge recomputes denormalized WordPress comment count');
+    assert_same(
+        (int)smoke_scalar($comment_count_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name = 'comment_count' AND decision = 'source-applied' AND reason = 'recomputed WordPress post comment count from merged comments'"),
+        1,
+        'same-post comment count recompute is auditable'
     );
 
     $threaded_comment_base = $tmp . '/threaded-comment-base.sqlite';
@@ -849,7 +885,7 @@ try {
         'page-plus-threaded-comment smoke merge records no WordPress graph conflicts'
     );
     assert_same(
-        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied'"),
+        (int)smoke_scalar($threaded_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name IN ('wp_posts', 'wp_users', 'wp_comments', 'wp_commentmeta') AND decision = 'source-applied' AND reason <> 'recomputed WordPress post comment count from merged comments'"),
         5,
         'page-plus-threaded-comment smoke merge audits all source graph inserts'
     );

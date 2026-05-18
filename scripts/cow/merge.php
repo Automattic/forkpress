@@ -19136,6 +19136,15 @@ function cow_merge_wordpress_nav_menu_count_tables_available(SQLite3 $db): bool 
     return isset($post_columns['ID'], $post_columns['post_type'], $post_columns['post_status']);
 }
 
+function cow_merge_wordpress_comment_count_tables_available(SQLite3 $db): bool {
+    if (cow_merge_table_sql($db, 'wp_posts') === null || cow_merge_table_sql($db, 'wp_comments') === null) {
+        return false;
+    }
+    $post_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+    $comment_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_comments'), true);
+    return isset($post_columns['ID'], $post_columns['comment_count'], $comment_columns['comment_post_ID']);
+}
+
 function cow_merge_wordpress_term_taxonomy_count(SQLite3 $db, mixed $term_taxonomy_id): mixed {
     if (!cow_merge_wordpress_term_count_tables_available($db)) {
         return null;
@@ -19183,6 +19192,92 @@ function cow_merge_wordpress_term_taxonomy_relationship_count(
     $row = $res->fetchArray(SQLITE3_ASSOC);
     cow_merge_result_finalize_checked($res, 'failed to finalize WordPress nav menu item count');
     return $row ? (int)$row['relationship_count'] : 0;
+}
+
+function cow_merge_wordpress_post_comment_count(SQLite3 $db, mixed $post_id): mixed {
+    if (!cow_merge_wordpress_comment_count_tables_available($db)) {
+        return null;
+    }
+    $stmt = cow_merge_prepare_checked(
+        $db,
+        'SELECT comment_count FROM wp_posts WHERE ID = :post_id',
+        'failed to prepare WordPress post comment count lookup'
+    );
+    cow_merge_bind($stmt, ':post_id', $post_id);
+    $res = cow_merge_execute_checked($stmt, $db, 'failed to look up WordPress post comment count');
+    $row = $res->fetchArray(SQLITE3_ASSOC);
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress post comment count lookup');
+    return $row ? $row['comment_count'] : null;
+}
+
+function cow_merge_recompute_wordpress_post_comment_counts(
+    SQLite3 $base,
+    SQLite3 $source,
+    SQLite3 $target,
+    SQLite3 $meta,
+    int $run_id
+): int {
+    if (!cow_merge_wordpress_comment_count_tables_available($target)) {
+        return 0;
+    }
+
+    $comment_columns = array_fill_keys(cow_merge_table_columns($target, 'wp_comments'), true);
+    $approved_predicate = isset($comment_columns['comment_approved']) ? " WHERE comment_approved = '1'" : '';
+    $res = cow_merge_query_checked(
+        $target,
+        'SELECT p.ID, p.comment_count AS stored_count, COALESCE(c.actual_comment_count, 0) AS actual_comment_count ' .
+        'FROM wp_posts p ' .
+        'LEFT JOIN (' .
+        '  SELECT comment_post_ID, COUNT(*) AS actual_comment_count ' .
+        '  FROM wp_comments' . $approved_predicate . ' GROUP BY comment_post_ID' .
+        ') c ON c.comment_post_ID = p.ID',
+        'failed to inspect WordPress post comment counts'
+    );
+
+    $updates = [];
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $stored = (int)$row['stored_count'];
+        $actual = (int)$row['actual_comment_count'];
+        if ($stored === $actual) {
+            continue;
+        }
+        $updates[] = [
+            'post_id' => $row['ID'],
+            'stored_count' => $stored,
+            'actual_comment_count' => $actual,
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress post comment count inspection');
+
+    foreach ($updates as $update) {
+        $post_id = $update['post_id'];
+        $actual = $update['actual_comment_count'];
+        $stmt = cow_merge_prepare_checked(
+            $target,
+            'UPDATE wp_posts SET comment_count = :count WHERE ID = :post_id',
+            'failed to prepare WordPress post comment count recompute'
+        );
+        cow_merge_bind($stmt, ':count', $actual);
+        cow_merge_bind($stmt, ':post_id', $post_id);
+        cow_merge_execute_checked($stmt, $target, 'failed to recompute WordPress post comment count');
+
+        $identity_id = is_numeric($post_id) ? (int)$post_id : $post_id;
+        cow_merge_record_decision(
+            $meta,
+            $run_id,
+            'wp_posts',
+            cow_merge_identity_json(['ID' => $identity_id]),
+            'comment_count',
+            'source-applied',
+            'recomputed WordPress post comment count from merged comments',
+            cow_merge_wordpress_post_comment_count($base, $post_id),
+            cow_merge_wordpress_post_comment_count($source, $post_id),
+            $update['stored_count'],
+            $actual
+        );
+    }
+
+    return count($updates);
 }
 
 function cow_merge_recompute_wordpress_term_taxonomy_counts(
@@ -19441,6 +19536,7 @@ function cow_merge_databases(
         $applied += $trigger_result['applied'];
         $conflicts += $trigger_result['conflicts'];
         $applied += cow_merge_recompute_wordpress_term_taxonomy_counts($base, $source, $target, $meta, $run_id);
+        $applied += cow_merge_recompute_wordpress_post_comment_counts($base, $source, $target, $meta, $run_id);
 
         $status = $conflicts > 0 ? 'completed_with_conflicts' : 'completed';
         $crash_recovery_artifact = cow_merge_write_crash_recovery_artifact(
