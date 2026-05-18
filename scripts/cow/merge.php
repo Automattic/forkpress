@@ -10334,6 +10334,66 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
             ];
         };
 
+        $duplicate_meta_stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT p.ID, p.post_title, m.meta_key, m.meta_id, m.meta_value
+             FROM wp_posts p
+             JOIN wp_postmeta m ON m.post_id = p.ID
+             JOIN (
+                SELECT post_id, meta_key
+                FROM wp_postmeta
+                WHERE meta_key IN ('_wp_attached_file', '_wp_attachment_metadata')
+                GROUP BY post_id, meta_key
+                HAVING COUNT(*) > 1
+             ) duplicates ON duplicates.post_id = m.post_id AND duplicates.meta_key = m.meta_key
+             WHERE p.post_type = 'attachment'
+               AND m.meta_key IN ('_wp_attached_file', '_wp_attachment_metadata')
+             ORDER BY p.ID, m.meta_key, m.meta_id",
+            'failed to prepare WordPress duplicate attachment metadata inspection'
+        );
+        $duplicate_meta_res = cow_merge_execute_checked($duplicate_meta_stmt, $db, 'failed to inspect duplicate WordPress attachment metadata');
+        $duplicate_groups = [];
+        while ($duplicate_row = $duplicate_meta_res->fetchArray(SQLITE3_ASSOC)) {
+            $meta_key = (string)$duplicate_row['meta_key'];
+            $group_key = (string)$duplicate_row['ID'] . "\0" . $meta_key;
+            $duplicate_groups[$group_key]['attachment_id'] = (int)$duplicate_row['ID'];
+            $duplicate_groups[$group_key]['post_title'] = (string)$duplicate_row['post_title'];
+            $duplicate_groups[$group_key]['meta_key'] = $meta_key;
+            $duplicate_groups[$group_key]['meta_rows'][] = [
+                'meta_id' => (int)$duplicate_row['meta_id'],
+                'meta_value' => (string)$duplicate_row['meta_value'],
+            ];
+        }
+        cow_merge_result_finalize_checked($duplicate_meta_res, 'failed to finalize duplicate WordPress attachment metadata inspection');
+        foreach ($duplicate_groups as $duplicate_group) {
+            $meta_key = (string)$duplicate_group['meta_key'];
+            $files = [];
+            foreach ($duplicate_group['meta_rows'] as $meta_row) {
+                if ($meta_key !== '_wp_attached_file') {
+                    continue;
+                }
+                $path = cow_merge_wordpress_upload_relative_path((string)$meta_row['meta_value']);
+                if ($path !== null) {
+                    $files[$path] = true;
+                }
+            }
+            $record_issue(
+                $issues,
+                (int)$duplicate_group['attachment_id'],
+                (string)$duplicate_group['post_title'],
+                'plugin-wp-attachment-upload-duplicate-meta',
+                'attachment has multiple upload metadata rows for a key that should identify one current media payload',
+                [
+                    'field' => $meta_key,
+                    'role' => $meta_key === '_wp_attached_file' ? 'attached-file-meta' : 'attachment-metadata',
+                    'meta_key' => $meta_key,
+                    'meta_count' => count($duplicate_group['meta_rows']),
+                    'meta_rows' => $duplicate_group['meta_rows'],
+                ],
+                array_keys($files)
+            );
+        }
+
         $mime_select = isset($post_columns['post_mime_type']) ? 'p.post_mime_type' : "''";
         $stmt = cow_merge_prepare_checked(
             $db,

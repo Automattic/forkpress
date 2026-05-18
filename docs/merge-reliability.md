@@ -118,6 +118,10 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress attachment upload validator now records review
   conflicts when multiple attachment rows claim the same regular upload file,
   so duplicate ownership is caught even without a plugin media validator.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when one attachment has duplicate `_wp_attached_file` or
+  `_wp_attachment_metadata` rows, so branch merges cannot hide ambiguous media
+  state behind whichever postmeta row WordPress reads last.
 - The built-in WordPress attachment upload validator also records review
   conflicts when distinct upload paths differ only by case, so merges cannot
   introduce media metadata that is ambiguous on default macOS or Windows
@@ -362,7 +366,7 @@ make test-cow-schema-review
 
 For WordPress upload/media validator changes, including missing required
 attachment metadata rows, missing original, metadata-side original, `original_image`, backup, or generated upload files, missing or empty metadata-side original file fields, invalid serialized attachment
-metadata, duplicate original/generated upload ownership, invalid
+metadata, duplicate attachment upload metadata rows, duplicate original/generated upload ownership, invalid
 `image_meta`, invalid original/generated/backup dimensions, original/generated/backup filesize drift, attachment
 `post_mime_type` and generated-size/backup `mime-type` drift against known upload file extensions, attached-file metadata drift, generated-size,
 `original_image`, or backup filename drift, unsafe primary/metadata/generated/`original_image`/backup paths including URL-like and Windows drive-letter primary/metadata upload metadata, and malformed or
