@@ -68,6 +68,11 @@ permission. Symptoms look like repository corruption or branch workflow
 breakage, for example `insufficient permission for adding an object to
 repository database .git/objects` during `fetch`, `commit`, or `push`.
 
+This has been confirmed before as a Codex sandbox permissions issue. Any
+`.git` write, object-database, ref-lock, fetch, commit, or push permission
+problem seen inside Codex should be handled as sandbox damage first, even if it
+appears while working on ForkPress Git or merge features.
+
 Treat these `.git` permission failures as Codex sandbox damage first. In Codex
 sessions, assume `.git` write/permission problems are the sandbox issue we have
 seen before until the same command fails from a repaired checkout or a
