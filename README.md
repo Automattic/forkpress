@@ -233,7 +233,7 @@ IDs embedded in blocks, JSON, serialized options, or plugin data.
 
    ```bash
    forkpress branch merge-audit
-   forkpress branch merge-audit --review --records conflicts
+   forkpress branch conflicts --review
    forkpress branch merge-audit --format json --review --records decisions
    ```
 
@@ -443,6 +443,7 @@ Useful log files:
 | `forkpress branch reset <name> --from <source>` | Replace a branch from another branch. |
 | `forkpress branch merge <source> --into <target>` | Merge one branch into another. |
 | `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, and resolutions. |
+| `forkpress branch conflicts [--run <id>]` | Inspect the conflict review queue; shortcut for `merge-audit --records conflicts`. |
 | `forkpress branch merge-resolve conflict <id>` | Validate or apply a conflict choice. |
 | `forkpress branch merge-resolve conflict-key <key> [--run <id>]` | Validate or apply a conflict choice by logical conflict key when unambiguous. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |

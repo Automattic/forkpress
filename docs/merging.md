@@ -47,7 +47,7 @@ forkpress branch merge-audit
 Focus on active review queues:
 
 ```bash
-forkpress branch merge-audit --review --records conflicts
+forkpress branch conflicts --review
 forkpress branch merge-audit --review --records decisions --scope db
 forkpress branch merge-audit --review --records decisions --scope files
 ```
@@ -55,7 +55,7 @@ forkpress branch merge-audit --review --records decisions --scope files
 Export machine-readable audit data:
 
 ```bash
-forkpress branch merge-audit --format json --review --records conflicts
+forkpress branch conflicts --format json --review
 ```
 
 Revalidate stale reviewed conflicts and print the conflict ids that are now in
@@ -131,9 +131,9 @@ append `resolution-validated` conflict events. Applying a reviewed choice append
 choice without asking the user to restate `source` or `target`.
 Conflict keys can be used in place of numeric conflict ids only when the key
 identifies one unresolved conflict, or when `--run <id>` disambiguates it.
-Otherwise, use `merge-audit --conflict-key <key>` to pick the exact row.
+Otherwise, use `branch conflicts --conflict-key <key>` to pick the exact row.
 
-`merge-audit --format json --records conflicts` treats conflicts as
+`branch conflicts --format json` treats conflicts as
 first-class records. Each conflict includes a stable `conflict_key` for the
 logical table/row/column/type conflict, a same-source/target-branch
 `previous_conflict_id` when the conflict recurs in a later run or when a

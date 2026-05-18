@@ -30,6 +30,7 @@ audit queues, stale reviews, and source/target/apply-reviewed choices, see
 | `forkpress branch history` | Show recent merge runs as source-to-target branch edges. |
 | `forkpress branch tree` | Alias for merge history when you want the branch topology view. |
 | `forkpress branch merge-audit` | Inspect merge runs, decisions, conflicts, conflict events, resolutions, and rollback failures. |
+| `forkpress branch conflicts [--run <id>]` | Inspect the conflict review queue; shortcut for `merge-audit --records conflicts`. |
 | `forkpress branch revalidate-reviews [--run <id>]` | Recheck reviewed conflicts and carry stale reviews back to `needs-action`. |
 | `forkpress branch merge-review <type> <id>` | Attach review status to an audit record. |
 | `forkpress branch merge-review conflict-key <key> [--run <id>]` | Attach review status by logical conflict key when unambiguous. |
