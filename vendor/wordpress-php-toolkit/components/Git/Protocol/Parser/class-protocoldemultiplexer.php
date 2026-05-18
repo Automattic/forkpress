@@ -48,6 +48,19 @@ class ProtocolDemultiplexer {
 		$this->chunk       = '';
 		$this->stream_code = 'unknown';
 
+		if ( $this->seen_unmultiplexed_pack ) {
+			$available = $this->upstream->pull( 1024 );
+			if ( $available > 0 ) {
+				$this->chunk = $this->upstream->consume( $available );
+
+				return;
+			}
+
+			$this->seen_unmultiplexed_pack = false;
+
+			return;
+		}
+
 		$this->upstream->pull( 4, ByteReadStream::PULL_EXACTLY );
 		$length_hex = $this->upstream->consume( 4 );
 		if ( 'PACK' === $length_hex ) {

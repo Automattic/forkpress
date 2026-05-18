@@ -33,6 +33,8 @@ on_error() {
   echo "FAIL cow materialized strategy e2e at line ${BASH_LINENO[0]}: ${BASH_COMMAND}" >&2
   dump_if_exists "$TMP/git-created.html"
   dump_if_exists "$TMP/git-created-merge.out"
+  dump_if_exists "$TMP/git-existing-http-update-crash.out"
+  dump_if_exists "$TMP/git-existing-http-update-crash-retry.out"
   dump_if_exists "$TMP/git-created-http-pre-metadata-crash.out"
   dump_if_exists "$TMP/git-created-http-pre-metadata-crash-after-restart.html"
   dump_if_exists "$TMP/git-created-http-pre-metadata-crash-retry.out"
@@ -1666,6 +1668,60 @@ if [ -n "$STATUS" ]; then
   exit 1
 fi
 test ! -e "$TMP/checkout/wordpress/wp-content/database/pushed-private.txt"
+
+log_step "actual Git push existing-branch update crash recovery"
+git -C "$TMP/checkout" fetch origin +feature-cow:refs/remotes/origin/feature-cow
+git -C "$TMP/checkout" checkout -B feature-cow origin/feature-cow
+git -C "$TMP/checkout" reset --hard origin/feature-cow
+git -C "$TMP/checkout" clean -fd
+printf "changed through crashed existing branch git update\n" > "$TMP/checkout/wordpress/wp-content/cow-git-update-crash.txt"
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+FORKPRESS_COW_GIT_TEST_FAILPOINT=after-existing-branch-update-publish FORKPRESS_COW_GIT_TEST_FAILPOINT_ACTION=kill \
+  "$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+GIT_EXISTING_HTTP_UPDATE_CRASH_PUSH_SURVIVED=0
+if "$BIN" commit "$TMP/checkout" --message "crash during existing branch Git update" > "$TMP/git-existing-http-update-crash.out" 2>&1; then
+  GIT_EXISTING_HTTP_UPDATE_CRASH_PUSH_SURVIVED=1
+fi
+for _ in $(seq 1 40); do
+  if ! "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+if "$BIN" server list | grep -F "$WORK_DIR" >/dev/null; then
+  if [ "$GIT_EXISTING_HTTP_UPDATE_CRASH_PUSH_SURVIVED" = "1" ]; then
+    echo "Git push unexpectedly survived after-existing-branch-update-publish server exit failpoint" >&2
+  else
+    echo "ForkPress server survived after-existing-branch-update-publish server exit failpoint" >&2
+  fi
+  exit 1
+fi
+"$BIN" stop --work-dir "$WORK_DIR" >/dev/null 2>&1 || true
+"$BIN" serve --work-dir "$WORK_DIR" --port "$PORT" --root-host wp.localhost --workers 1
+test -f "$WORK/feature-cow/wp-content/cow-git-update-crash.txt"
+grep -F "changed through crashed existing branch git update" "$WORK/feature-cow/wp-content/cow-git-update-crash.txt" >/dev/null
+if ! find "$WORK" -maxdepth 1 -name '.forkpress-update-backup-feature-cow-*' | grep -q .; then
+  echo "existing-branch Git update crash did not leave the expected rollback backup artifact" >&2
+  exit 1
+fi
+git -C "$TMP/checkout" fetch origin +feature-cow:refs/remotes/origin/feature-cow
+if [ "$(git -C "$TMP/checkout" rev-parse feature-cow)" != "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/feature-cow)" ]; then
+  git -C "$TMP/checkout" reset --hard refs/remotes/origin/feature-cow
+fi
+printf "changed through retried existing branch git update\n" > "$TMP/checkout/wordpress/wp-content/cow-git-update-crash.txt"
+"$BIN" commit "$TMP/checkout" --message "retry existing branch Git update after crash" > "$TMP/git-existing-http-update-crash-retry.out" 2>&1
+test -f "$WORK/feature-cow/wp-content/cow-git-update-crash.txt"
+grep -F "changed through retried existing branch git update" "$WORK/feature-cow/wp-content/cow-git-update-crash.txt" >/dev/null
+if find "$WORK" -maxdepth 1 -name '.forkpress-update-*' | grep -q .; then
+  echo "retry after existing-branch Git update crash left stale update artifacts" >&2
+  exit 1
+fi
+test "$(git -C "$TMP/checkout" rev-parse HEAD)" = "$(git -C "$TMP/checkout" rev-parse refs/remotes/origin/feature-cow)"
+
+if [ "${FORKPRESS_E2E_ONLY:-}" = "git-existing-update-crash" ]; then
+  log_step "Git existing-branch update crash slice complete"
+  exit 0
+fi
 
 git -C "$TMP/checkout" checkout -B git-created origin/main
 printf "created through git\n" > "$TMP/checkout/wordpress/wp-content/git-created.txt"
