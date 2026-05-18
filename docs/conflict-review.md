@@ -30,17 +30,17 @@ and conflicted history rows can load the conflict queue for that run.
 Start with the conflicts for one run:
 
 ```bash
-forkpress branch merge-audit --records conflicts --run 42
-forkpress branch merge-audit --records conflicts --run 42 --format json
+forkpress branch conflicts --run 42
+forkpress branch conflicts --run 42 --format json
 ```
 
 Useful queue filters:
 
 ```bash
-forkpress branch merge-audit --records conflicts --run 42 --lifecycle-state needs-action
-forkpress branch merge-audit --records conflicts --run 42 --next-action revalidate
-forkpress branch merge-audit --records conflicts --run 42 --resolution-choice source
-forkpress branch merge-audit --records conflicts --run 42 --blocked-resolution-choice source
+forkpress branch conflicts --run 42 --lifecycle-state needs-action
+forkpress branch conflicts --run 42 --next-action revalidate
+forkpress branch conflicts --run 42 --resolution-choice source
+forkpress branch conflicts --run 42 --blocked-resolution-choice source
 forkpress branch merge-audit --records conflict-events --run 42 --group-by event-type
 ```
 
@@ -85,7 +85,7 @@ the run and then inspect the queues again:
 
 ```bash
 forkpress branch merge-audit --revalidate --run 42 --reviewer alice --format json
-forkpress branch merge-audit --records conflicts --run 42 --group-by latest-revalidation-status
+forkpress branch conflicts --run 42 --group-by latest-revalidation-status
 ```
 
 Compatible stale database, filesystem, and supported schema conflicts can be
@@ -112,7 +112,7 @@ forkpress branch run-plugin-driver conflict 7 --driver wp-content/plugins/acme/f
 Plugin conflicts can also be filtered by plugin identity:
 
 ```bash
-forkpress branch merge-audit --records conflicts --run 42 --scope plugin
-forkpress branch merge-audit --records conflicts --run 42 --plugin acme-events
-forkpress branch merge-audit --records conflicts --run 42 --group-by plugin-object
+forkpress branch conflicts --run 42 --scope plugin
+forkpress branch conflicts --run 42 --plugin acme-events
+forkpress branch conflicts --run 42 --group-by plugin-object
 ```
