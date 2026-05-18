@@ -17,13 +17,16 @@ $PSVersionTable.PSVersion
 [System.Environment]::OSVersion
 
 Write-Output "--- :crab: Installing Rust via rustup"
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-  $rustupExe = Join-Path $env:TEMP 'rustup-init.exe'
-  Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupExe
-  & $rustupExe -y --default-toolchain stable --profile minimal --default-host $TARGET
-  if ($LASTEXITCODE -ne 0) { throw "rustup-init failed: $LASTEXITCODE" }
-  $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-}
+# The BK Windows agent appears to have a `cargo` on PATH without a matching
+# `rustup` (possibly from a Chocolatey install). Run rustup-init
+# unconditionally; it's a no-op when an in-place toolchain is already there,
+# and the explicit PATH prepend ensures `%USERPROFILE%\.cargo\bin` wins over
+# any prior `cargo.exe` on PATH.
+$rustupExe = Join-Path $env:TEMP 'rustup-init.exe'
+Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupExe
+& $rustupExe -y --default-toolchain stable --profile minimal --default-host $TARGET
+if ($LASTEXITCODE -ne 0) { throw "rustup-init failed: $LASTEXITCODE" }
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 rustup target add $TARGET
 rustc --version
 cargo --version
