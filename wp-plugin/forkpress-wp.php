@@ -1798,6 +1798,84 @@ function forkpress_render_branch_admin_page(): void {
             </table>
             <p><button class="button button-primary" type="submit"<?php echo $disabled; ?>>Merge branches</button></p>
         </form>
+        <hr>
+        <h2>Merge History</h2>
+        <p><button id="forkpress-branch-history-load" class="button" type="button"<?php echo $disabled; ?>>Show merge history</button></p>
+        <div id="forkpress-branch-history-results" aria-live="polite"></div>
+        <?php if ($can_manage): ?>
+            <script>
+            (function () {
+                var button = document.getElementById('forkpress-branch-history-load');
+                var results = document.getElementById('forkpress-branch-history-results');
+                if (!button || !results || !window.fetch || !window.FormData) {
+                    return;
+                }
+                function rowText(run) {
+                    var source = run && run.source_branch ? String(run.source_branch) : '?';
+                    var target = run && run.target_branch ? String(run.target_branch) : '?';
+                    return [
+                        '#' + String(run && run.id ? run.id : '') + ' ' + source + ' -> ' + target,
+                        run && run.status ? 'status: ' + String(run.status) : '',
+                        run && run.conflict_count !== undefined ? 'conflicts: ' + String(run.conflict_count) : '',
+                        run && run.decision_count !== undefined ? 'decisions: ' + String(run.decision_count) : '',
+                        run && run.finished_at ? 'finished: ' + String(run.finished_at) : ''
+                    ].filter(Boolean).join(' / ');
+                }
+                function renderHistory(payload) {
+                    var records = Array.isArray(payload.records) ? payload.records : [];
+                    results.innerHTML = '';
+                    var list = document.createElement('ul');
+                    list.className = 'forkpress-branch-history-list';
+                    records.slice(0, 10).forEach(function (run) {
+                        var item = document.createElement('li');
+                        item.textContent = rowText(run);
+                        list.appendChild(item);
+                    });
+                    if (!records.length) {
+                        var empty = document.createElement('p');
+                        empty.textContent = payload.message || 'No merge history found.';
+                        results.appendChild(empty);
+                    } else {
+                        results.appendChild(list);
+                    }
+                }
+                button.addEventListener('click', function () {
+                    var body = new FormData();
+                    body.append('action', 'forkpress_branch_history');
+                    body.append('_wpnonce', '<?php echo esc_js(function_exists('wp_create_nonce') ? wp_create_nonce('forkpress_branch_history') : ''); ?>');
+                    body.append('limit', '10');
+                    button.disabled = true;
+                    results.textContent = 'Loading merge history...';
+                    fetch('<?php echo esc_js($action_url); ?>', {
+                        method: 'POST',
+                        body: body,
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-ForkPress-Async': '1'
+                        }
+                    }).then(function (response) {
+                        return response.text().then(function (text) {
+                            var payload = null;
+                            try {
+                                payload = text ? JSON.parse(text) : null;
+                            } catch (error) {
+                                payload = null;
+                            }
+                            if (!response.ok || !payload || payload.success === false) {
+                                throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress merge history failed.'));
+                            }
+                            return payload;
+                        });
+                    }).then(renderHistory).catch(function (error) {
+                        results.textContent = error && error.message ? error.message : 'ForkPress merge history failed.';
+                    }).then(function () {
+                        button.disabled = false;
+                    });
+                });
+            }());
+            </script>
+        <?php endif; ?>
     </div>
     <?php
 }
