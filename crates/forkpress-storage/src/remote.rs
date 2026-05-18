@@ -7,7 +7,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::create_cow_branch_from_external_tree;
+use crate::{
+    cleanup_cow_branch_recreate_metadata, cow_branch_exists, create_cow_branch_from_external_tree,
+    delete_cow_branch,
+};
 
 const REMOTE_SITE_MANIFEST_VERSION: u32 = 1;
 
@@ -59,6 +62,7 @@ pub struct RemoteSiteProbe {
 pub struct RemoteBranchOptions {
     pub remote: String,
     pub branch: String,
+    pub replace_existing: bool,
     pub url_hint: Option<(String, String)>,
 }
 
@@ -67,6 +71,7 @@ pub struct RemoteBranchReport {
     pub remote: RemoteSiteManifest,
     pub branch: String,
     pub cache: RemoteCacheStats,
+    pub replaced_existing: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -245,6 +250,24 @@ pub fn branch_remote_site(
             cache.cache_root.display()
         );
     }
+    let replaced_existing = cow_branch_exists(layout, &options.branch)?;
+    if replaced_existing {
+        if !options.replace_existing {
+            bail!(
+                "branch already exists: {}. Open the existing branch preview or pass --force to replace it from remote cache '{}'.",
+                options.branch,
+                manifest.name
+            );
+        }
+        delete_cow_branch(layout, &options.branch)?;
+        cleanup_cow_branch_recreate_metadata(layout, runtime, shared, &options.branch)
+            .with_context(|| {
+                format!(
+                    "failed to clean merge metadata before recreating branch '{}'",
+                    options.branch
+                )
+            })?;
+    }
     create_cow_branch_from_external_tree(
         layout,
         runtime,
@@ -259,6 +282,7 @@ pub fn branch_remote_site(
         remote: manifest,
         branch: options.branch,
         cache,
+        replaced_existing,
     })
 }
 
