@@ -132,6 +132,11 @@ Recent additions in the current merge-reliability work:
 - The built-in WordPress attachment upload validator now records review
   conflicts when an image attachment has a safe `_wp_attached_file` upload path
   but no `_wp_attachment_metadata` row.
+- The built-in WordPress attachment upload validator now records review
+  conflicts when backup-size metadata has non-positive or non-numeric
+  dimensions, or when backup-size `filesize` metadata no longer matches the
+  referenced upload file, matching the existing original/generated-size
+  metadata checks.
 - Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin-table parent collisions now
   also hold dependent source child rows when a foreign key would otherwise bind
   them to a different target parent row with the same key.

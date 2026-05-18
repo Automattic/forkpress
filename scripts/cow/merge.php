@@ -10657,6 +10657,32 @@ function cow_merge_wordpress_attachment_upload_issues(string $target_db, string 
                     'backup_size' => (string)$backup_name,
                     'backup_file' => (string)$backup['file'],
                 ]);
+                $backup_width = $backup['width'] ?? null;
+                $backup_height = $backup['height'] ?? null;
+                if (!is_numeric($backup_width) || !is_numeric($backup_height) || (int)$backup_width <= 0 || (int)$backup_height <= 0) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-metadata-invalid-shape', 'attachment backup-size dimensions are invalid', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.dimensions',
+                        'role' => 'backup-size-dimensions',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'backup_file' => (string)$backup['file'],
+                        'width' => $backup_width,
+                        'height' => $backup_height,
+                    ], [$backup_path]);
+                }
+                $backup_absolute_path = rtrim($target_root, "/\\") . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $backup_path);
+                $declared_backup_filesize = $backup['filesize'] ?? null;
+                if ($declared_backup_filesize !== null && is_file($backup_absolute_path) && (!is_numeric($declared_backup_filesize) || (int)$declared_backup_filesize !== (int)filesize($backup_absolute_path))) {
+                    $record_issue($issues, $attachment_id, $post_title, 'plugin-wp-attachment-upload-filesize-drift', 'attachment backup-size filesize metadata does not match the upload file', [
+                        'field' => '_wp_attachment_metadata.backup_sizes.' . (string)$backup_name . '.filesize',
+                        'role' => 'backup-size-filesize',
+                        'backup_size' => (string)$backup_name,
+                        'attached_file' => $attached_file_raw,
+                        'backup_file' => (string)$backup['file'],
+                        'declared_filesize' => $declared_backup_filesize,
+                        'actual_filesize' => (int)filesize($backup_absolute_path),
+                    ], [$backup_path]);
+                }
             }
         }
         cow_merge_result_finalize_checked($res, 'failed to finalize WordPress attachment upload inspection');

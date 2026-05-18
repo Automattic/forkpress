@@ -2852,6 +2852,12 @@ PHP);
         'height' => 64,
     ];
     $metadata_array['backup_sizes']['bad-shape'] = 'not an array';
+    $metadata_array['backup_sizes']['bad-dimensions'] = [
+        'file' => 'generated-image-backup.jpg',
+        'width' => 0,
+        'height' => 200,
+        'filesize' => 1,
+    ];
     if ($has_attachment_upload_symlink) {
         $metadata_array['sizes']['symlinked-generated'] = [
             'file' => 'generated-image-symlink.jpg',
@@ -2941,7 +2947,7 @@ PHP);
     );
 
     assert_same($attachment_upload_result['status'], 'completed_with_conflicts', 'built-in WordPress attachment upload guard holds unsafe upload states for review');
-    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 12 : 11;
+    $expected_attachment_upload_conflicts = $has_attachment_upload_symlink ? 14 : 13;
     if ($has_attachment_upload_case_collision) {
         $expected_attachment_upload_conflicts++;
     }
@@ -2998,20 +3004,27 @@ PHP);
         'semantic_scope' => 'wordpress',
         'conflict_type' => 'plugin-wp-attachment-metadata-invalid-shape',
     ]);
-    assert_same(count($attachment_upload_invalid_shape_audit['conflicts']), 4, 'built-in WordPress attachment upload validator rejects malformed metadata entries and invalid dimensions');
+    assert_same(count($attachment_upload_invalid_shape_audit['conflicts']), 5, 'built-in WordPress attachment upload validator rejects malformed metadata entries and invalid dimensions');
     $attachment_upload_invalid_shape_payloads = array_map(
         fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
         $attachment_upload_invalid_shape_audit['conflicts']
     );
+    $attachment_upload_invalid_shape_files_by_field = [];
+    foreach ($attachment_upload_invalid_shape_audit['conflicts'] as $conflict) {
+        $payload = cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true));
+        $attachment_upload_invalid_shape_files_by_field[(string)($payload['candidate']['field'] ?? '')] = $conflict['plugin_files'] ?? [];
+    }
     $attachment_upload_invalid_shape_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $attachment_upload_invalid_shape_payloads);
     sort($attachment_upload_invalid_shape_fields, SORT_STRING);
     assert_same($attachment_upload_invalid_shape_fields, [
+        '_wp_attachment_metadata.backup_sizes.bad-dimensions.dimensions',
         '_wp_attachment_metadata.backup_sizes.bad-shape.file',
         '_wp_attachment_metadata.dimensions',
         '_wp_attachment_metadata.sizes.bad-dimensions.dimensions',
         '_wp_attachment_metadata.sizes.missing-file-field.file',
     ], 'built-in WordPress attachment upload invalid-shape audit names malformed metadata fields and invalid dimensions');
-    assert_same($attachment_upload_invalid_shape_audit['conflicts'][0]['plugin_files'] ?? null, [], 'built-in WordPress attachment upload invalid-shape audit does not expose guessed upload paths');
+    assert_same($attachment_upload_invalid_shape_files_by_field['_wp_attachment_metadata.sizes.missing-file-field.file'] ?? null, [], 'built-in WordPress attachment upload invalid-shape audit does not expose guessed upload paths for missing generated filenames');
+    assert_same($attachment_upload_invalid_shape_files_by_field['_wp_attachment_metadata.backup_sizes.bad-dimensions.dimensions'] ?? null, ['wp-content/uploads/2026/05/generated-image-backup.jpg'], 'built-in WordPress attachment upload invalid-shape audit exposes the real backup upload path for invalid dimensions');
 
     $attachment_upload_filesize_audit = cow_merge_audit_report($attachment_upload_metadata, (int)$attachment_upload_result['run_id'], 10, [
         'scope' => 'plugin',
@@ -3019,7 +3032,7 @@ PHP);
         'semantic_scope' => 'wordpress',
         'conflict_type' => 'plugin-wp-attachment-upload-filesize-drift',
     ]);
-    assert_same(count($attachment_upload_filesize_audit['conflicts']), 2, 'built-in WordPress attachment upload validator rejects stale filesize metadata');
+    assert_same(count($attachment_upload_filesize_audit['conflicts']), 3, 'built-in WordPress attachment upload validator rejects stale filesize metadata');
     $attachment_upload_filesize_payloads = array_map(
         fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
         $attachment_upload_filesize_audit['conflicts']
@@ -3027,6 +3040,7 @@ PHP);
     $attachment_upload_filesize_fields = array_map(fn($payload) => (string)($payload['candidate']['field'] ?? ''), $attachment_upload_filesize_payloads);
     sort($attachment_upload_filesize_fields, SORT_STRING);
     assert_same($attachment_upload_filesize_fields, [
+        '_wp_attachment_metadata.backup_sizes.bad-dimensions.filesize',
         '_wp_attachment_metadata.filesize',
         '_wp_attachment_metadata.sizes.bad-dimensions.filesize',
     ], 'built-in WordPress attachment upload filesize audit names stale metadata fields');
