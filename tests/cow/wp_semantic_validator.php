@@ -206,6 +206,35 @@ function create_wp_site_editor_objects_db(string $path): void {
     create_wp_global_styles_db($path);
 }
 
+function create_wp_active_plugin_db(string $path, string $plugin): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', :plugins, 'yes')");
+    $stmt->bindValue(':plugins', serialize([$plugin]), SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
+function write_wp_block_asset_plugin(string $root): void {
+    write_test_file($root . '/wp-content/plugins/forkpress-block-fixture/forkpress-block-fixture.php', "<?php\n");
+    write_test_file($root . '/wp-content/plugins/forkpress-block-fixture/src/block.json', json_encode([
+        'apiVersion' => 3,
+        'name' => 'forkpress-fixture/example',
+        'title' => 'ForkPress Fixture',
+        'editorScript' => 'file:./index.js',
+        'viewScript' => 'file:https://example.test/remote-block.js',
+        'render' => 'file:C:/forkpress-block-fixture/render.php',
+        'style' => ['file:./style.css'],
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    write_test_file($root . '/wp-content/plugins/forkpress-block-fixture/src/index.js', 'console.log("fixture");');
+    write_test_file($root . '/wp-content/plugins/forkpress-block-fixture/src/style.css', '.wp-block-forkpress-fixture-example{}');
+}
+
 function create_wp_post_author_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_users (
@@ -958,6 +987,88 @@ PHP);
     ));
     assert_same($template_part_payloads[0]['candidate']['missing_template_part']['theme'] ?? null, 'forkpress-test', 'WordPress block-reference audit includes the missing template part theme');
     assert_same($template_part_payloads[0]['candidate']['missing_template_part']['slug'] ?? null, 'header', 'WordPress block-reference audit includes the missing template part slug');
+
+    $block_asset_base_root = $tmp . '/block-asset-base';
+    $block_asset_source_root = $tmp . '/block-asset-source';
+    $block_asset_target_root = $tmp . '/block-asset-target';
+    $block_asset_base = $block_asset_base_root . '/wp-content/database/.ht.sqlite';
+    $block_asset_source = $block_asset_source_root . '/wp-content/database/.ht.sqlite';
+    $block_asset_target = $block_asset_target_root . '/wp-content/database/.ht.sqlite';
+    $block_asset_metadata = $tmp . '/.forkpress/cow/merge/wp-block-asset-validator-metadata.sqlite';
+    $block_asset_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-block-asset-validator.json';
+
+    mkdir($block_asset_base_root . '/wp-content/database', 0777, true);
+    create_wp_active_plugin_db($block_asset_base, 'forkpress-block-fixture/forkpress-block-fixture.php');
+    write_wp_block_asset_plugin($block_asset_base_root);
+    copy_tree_for_test($block_asset_base_root, $block_asset_source_root);
+    copy_tree_for_test($block_asset_base_root, $block_asset_target_root);
+    cow_merge_capture_file_base($block_asset_base_root, $block_asset_file_base);
+    cow_merge_allocate_autoincrement_bands($block_asset_source, $block_asset_metadata, 'feature-wp-block-asset-source');
+    cow_merge_allocate_autoincrement_bands($block_asset_target, $block_asset_metadata, 'main');
+
+    unlink($block_asset_source_root . '/wp-content/plugins/forkpress-block-fixture/src/index.js');
+
+    $block_asset_result = cow_merge_branch_state(
+        $block_asset_base,
+        $block_asset_source,
+        $block_asset_target,
+        $block_asset_metadata,
+        'feature-wp-block-asset-source',
+        'main',
+        $block_asset_file_base,
+        $block_asset_source_root,
+        $block_asset_target_root
+    );
+
+    assert_same($block_asset_result['status'], 'completed_with_conflicts', 'built-in WordPress block-asset validator holds missing active-plugin block.json assets for review');
+    assert_same((int)($block_asset_result['wordpress_semantic_validator_conflicts'] ?? 0), 3, 'built-in WordPress block-asset validator records missing and unsafe file references');
+    assert_true(!is_file($block_asset_target_root . '/wp-content/plugins/forkpress-block-fixture/src/index.js'), 'block-asset validator leaves the source file deletion staged for review');
+    assert_true(is_file($block_asset_target_root . '/wp-content/plugins/forkpress-block-fixture/src/style.css'), 'block-asset validator ignores still-present block assets');
+
+    $block_asset_audit = cow_merge_audit_report($block_asset_metadata, (int)$block_asset_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-block-asset-reference',
+    ]);
+    assert_same(count($block_asset_audit['conflicts']), 3, 'block-asset validator exposes missing and unsafe assets as plugin-scoped audit conflicts');
+    assert_same($block_asset_audit['conflicts'][0]['semantic_scope'] ?? null, 'wordpress', 'block-asset validator exposes WordPress semantic scope');
+    assert_same($block_asset_audit['conflicts'][0]['plugin'] ?? null, 'forkpress-block-fixture', 'block-asset validator preserves the active plugin as audit scope');
+    $missing_asset_conflicts = array_values(array_filter(
+        $block_asset_audit['conflicts'],
+        fn($conflict) => ($conflict['plugin_files'] ?? null) === [
+            'wp-content/plugins/forkpress-block-fixture/src/block.json',
+            'wp-content/plugins/forkpress-block-fixture/src/index.js',
+        ]
+    ));
+    assert_same(count($missing_asset_conflicts), 1, 'block-asset validator exposes block.json and missing asset paths');
+    $block_asset_payload = cow_merge_audit_decode_payload(json_decode((string)($missing_asset_conflicts[0]['chosen_payload'] ?? ''), true));
+    assert_same($block_asset_payload['candidate']['json_path'] ?? null, '/editorScript', 'block-asset audit includes the block.json field path');
+    assert_same(
+        $block_asset_payload['candidate']['resolved_file'] ?? null,
+        'wp-content/plugins/forkpress-block-fixture/src/index.js',
+        'block-asset audit includes the resolved missing asset path'
+    );
+    $unsafe_block_asset_payloads = array_values(array_filter(
+        array_map(
+            fn($conflict) => cow_merge_audit_decode_payload(json_decode((string)($conflict['chosen_payload'] ?? ''), true)),
+            $block_asset_audit['conflicts']
+        ),
+        fn($payload) => is_array($payload) && (($payload['reason'] ?? null) === 'block.json contains an unsafe file reference')
+    ));
+    assert_same(count($unsafe_block_asset_payloads), 2, 'block-asset audit classifies URL-like and drive-letter references as unsafe');
+    $unsafe_file_references = array_values(array_map(
+        fn($payload) => (string)($payload['candidate']['file_reference'] ?? ''),
+        $unsafe_block_asset_payloads
+    ));
+    sort($unsafe_file_references, SORT_STRING);
+    assert_same(
+        $unsafe_file_references,
+        [
+            'file:C:/forkpress-block-fixture/render.php',
+            'file:https://example.test/remote-block.js',
+        ],
+        'block-asset audit payload includes unsafe URL-like and drive-letter file references'
+    );
 
     $post_parent_base_root = $tmp . '/post-parent-base';
     $post_parent_source_root = $tmp . '/post-parent-source';
