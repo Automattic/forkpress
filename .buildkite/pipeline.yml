@@ -17,7 +17,6 @@ steps:
 
   - label: ":crab: Linux tests (workspace, excl. CLI)"
     key: linux-tests
-    depends_on: cow-changed-preflight
     command: .buildkite/commands/linux-tests.sh
     plugins:
       - $CI_TOOLKIT_PLUGIN
@@ -54,7 +53,6 @@ steps:
   # with infrastructure if Intel mac coverage is required for parity.
   - label: ":apple: Mac aarch64 cow-e2e"
     key: mac-aarch64-cow-e2e
-    depends_on: cow-changed-preflight
     command: .buildkite/commands/mac-aarch64-cow-e2e.sh
     plugins: [$CI_TOOLKIT_PLUGIN]
     agents:
