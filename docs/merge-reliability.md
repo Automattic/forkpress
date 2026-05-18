@@ -36,6 +36,10 @@ Recent additions in the current merge-reliability work:
   map validator: entry metadata whose `meta_key` points at a form field removed
   from `wp_gf_form_meta.display_meta` stays reviewable with a plugin logical
   form-field identity.
+- The same plugin-validator suite now includes an Elementor-shaped widget media
+  validator: `_elementor_data` JSON image widgets that still point at a deleted
+  attachment row or upload file stay reviewable with a plugin logical widget
+  attachment identity.
 - `tests/cow/wp_semantic_validator.php` now includes a built-in WordPress
   global-styles validator case where source and target each add a published
   `wp_global_styles` row with the same style key. The merge stays reviewable,
@@ -174,6 +178,9 @@ Recent focused coverage also tightens three roadmap edges:
 - `tests/cow/plugin_validator.php` includes a Yoast SEO-shaped
   `wp_yoast_indexable` fixture where an index row points at a deleted
   WordPress post and target SEO title/description edits stay reviewable.
+- The same suite includes an Elementor-shaped `_elementor_data` fixture where
+  plugin-owned JSON points at a deleted attachment row/upload file while target
+  widget edits remain visible for review.
 - The same suite includes Events Calendar-shaped `_EventVenueID` and
   `_EventOrganizerID` fixtures where scalar event postmeta points at deleted
   `tribe_venue` and `tribe_organizer` posts while target event/date edits
