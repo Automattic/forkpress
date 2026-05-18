@@ -148,6 +148,64 @@ function create_wp_duplicate_page_route_db(string $path): void {
     $db->close();
 }
 
+function create_wp_duplicate_term_route_db(string $path): void {
+    $db = open_db($path);
+    $db->exec('CREATE TABLE wp_terms (term_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, slug TEXT NOT NULL)');
+    $db->exec('CREATE TABLE wp_term_taxonomy (term_taxonomy_id INTEGER PRIMARY KEY AUTOINCREMENT, term_id INTEGER NOT NULL, taxonomy TEXT NOT NULL, description TEXT NOT NULL DEFAULT "", parent INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0)');
+    $db->exec("INSERT INTO wp_terms (term_id, name, slug) VALUES (70, 'Shared parent category', 'shared-parent-category')");
+    $db->exec("INSERT INTO wp_term_taxonomy (term_taxonomy_id, term_id, taxonomy, description, parent, count) VALUES (70, 70, 'category', '', 0, 0)");
+    $db->close();
+}
+
+function insert_wp_test_term(SQLite3 $db, string $name, string $slug, string $taxonomy, int $parent = 0): void {
+    $stmt = $db->prepare('INSERT INTO wp_terms (name, slug) VALUES (:name, :slug)');
+    $stmt->bindValue(':name', $name, SQLITE3_TEXT);
+    $stmt->bindValue(':slug', $slug, SQLITE3_TEXT);
+    $stmt->execute();
+    $term_id = (int)$db->lastInsertRowID();
+    $stmt = $db->prepare('INSERT INTO wp_term_taxonomy (term_id, taxonomy, description, parent, count) VALUES (:term_id, :taxonomy, "", :parent, 0)');
+    $stmt->bindValue(':term_id', $term_id, SQLITE3_INTEGER);
+    $stmt->bindValue(':taxonomy', $taxonomy, SQLITE3_TEXT);
+    $stmt->bindValue(':parent', $parent, SQLITE3_INTEGER);
+    $stmt->execute();
+}
+
+function create_wp_duplicate_user_login_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_users (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_login TEXT NOT NULL,
+        user_email TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->close();
+}
+
+function insert_wp_test_user(SQLite3 $db, string $login, string $email, string $display_name): void {
+    $stmt = $db->prepare('INSERT INTO wp_users (user_login, user_email, display_name) VALUES (:login, :email, :display_name)');
+    $stmt->bindValue(':login', $login, SQLITE3_TEXT);
+    $stmt->bindValue(':email', $email, SQLITE3_TEXT);
+    $stmt->bindValue(':display_name', $display_name, SQLITE3_TEXT);
+    $stmt->execute();
+}
+
+function create_wp_global_styles_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_posts (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        post_title TEXT NOT NULL DEFAULT '',
+        post_content TEXT NOT NULL DEFAULT '',
+        post_status TEXT NOT NULL DEFAULT 'publish',
+        post_type TEXT NOT NULL DEFAULT 'post',
+        post_name TEXT NOT NULL DEFAULT ''
+    )");
+    $db->close();
+}
+
+function create_wp_site_editor_objects_db(string $path): void {
+    create_wp_global_styles_db($path);
+}
+
 function create_wp_post_author_reference_db(string $path): void {
     $db = open_db($path);
     $db->exec("CREATE TABLE wp_users (
@@ -1041,6 +1099,7 @@ PHP);
     assert_true(str_contains($duplicate_page_preview, '"post_parent":80'), 'WordPress duplicate page-route audit includes the parent page ID');
     assert_true(str_contains($duplicate_page_preview, '"post_name":"shared-route"'), 'WordPress duplicate page-route audit includes the duplicated slug');
     $duplicate_page_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_page_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($duplicate_page_payload['semantic_scope'] ?? null, 'wordpress', 'built-in WordPress page-route validator is tagged as WordPress semantic scope');
     $duplicate_page_titles = array_column($duplicate_page_payload['candidate']['posts'] ?? [], 'post_title');
     sort($duplicate_page_titles, SORT_STRING);
     assert_same($duplicate_page_titles, ['Source route page', 'Target route page'], 'WordPress duplicate page-route audit payload includes both duplicate page titles');
@@ -1134,6 +1193,431 @@ PHP);
     assert_same((int)($existing_duplicate_page_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress page-route validator only records newly introduced or worsened duplicate routes');
     assert_same((int)scalar($existing_duplicate_page_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'page' AND post_parent = 80 AND post_name = 'preexisting-shared-route'"), 2, 'built-in WordPress page-route validator preserves preexisting duplicate pages during unrelated merges');
     assert_same((int)scalar($existing_duplicate_page_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'page' AND post_parent = 80 AND post_name = 'source-unrelated-page'"), 1, 'built-in WordPress page-route validator still lets unrelated source pages merge');
+
+    $duplicate_term_base_root = $tmp . '/duplicate-term-route-base';
+    $duplicate_term_source_root = $tmp . '/duplicate-term-route-source';
+    $duplicate_term_target_root = $tmp . '/duplicate-term-route-target';
+    $duplicate_term_base = $duplicate_term_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_term_source = $duplicate_term_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_term_target = $duplicate_term_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_term_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-term-route-metadata.sqlite';
+    $duplicate_term_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-term-route.json';
+
+    mkdir($duplicate_term_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_term_route_db($duplicate_term_base);
+    copy_tree_for_test($duplicate_term_base_root, $duplicate_term_source_root);
+    copy_tree_for_test($duplicate_term_base_root, $duplicate_term_target_root);
+    cow_merge_capture_file_base($duplicate_term_base_root, $duplicate_term_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_term_source, $duplicate_term_metadata, 'feature-wp-duplicate-term-route-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_term_target, $duplicate_term_metadata, 'main');
+
+    $db = open_db($duplicate_term_source);
+    insert_wp_test_term($db, 'Source route category', 'shared-term-route', 'category', 70);
+    $db->close();
+
+    $db = open_db($duplicate_term_target);
+    insert_wp_test_term($db, 'Target route category', 'shared-term-route', 'category', 70);
+    $db->close();
+
+    $duplicate_term_result = cow_merge_branch_state(
+        $duplicate_term_base,
+        $duplicate_term_source,
+        $duplicate_term_target,
+        $duplicate_term_metadata,
+        'feature-wp-duplicate-term-route-source',
+        'main',
+        $duplicate_term_file_base,
+        $duplicate_term_source_root,
+        $duplicate_term_target_root
+    );
+
+    assert_same($duplicate_term_result['status'], 'completed_with_conflicts', 'built-in WordPress term-route validator holds duplicate taxonomy child slugs for review');
+    assert_same((int)($duplicate_term_result['wordpress_semantic_validator_conflicts'] ?? 0), 1, 'built-in WordPress term-route validator records the duplicate taxonomy route identity');
+    assert_same((int)($duplicate_term_result['plugin_validator_conflicts'] ?? 0), 1, 'built-in WordPress term-route validator exposes duplicate taxonomy routes through plugin-scoped audit conflicts');
+    assert_same((int)scalar($duplicate_term_target, "SELECT COUNT(*) FROM wp_term_taxonomy tt JOIN wp_terms t ON t.term_id = tt.term_id WHERE tt.taxonomy = 'category' AND tt.parent = 70 AND t.slug = 'shared-term-route'"), 2, 'built-in WordPress term-route validator keeps both duplicate terms visible for review');
+
+    $duplicate_term_audit = cow_merge_audit_report($duplicate_term_metadata, (int)$duplicate_term_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-duplicate-term-route',
+        'semantic_scope' => 'wordpress',
+    ]);
+    assert_same(count($duplicate_term_audit['conflicts']), 1, 'built-in WordPress term-route validator exposes duplicate routes as WordPress-scoped audit conflicts');
+    $duplicate_term_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_term_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($duplicate_term_payload['logical_identity']['taxonomy'] ?? null, 'category', 'WordPress duplicate term-route audit records the taxonomy');
+    assert_same($duplicate_term_payload['logical_identity']['parent'] ?? null, 70, 'WordPress duplicate term-route audit records the parent term taxonomy route');
+    assert_same($duplicate_term_payload['logical_identity']['slug'] ?? null, 'shared-term-route', 'WordPress duplicate term-route audit records the duplicated slug');
+    $duplicate_term_names = array_column($duplicate_term_payload['candidate']['terms'] ?? [], 'name');
+    sort($duplicate_term_names, SORT_STRING);
+    assert_same($duplicate_term_names, ['Source route category', 'Target route category'], 'WordPress duplicate term-route audit payload includes both duplicate term names');
+
+    $existing_duplicate_term_base_root = $tmp . '/existing-duplicate-term-route-base';
+    $existing_duplicate_term_source_root = $tmp . '/existing-duplicate-term-route-source';
+    $existing_duplicate_term_target_root = $tmp . '/existing-duplicate-term-route-target';
+    $existing_duplicate_term_base = $existing_duplicate_term_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_term_source = $existing_duplicate_term_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_term_target = $existing_duplicate_term_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_term_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-duplicate-term-route-metadata.sqlite';
+    $existing_duplicate_term_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-duplicate-term-route.json';
+
+    mkdir($existing_duplicate_term_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_term_route_db($existing_duplicate_term_base);
+    copy_tree_for_test($existing_duplicate_term_base_root, $existing_duplicate_term_source_root);
+    copy_tree_for_test($existing_duplicate_term_base_root, $existing_duplicate_term_target_root);
+    cow_merge_capture_file_base($existing_duplicate_term_base_root, $existing_duplicate_term_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_term_source, $existing_duplicate_term_metadata, 'feature-existing-wp-duplicate-term-route-source');
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_term_target, $existing_duplicate_term_metadata, 'main');
+
+    $db = open_db($existing_duplicate_term_source);
+    insert_wp_test_term($db, 'Source unrelated category', 'source-unrelated-category', 'category', 70);
+    $db->close();
+
+    $db = open_db($existing_duplicate_term_target);
+    insert_wp_test_term($db, 'Existing duplicate category A', 'preexisting-shared-term-route', 'category', 70);
+    insert_wp_test_term($db, 'Existing duplicate category B', 'preexisting-shared-term-route', 'category', 70);
+    $db->close();
+
+    $existing_duplicate_term_result = cow_merge_branch_state(
+        $existing_duplicate_term_base,
+        $existing_duplicate_term_source,
+        $existing_duplicate_term_target,
+        $existing_duplicate_term_metadata,
+        'feature-existing-wp-duplicate-term-route-source',
+        'main',
+        $existing_duplicate_term_file_base,
+        $existing_duplicate_term_source_root,
+        $existing_duplicate_term_target_root
+    );
+
+    assert_same($existing_duplicate_term_result['status'], 'completed', 'built-in WordPress term-route validator ignores duplicate taxonomy routes that predate the merge');
+    assert_same((int)($existing_duplicate_term_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress term-route validator only records newly introduced or worsened duplicate taxonomy routes');
+    assert_same((int)scalar($existing_duplicate_term_target, "SELECT COUNT(*) FROM wp_term_taxonomy tt JOIN wp_terms t ON t.term_id = tt.term_id WHERE tt.taxonomy = 'category' AND tt.parent = 70 AND t.slug = 'preexisting-shared-term-route'"), 2, 'built-in WordPress term-route validator preserves preexisting duplicate terms during unrelated merges');
+    assert_same((int)scalar($existing_duplicate_term_target, "SELECT COUNT(*) FROM wp_term_taxonomy tt JOIN wp_terms t ON t.term_id = tt.term_id WHERE tt.taxonomy = 'category' AND tt.parent = 70 AND t.slug = 'source-unrelated-category'"), 1, 'built-in WordPress term-route validator still lets unrelated source terms merge');
+
+    $duplicate_user_base_root = $tmp . '/duplicate-user-login-base';
+    $duplicate_user_source_root = $tmp . '/duplicate-user-login-source';
+    $duplicate_user_target_root = $tmp . '/duplicate-user-login-target';
+    $duplicate_user_base = $duplicate_user_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_user_source = $duplicate_user_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_user_target = $duplicate_user_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_user_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-user-login-metadata.sqlite';
+    $duplicate_user_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-user-login.json';
+
+    mkdir($duplicate_user_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_user_login_db($duplicate_user_base);
+    copy_tree_for_test($duplicate_user_base_root, $duplicate_user_source_root);
+    copy_tree_for_test($duplicate_user_base_root, $duplicate_user_target_root);
+    cow_merge_capture_file_base($duplicate_user_base_root, $duplicate_user_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_user_source, $duplicate_user_metadata, 'feature-wp-duplicate-user-login-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_user_target, $duplicate_user_metadata, 'main');
+
+    $db = open_db($duplicate_user_source);
+    insert_wp_test_user($db, 'shared_editor', 'source-editor@example.test', 'Source Editor');
+    $db->close();
+
+    $db = open_db($duplicate_user_target);
+    insert_wp_test_user($db, 'Shared_Editor', 'target-editor@example.test', 'Target Editor');
+    $db->close();
+
+    $duplicate_user_result = cow_merge_branch_state(
+        $duplicate_user_base,
+        $duplicate_user_source,
+        $duplicate_user_target,
+        $duplicate_user_metadata,
+        'feature-wp-duplicate-user-login-source',
+        'main',
+        $duplicate_user_file_base,
+        $duplicate_user_source_root,
+        $duplicate_user_target_root
+    );
+
+    assert_same($duplicate_user_result['status'], 'completed_with_conflicts', 'built-in WordPress user-login validator holds duplicate login identities for review');
+    assert_same((int)($duplicate_user_result['wordpress_semantic_validator_conflicts'] ?? 0), 1, 'built-in WordPress user-login validator records the duplicate login identity');
+    assert_same((int)($duplicate_user_result['plugin_validator_conflicts'] ?? 0), 1, 'built-in WordPress user-login validator exposes duplicate logins through plugin-scoped audit conflicts');
+    assert_same((int)scalar($duplicate_user_target, "SELECT COUNT(*) FROM wp_users WHERE LOWER(user_login) = 'shared_editor'"), 2, 'built-in WordPress user-login validator keeps both duplicate users visible for review');
+
+    $duplicate_user_audit = cow_merge_audit_report($duplicate_user_metadata, (int)$duplicate_user_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-duplicate-user-login',
+        'semantic_scope' => 'wordpress',
+    ]);
+    assert_same(count($duplicate_user_audit['conflicts']), 1, 'built-in WordPress user-login validator exposes duplicate logins as WordPress-scoped audit conflicts');
+    $duplicate_user_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_user_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($duplicate_user_payload['logical_identity']['user_login_key'] ?? null, 'shared_editor', 'WordPress duplicate user-login audit records the normalized login identity');
+    $duplicate_user_logins = array_column($duplicate_user_payload['candidate']['users'] ?? [], 'user_login');
+    sort($duplicate_user_logins, SORT_STRING);
+    assert_same($duplicate_user_logins, ['Shared_Editor', 'shared_editor'], 'WordPress duplicate user-login audit payload includes both duplicate user logins');
+    $duplicate_user_names = array_column($duplicate_user_payload['candidate']['users'] ?? [], 'display_name');
+    sort($duplicate_user_names, SORT_STRING);
+    assert_same($duplicate_user_names, ['Source Editor', 'Target Editor'], 'WordPress duplicate user-login audit payload includes both duplicate display names');
+
+    $existing_duplicate_user_base_root = $tmp . '/existing-duplicate-user-login-base';
+    $existing_duplicate_user_source_root = $tmp . '/existing-duplicate-user-login-source';
+    $existing_duplicate_user_target_root = $tmp . '/existing-duplicate-user-login-target';
+    $existing_duplicate_user_base = $existing_duplicate_user_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_user_source = $existing_duplicate_user_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_user_target = $existing_duplicate_user_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_user_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-duplicate-user-login-metadata.sqlite';
+    $existing_duplicate_user_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-duplicate-user-login.json';
+
+    mkdir($existing_duplicate_user_base_root . '/wp-content/database', 0777, true);
+    create_wp_duplicate_user_login_db($existing_duplicate_user_base);
+    copy_tree_for_test($existing_duplicate_user_base_root, $existing_duplicate_user_source_root);
+    copy_tree_for_test($existing_duplicate_user_base_root, $existing_duplicate_user_target_root);
+    cow_merge_capture_file_base($existing_duplicate_user_base_root, $existing_duplicate_user_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_user_source, $existing_duplicate_user_metadata, 'feature-existing-wp-duplicate-user-login-source');
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_user_target, $existing_duplicate_user_metadata, 'main');
+
+    $db = open_db($existing_duplicate_user_source);
+    insert_wp_test_user($db, 'source_unrelated_editor', 'source-unrelated-editor@example.test', 'Source Unrelated Editor');
+    $db->close();
+
+    $db = open_db($existing_duplicate_user_target);
+    insert_wp_test_user($db, 'preexisting_editor', 'preexisting-a@example.test', 'Preexisting Editor A');
+    insert_wp_test_user($db, 'Preexisting_Editor', 'preexisting-b@example.test', 'Preexisting Editor B');
+    $db->close();
+
+    $existing_duplicate_user_result = cow_merge_branch_state(
+        $existing_duplicate_user_base,
+        $existing_duplicate_user_source,
+        $existing_duplicate_user_target,
+        $existing_duplicate_user_metadata,
+        'feature-existing-wp-duplicate-user-login-source',
+        'main',
+        $existing_duplicate_user_file_base,
+        $existing_duplicate_user_source_root,
+        $existing_duplicate_user_target_root
+    );
+
+    assert_same($existing_duplicate_user_result['status'], 'completed', 'built-in WordPress user-login validator ignores duplicate login identities that predate the merge');
+    assert_same((int)($existing_duplicate_user_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress user-login validator only records newly introduced or worsened duplicate login identities');
+    assert_same((int)scalar($existing_duplicate_user_target, "SELECT COUNT(*) FROM wp_users WHERE LOWER(user_login) = 'preexisting_editor'"), 2, 'built-in WordPress user-login validator preserves preexisting duplicate users during unrelated merges');
+    assert_same((int)scalar($existing_duplicate_user_target, "SELECT COUNT(*) FROM wp_users WHERE user_login = 'source_unrelated_editor'"), 1, 'built-in WordPress user-login validator still lets unrelated source users merge');
+
+    $duplicate_global_styles_base_root = $tmp . '/duplicate-global-styles-base';
+    $duplicate_global_styles_source_root = $tmp . '/duplicate-global-styles-source';
+    $duplicate_global_styles_target_root = $tmp . '/duplicate-global-styles-target';
+    $duplicate_global_styles_base = $duplicate_global_styles_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_global_styles_source = $duplicate_global_styles_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_global_styles_target = $duplicate_global_styles_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_global_styles_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-global-styles-metadata.sqlite';
+    $duplicate_global_styles_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-global-styles.json';
+
+    mkdir($duplicate_global_styles_base_root . '/wp-content/database', 0777, true);
+    create_wp_global_styles_db($duplicate_global_styles_base);
+    copy_tree_for_test($duplicate_global_styles_base_root, $duplicate_global_styles_source_root);
+    copy_tree_for_test($duplicate_global_styles_base_root, $duplicate_global_styles_target_root);
+    cow_merge_capture_file_base($duplicate_global_styles_base_root, $duplicate_global_styles_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_global_styles_source, $duplicate_global_styles_metadata, 'feature-wp-duplicate-global-styles-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_global_styles_target, $duplicate_global_styles_metadata, 'main');
+
+    $db = open_db($duplicate_global_styles_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Source theme styles', '{\"version\":2,\"styles\":{\"color\":{\"text\":\"#111111\"}}}', 'publish', 'wp_global_styles', 'wp-global-styles-forkpress-test')");
+    $db->close();
+
+    $db = open_db($duplicate_global_styles_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Target theme styles', '{\"version\":2,\"styles\":{\"color\":{\"text\":\"#222222\"}}}', 'publish', 'wp_global_styles', 'wp-global-styles-forkpress-test')");
+    $db->close();
+
+    $duplicate_global_styles_result = cow_merge_branch_state(
+        $duplicate_global_styles_base,
+        $duplicate_global_styles_source,
+        $duplicate_global_styles_target,
+        $duplicate_global_styles_metadata,
+        'feature-wp-duplicate-global-styles-source',
+        'main',
+        $duplicate_global_styles_file_base,
+        $duplicate_global_styles_source_root,
+        $duplicate_global_styles_target_root
+    );
+
+    assert_same($duplicate_global_styles_result['status'], 'completed_with_conflicts', 'built-in WordPress global-styles validator holds duplicate published style keys for review');
+    assert_same((int)($duplicate_global_styles_result['wordpress_semantic_validator_conflicts'] ?? 0), 1, 'built-in WordPress global-styles validator records the duplicate style key');
+    assert_same((int)($duplicate_global_styles_result['plugin_validator_conflicts'] ?? 0), 1, 'built-in WordPress global-styles validator exposes duplicate style keys through plugin-scoped audit conflicts');
+    assert_same((int)scalar($duplicate_global_styles_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_global_styles' AND post_status = 'publish' AND post_name = 'wp-global-styles-forkpress-test'"), 2, 'built-in WordPress global-styles validator keeps both duplicate style rows visible for review');
+
+    $duplicate_global_styles_audit = cow_merge_audit_report($duplicate_global_styles_metadata, (int)$duplicate_global_styles_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-duplicate-global-styles',
+        'semantic_scope' => 'wordpress',
+    ]);
+    assert_same(count($duplicate_global_styles_audit['conflicts']), 1, 'built-in WordPress global-styles validator exposes duplicate style keys as WordPress-scoped audit conflicts');
+    $duplicate_global_styles_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $duplicate_global_styles_audit['conflicts']));
+    assert_true(str_contains($duplicate_global_styles_preview, '"post_name":"wp-global-styles-forkpress-test"'), 'WordPress duplicate global-styles audit includes the duplicated style key');
+    assert_true(str_contains($duplicate_global_styles_preview, '"duplicate_count":2'), 'WordPress duplicate global-styles audit includes the duplicate count');
+    $duplicate_global_styles_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_global_styles_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    $duplicate_global_styles_titles = array_column($duplicate_global_styles_payload['candidate']['posts'] ?? [], 'post_title');
+    sort($duplicate_global_styles_titles, SORT_STRING);
+    assert_same($duplicate_global_styles_titles, ['Source theme styles', 'Target theme styles'], 'WordPress duplicate global-styles audit payload includes both duplicate style row titles');
+
+    $existing_duplicate_global_styles_base_root = $tmp . '/existing-duplicate-global-styles-base';
+    $existing_duplicate_global_styles_source_root = $tmp . '/existing-duplicate-global-styles-source';
+    $existing_duplicate_global_styles_target_root = $tmp . '/existing-duplicate-global-styles-target';
+    $existing_duplicate_global_styles_base = $existing_duplicate_global_styles_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_global_styles_source = $existing_duplicate_global_styles_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_global_styles_target = $existing_duplicate_global_styles_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_global_styles_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-duplicate-global-styles-metadata.sqlite';
+    $existing_duplicate_global_styles_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-duplicate-global-styles.json';
+
+    mkdir($existing_duplicate_global_styles_base_root . '/wp-content/database', 0777, true);
+    create_wp_global_styles_db($existing_duplicate_global_styles_base);
+    copy_tree_for_test($existing_duplicate_global_styles_base_root, $existing_duplicate_global_styles_source_root);
+    copy_tree_for_test($existing_duplicate_global_styles_base_root, $existing_duplicate_global_styles_target_root);
+    cow_merge_capture_file_base($existing_duplicate_global_styles_base_root, $existing_duplicate_global_styles_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_global_styles_source, $existing_duplicate_global_styles_metadata, 'feature-existing-wp-duplicate-global-styles-source');
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_global_styles_target, $existing_duplicate_global_styles_metadata, 'main');
+
+    $db = open_db($existing_duplicate_global_styles_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Source unrelated style variation', '{\"version\":2,\"styles\":{\"spacing\":{\"padding\":\"1rem\"}}}', 'publish', 'wp_global_styles', 'wp-global-styles-source-variation')");
+    $db->close();
+
+    $db = open_db($existing_duplicate_global_styles_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Existing duplicate theme styles A', '{\"version\":2,\"styles\":{\"color\":{\"text\":\"#333333\"}}}', 'publish', 'wp_global_styles', 'wp-global-styles-preexisting'),
+        ('Existing duplicate theme styles B', '{\"version\":2,\"styles\":{\"color\":{\"text\":\"#444444\"}}}', 'publish', 'wp_global_styles', 'wp-global-styles-preexisting')");
+    $db->close();
+
+    $existing_duplicate_global_styles_result = cow_merge_branch_state(
+        $existing_duplicate_global_styles_base,
+        $existing_duplicate_global_styles_source,
+        $existing_duplicate_global_styles_target,
+        $existing_duplicate_global_styles_metadata,
+        'feature-existing-wp-duplicate-global-styles-source',
+        'main',
+        $existing_duplicate_global_styles_file_base,
+        $existing_duplicate_global_styles_source_root,
+        $existing_duplicate_global_styles_target_root
+    );
+
+    assert_same($existing_duplicate_global_styles_result['status'], 'completed', 'built-in WordPress global-styles validator ignores duplicate style keys that predate the merge');
+    assert_same((int)($existing_duplicate_global_styles_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress global-styles validator only records newly introduced or worsened duplicate style keys');
+    assert_same((int)scalar($existing_duplicate_global_styles_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_global_styles' AND post_status = 'publish' AND post_name = 'wp-global-styles-preexisting'"), 2, 'built-in WordPress global-styles validator preserves preexisting duplicate style rows during unrelated merges');
+    assert_same((int)scalar($existing_duplicate_global_styles_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_global_styles' AND post_status = 'publish' AND post_name = 'wp-global-styles-source-variation'"), 1, 'built-in WordPress global-styles validator still lets unrelated source style rows merge');
+
+    $duplicate_site_editor_base_root = $tmp . '/duplicate-site-editor-base';
+    $duplicate_site_editor_source_root = $tmp . '/duplicate-site-editor-source';
+    $duplicate_site_editor_target_root = $tmp . '/duplicate-site-editor-target';
+    $duplicate_site_editor_base = $duplicate_site_editor_base_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_site_editor_source = $duplicate_site_editor_source_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_site_editor_target = $duplicate_site_editor_target_root . '/wp-content/database/.ht.sqlite';
+    $duplicate_site_editor_metadata = $tmp . '/.forkpress/cow/merge/wp-duplicate-site-editor-metadata.sqlite';
+    $duplicate_site_editor_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-duplicate-site-editor.json';
+
+    mkdir($duplicate_site_editor_base_root . '/wp-content/database', 0777, true);
+    create_wp_site_editor_objects_db($duplicate_site_editor_base);
+    copy_tree_for_test($duplicate_site_editor_base_root, $duplicate_site_editor_source_root);
+    copy_tree_for_test($duplicate_site_editor_base_root, $duplicate_site_editor_target_root);
+    cow_merge_capture_file_base($duplicate_site_editor_base_root, $duplicate_site_editor_file_base);
+    cow_merge_allocate_autoincrement_bands($duplicate_site_editor_source, $duplicate_site_editor_metadata, 'feature-wp-duplicate-site-editor-source');
+    cow_merge_allocate_autoincrement_bands($duplicate_site_editor_target, $duplicate_site_editor_metadata, 'main');
+
+    $db = open_db($duplicate_site_editor_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Source single template', '<!-- wp:paragraph --><p>Source single template</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//single'),
+        ('Source header template part', '<!-- wp:paragraph --><p>Source header</p><!-- /wp:paragraph -->', 'publish', 'wp_template_part', 'forkpress-test//header')");
+    $db->close();
+
+    $db = open_db($duplicate_site_editor_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Target single template', '<!-- wp:paragraph --><p>Target single template</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//single'),
+        ('Target header template part', '<!-- wp:paragraph --><p>Target header</p><!-- /wp:paragraph -->', 'publish', 'wp_template_part', 'forkpress-test//header')");
+    $db->close();
+
+    $duplicate_site_editor_result = cow_merge_branch_state(
+        $duplicate_site_editor_base,
+        $duplicate_site_editor_source,
+        $duplicate_site_editor_target,
+        $duplicate_site_editor_metadata,
+        'feature-wp-duplicate-site-editor-source',
+        'main',
+        $duplicate_site_editor_file_base,
+        $duplicate_site_editor_source_root,
+        $duplicate_site_editor_target_root
+    );
+
+    assert_same($duplicate_site_editor_result['status'], 'completed_with_conflicts', 'built-in WordPress Site Editor validator holds duplicate template and template-part keys for review');
+    assert_same((int)($duplicate_site_editor_result['wordpress_semantic_validator_conflicts'] ?? 0), 2, 'built-in WordPress Site Editor validator records duplicate template and template-part keys');
+    assert_same((int)($duplicate_site_editor_result['plugin_validator_conflicts'] ?? 0), 2, 'built-in WordPress Site Editor validator exposes duplicate object keys through plugin-scoped audit conflicts');
+    assert_same((int)scalar($duplicate_site_editor_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_template' AND post_status = 'publish' AND post_name = 'forkpress-test//single'"), 2, 'built-in WordPress Site Editor validator keeps both duplicate templates visible for review');
+    assert_same((int)scalar($duplicate_site_editor_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_template_part' AND post_status = 'publish' AND post_name = 'forkpress-test//header'"), 2, 'built-in WordPress Site Editor validator keeps both duplicate template parts visible for review');
+
+    $duplicate_template_audit = cow_merge_audit_report($duplicate_site_editor_metadata, (int)$duplicate_site_editor_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-duplicate-template-key',
+        'semantic_scope' => 'wordpress',
+    ]);
+    assert_same(count($duplicate_template_audit['conflicts']), 1, 'built-in WordPress Site Editor validator exposes duplicate templates as WordPress-scoped audit conflicts');
+    $duplicate_template_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_template_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($duplicate_template_payload['logical_identity']['post_type'] ?? null, 'wp_template', 'WordPress duplicate template audit records the template post type');
+    assert_same($duplicate_template_payload['logical_identity']['post_name'] ?? null, 'forkpress-test//single', 'WordPress duplicate template audit records the template key');
+    $duplicate_template_titles = array_column($duplicate_template_payload['candidate']['posts'] ?? [], 'post_title');
+    sort($duplicate_template_titles, SORT_STRING);
+    assert_same($duplicate_template_titles, ['Source single template', 'Target single template'], 'WordPress duplicate template audit payload includes both duplicate template titles');
+
+    $duplicate_template_part_audit = cow_merge_audit_report($duplicate_site_editor_metadata, (int)$duplicate_site_editor_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'conflict_type' => 'plugin-wp-duplicate-template-part-key',
+        'semantic_scope' => 'wordpress',
+    ]);
+    assert_same(count($duplicate_template_part_audit['conflicts']), 1, 'built-in WordPress Site Editor validator exposes duplicate template parts as WordPress-scoped audit conflicts');
+    $duplicate_template_part_payload = cow_merge_audit_decode_payload(json_decode((string)($duplicate_template_part_audit['conflicts'][0]['chosen_payload'] ?? ''), true));
+    assert_same($duplicate_template_part_payload['logical_identity']['post_type'] ?? null, 'wp_template_part', 'WordPress duplicate template-part audit records the template-part post type');
+    assert_same($duplicate_template_part_payload['logical_identity']['post_name'] ?? null, 'forkpress-test//header', 'WordPress duplicate template-part audit records the template-part key');
+    $duplicate_template_part_titles = array_column($duplicate_template_part_payload['candidate']['posts'] ?? [], 'post_title');
+    sort($duplicate_template_part_titles, SORT_STRING);
+    assert_same($duplicate_template_part_titles, ['Source header template part', 'Target header template part'], 'WordPress duplicate template-part audit payload includes both duplicate template-part titles');
+
+    $existing_duplicate_site_editor_base_root = $tmp . '/existing-duplicate-site-editor-base';
+    $existing_duplicate_site_editor_source_root = $tmp . '/existing-duplicate-site-editor-source';
+    $existing_duplicate_site_editor_target_root = $tmp . '/existing-duplicate-site-editor-target';
+    $existing_duplicate_site_editor_base = $existing_duplicate_site_editor_base_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_site_editor_source = $existing_duplicate_site_editor_source_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_site_editor_target = $existing_duplicate_site_editor_target_root . '/wp-content/database/.ht.sqlite';
+    $existing_duplicate_site_editor_metadata = $tmp . '/.forkpress/cow/merge/wp-existing-duplicate-site-editor-metadata.sqlite';
+    $existing_duplicate_site_editor_file_base = $tmp . '/.forkpress/cow/merge/file-bases/wp-existing-duplicate-site-editor.json';
+
+    mkdir($existing_duplicate_site_editor_base_root . '/wp-content/database', 0777, true);
+    create_wp_site_editor_objects_db($existing_duplicate_site_editor_base);
+    copy_tree_for_test($existing_duplicate_site_editor_base_root, $existing_duplicate_site_editor_source_root);
+    copy_tree_for_test($existing_duplicate_site_editor_base_root, $existing_duplicate_site_editor_target_root);
+    cow_merge_capture_file_base($existing_duplicate_site_editor_base_root, $existing_duplicate_site_editor_file_base);
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_site_editor_source, $existing_duplicate_site_editor_metadata, 'feature-existing-wp-duplicate-site-editor-source');
+    cow_merge_allocate_autoincrement_bands($existing_duplicate_site_editor_target, $existing_duplicate_site_editor_metadata, 'main');
+
+    $db = open_db($existing_duplicate_site_editor_source);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Source unrelated template', '<!-- wp:paragraph --><p>Source archive template</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//archive')");
+    $db->close();
+
+    $db = open_db($existing_duplicate_site_editor_target);
+    $db->exec("INSERT INTO wp_posts (post_title, post_content, post_status, post_type, post_name) VALUES
+        ('Existing duplicate template A', '<!-- wp:paragraph --><p>Existing template A</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//preexisting'),
+        ('Existing duplicate template B', '<!-- wp:paragraph --><p>Existing template B</p><!-- /wp:paragraph -->', 'publish', 'wp_template', 'forkpress-test//preexisting')");
+    $db->close();
+
+    $existing_duplicate_site_editor_result = cow_merge_branch_state(
+        $existing_duplicate_site_editor_base,
+        $existing_duplicate_site_editor_source,
+        $existing_duplicate_site_editor_target,
+        $existing_duplicate_site_editor_metadata,
+        'feature-existing-wp-duplicate-site-editor-source',
+        'main',
+        $existing_duplicate_site_editor_file_base,
+        $existing_duplicate_site_editor_source_root,
+        $existing_duplicate_site_editor_target_root
+    );
+
+    assert_same($existing_duplicate_site_editor_result['status'], 'completed', 'built-in WordPress Site Editor validator ignores duplicate template keys that predate the merge');
+    assert_same((int)($existing_duplicate_site_editor_result['wordpress_semantic_validator_conflicts'] ?? 0), 0, 'built-in WordPress Site Editor validator only records newly introduced or worsened duplicate object keys');
+    assert_same((int)scalar($existing_duplicate_site_editor_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_template' AND post_status = 'publish' AND post_name = 'forkpress-test//preexisting'"), 2, 'built-in WordPress Site Editor validator preserves preexisting duplicate templates during unrelated merges');
+    assert_same((int)scalar($existing_duplicate_site_editor_target, "SELECT COUNT(*) FROM wp_posts WHERE post_type = 'wp_template' AND post_status = 'publish' AND post_name = 'forkpress-test//archive'"), 1, 'built-in WordPress Site Editor validator still lets unrelated source templates merge');
 
     $post_author_base_root = $tmp . '/post-author-base';
     $post_author_source_root = $tmp . '/post-author-source';

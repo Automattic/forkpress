@@ -8744,6 +8744,7 @@ function cow_merge_collect_wordpress_duplicate_page_route_findings(string $targe
                 'tables' => ['wp_posts'],
                 'validator' => 'forkpress-wordpress-core-page-routes@1',
                 'severity' => 'error',
+                'semantic_scope' => 'wordpress',
                 'logical_identity' => [
                     'kind' => 'wordpress-page-route',
                     'post_type' => 'page',
@@ -8768,8 +8769,505 @@ function cow_merge_collect_wordpress_duplicate_page_route_findings(string $targe
     }
 }
 
+function cow_merge_wordpress_term_route_counts(SQLite3 $db): array {
+    $term_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_terms'), true);
+    foreach (['term_id', 'name', 'slug'] as $column) {
+        if (!isset($term_columns[$column])) {
+            return [];
+        }
+    }
+    $taxonomy_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_term_taxonomy'), true);
+    foreach (['term_taxonomy_id', 'term_id', 'taxonomy', 'parent'] as $column) {
+        if (!isset($taxonomy_columns[$column])) {
+            return [];
+        }
+    }
+
+    $routes = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT tt.taxonomy, tt.parent, t.slug, COUNT(*) AS route_count
+         FROM wp_term_taxonomy tt
+         JOIN wp_terms t ON t.term_id = tt.term_id
+         WHERE t.slug <> ''
+           AND tt.taxonomy <> ''
+         GROUP BY tt.taxonomy, tt.parent, t.slug
+         ORDER BY tt.taxonomy, tt.parent, t.slug",
+        'failed to inspect WordPress term routes'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $taxonomy = (string)$row['taxonomy'];
+        $parent = (int)$row['parent'];
+        $slug = (string)$row['slug'];
+        $routes[$taxonomy . "\0" . $parent . "\0" . $slug] = [
+            'taxonomy' => $taxonomy,
+            'parent' => $parent,
+            'slug' => $slug,
+            'route_count' => (int)$row['route_count'],
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress term route inspection');
+    return $routes;
+}
+
+function cow_merge_collect_wordpress_duplicate_term_route_findings(string $target_db, ?string $target_before_db = null): array {
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $term_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_terms'), true);
+        foreach (['term_id', 'name', 'slug'] as $column) {
+            if (!isset($term_columns[$column])) {
+                return [];
+            }
+        }
+        $taxonomy_columns = array_fill_keys(cow_merge_table_columns($db, 'wp_term_taxonomy'), true);
+        foreach (['term_taxonomy_id', 'term_id', 'taxonomy', 'parent'] as $column) {
+            if (!isset($taxonomy_columns[$column])) {
+                return [];
+            }
+        }
+
+        $before_routes = [];
+        if (is_string($target_before_db) && $target_before_db !== '' && is_file($target_before_db)) {
+            $before_db = cow_merge_open_db($target_before_db, SQLITE3_OPEN_READONLY);
+            try {
+                $before_routes = cow_merge_wordpress_term_route_counts($before_db);
+            } finally {
+                $before_db->close();
+            }
+        }
+
+        $findings = [];
+        $routes = cow_merge_wordpress_term_route_counts($db);
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT t.term_id, tt.term_taxonomy_id, t.name, t.slug, tt.taxonomy, tt.parent
+             FROM wp_term_taxonomy tt
+             JOIN wp_terms t ON t.term_id = tt.term_id
+             WHERE tt.taxonomy = :taxonomy
+               AND tt.parent = :parent
+               AND t.slug = :slug
+             ORDER BY tt.term_taxonomy_id",
+            'failed to prepare WordPress duplicate term route details'
+        );
+        foreach ($routes as $route_key => $route) {
+            if ($route['route_count'] < 2) {
+                continue;
+            }
+            if ((int)($before_routes[$route_key]['route_count'] ?? 0) >= $route['route_count']) {
+                continue;
+            }
+            cow_merge_bind($stmt, ':taxonomy', $route['taxonomy']);
+            cow_merge_bind($stmt, ':parent', $route['parent']);
+            cow_merge_bind($stmt, ':slug', $route['slug']);
+            $detail_res = cow_merge_execute_checked($stmt, $db, 'failed to read WordPress duplicate term route details');
+            $terms = [];
+            while ($term = $detail_res->fetchArray(SQLITE3_ASSOC)) {
+                $terms[] = [
+                    'term_id' => (int)$term['term_id'],
+                    'term_taxonomy_id' => (int)$term['term_taxonomy_id'],
+                    'name' => (string)$term['name'],
+                    'slug' => (string)$term['slug'],
+                    'taxonomy' => (string)$term['taxonomy'],
+                    'parent' => (int)$term['parent'],
+                ];
+            }
+            cow_merge_result_finalize_checked($detail_res, 'failed to finalize WordPress duplicate term route details');
+            $stmt->reset();
+            $findings[] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'term-route:' . $route['taxonomy'] . ':' . $route['parent'] . ':' . $route['slug'],
+                'reason' => 'multiple WordPress terms share the same taxonomy, parent, and slug',
+                'type' => 'plugin-wp-duplicate-term-route',
+                'tables' => ['wp_terms', 'wp_term_taxonomy'],
+                'validator' => 'forkpress-wordpress-core-term-routes@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-term-route',
+                    'taxonomy' => $route['taxonomy'],
+                    'parent' => $route['parent'],
+                    'slug' => $route['slug'],
+                ],
+                'manual_review_reason' => 'WordPress expects one term route for a taxonomy, parent, and slug; duplicates make term archives and admin selection ambiguous.',
+                'suggested_action' => 'Rename, re-parent, or delete one duplicate term before accepting the merged state.',
+                'candidate' => [
+                    'taxonomy' => $route['taxonomy'],
+                    'parent' => $route['parent'],
+                    'slug' => $route['slug'],
+                    'duplicate_count' => $route['route_count'],
+                    'target_before_count' => (int)($before_routes[$route_key]['route_count'] ?? 0),
+                    'terms' => $terms,
+                ],
+            ];
+        }
+        return $findings;
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_wordpress_user_login_counts(SQLite3 $db): array {
+    $columns = array_fill_keys(cow_merge_table_columns($db, 'wp_users'), true);
+    foreach (['ID', 'user_login'] as $column) {
+        if (!isset($columns[$column])) {
+            return [];
+        }
+    }
+
+    $logins = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT LOWER(user_login) AS user_login_key, COUNT(*) AS login_count
+         FROM wp_users
+         WHERE user_login <> ''
+         GROUP BY LOWER(user_login)
+         ORDER BY LOWER(user_login)",
+        'failed to inspect WordPress user logins'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $user_login_key = (string)$row['user_login_key'];
+        $logins[$user_login_key] = [
+            'user_login_key' => $user_login_key,
+            'login_count' => (int)$row['login_count'],
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress user login inspection');
+    return $logins;
+}
+
+function cow_merge_collect_wordpress_duplicate_user_login_findings(string $target_db, ?string $target_before_db = null): array {
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $columns = array_fill_keys(cow_merge_table_columns($db, 'wp_users'), true);
+        foreach (['ID', 'user_login'] as $column) {
+            if (!isset($columns[$column])) {
+                return [];
+            }
+        }
+
+        $before_logins = [];
+        if (is_string($target_before_db) && $target_before_db !== '' && is_file($target_before_db)) {
+            $before_db = cow_merge_open_db($target_before_db, SQLITE3_OPEN_READONLY);
+            try {
+                $before_logins = cow_merge_wordpress_user_login_counts($before_db);
+            } finally {
+                $before_db->close();
+            }
+        }
+
+        $select_columns = ['ID', 'user_login'];
+        foreach (['user_email', 'display_name'] as $optional_column) {
+            if (isset($columns[$optional_column])) {
+                $select_columns[] = $optional_column;
+            }
+        }
+
+        $findings = [];
+        $logins = cow_merge_wordpress_user_login_counts($db);
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            'SELECT ' . implode(', ', array_map('cow_merge_quote_ident', $select_columns)) . '
+             FROM wp_users
+             WHERE LOWER(user_login) = :user_login_key
+             ORDER BY ID',
+            'failed to prepare WordPress duplicate user login details'
+        );
+        foreach ($logins as $login_key => $login) {
+            if ($login['login_count'] < 2) {
+                continue;
+            }
+            if ((int)($before_logins[$login_key]['login_count'] ?? 0) >= $login['login_count']) {
+                continue;
+            }
+            cow_merge_bind($stmt, ':user_login_key', $login['user_login_key']);
+            $detail_res = cow_merge_execute_checked($stmt, $db, 'failed to read WordPress duplicate user login details');
+            $users = [];
+            while ($user = $detail_res->fetchArray(SQLITE3_ASSOC)) {
+                $candidate = [
+                    'ID' => (int)$user['ID'],
+                    'user_login' => (string)$user['user_login'],
+                ];
+                if (array_key_exists('user_email', $user)) {
+                    $candidate['user_email'] = (string)$user['user_email'];
+                }
+                if (array_key_exists('display_name', $user)) {
+                    $candidate['display_name'] = (string)$user['display_name'];
+                }
+                $users[] = $candidate;
+            }
+            cow_merge_result_finalize_checked($detail_res, 'failed to finalize WordPress duplicate user login details');
+            $stmt->reset();
+            $findings[] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'user-login:' . $login['user_login_key'],
+                'reason' => 'multiple WordPress users share the same login name',
+                'type' => 'plugin-wp-duplicate-user-login',
+                'tables' => ['wp_users'],
+                'validator' => 'forkpress-wordpress-core-user-logins@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-user-login',
+                    'user_login_key' => $login['user_login_key'],
+                ],
+                'manual_review_reason' => 'WordPress treats user_login as a user identity; duplicate login names make authentication and author ownership ambiguous.',
+                'suggested_action' => 'Rename, merge, or delete one duplicate user before accepting the merged state.',
+                'candidate' => [
+                    'user_login_key' => $login['user_login_key'],
+                    'duplicate_count' => $login['login_count'],
+                    'target_before_count' => (int)($before_logins[$login_key]['login_count'] ?? 0),
+                    'users' => $users,
+                ],
+            ];
+        }
+        return $findings;
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_wordpress_global_styles_counts(SQLite3 $db): array {
+    $styles = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT post_name, COUNT(*) AS style_count
+         FROM wp_posts
+         WHERE post_type = 'wp_global_styles'
+           AND post_status = 'publish'
+           AND post_name <> ''
+         GROUP BY post_name
+         ORDER BY post_name",
+        'failed to inspect WordPress global styles rows'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $post_name = (string)$row['post_name'];
+        $styles[$post_name] = [
+            'post_name' => $post_name,
+            'style_count' => (int)$row['style_count'],
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress global styles inspection');
+    return $styles;
+}
+
+function cow_merge_collect_wordpress_duplicate_global_styles_findings(string $target_db, ?string $target_before_db = null): array {
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+        foreach (['ID', 'post_title', 'post_content', 'post_status', 'post_type', 'post_name'] as $column) {
+            if (!isset($columns[$column])) {
+                return [];
+            }
+        }
+
+        $before_styles = [];
+        if (is_string($target_before_db) && $target_before_db !== '' && is_file($target_before_db)) {
+            $before_db = cow_merge_open_db($target_before_db, SQLITE3_OPEN_READONLY);
+            try {
+                $before_styles = cow_merge_wordpress_global_styles_counts($before_db);
+            } finally {
+                $before_db->close();
+            }
+        }
+
+        $findings = [];
+        $styles = cow_merge_wordpress_global_styles_counts($db);
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT ID, post_title, post_status
+             FROM wp_posts
+             WHERE post_type = 'wp_global_styles'
+               AND post_status = 'publish'
+               AND post_name = :post_name
+             ORDER BY ID",
+            'failed to prepare WordPress duplicate global styles details'
+        );
+        foreach ($styles as $style_key => $style) {
+            if ($style['style_count'] < 2) {
+                continue;
+            }
+            if ((int)($before_styles[$style_key]['style_count'] ?? 0) >= $style['style_count']) {
+                continue;
+            }
+            cow_merge_bind($stmt, ':post_name', $style['post_name']);
+            $detail_res = cow_merge_execute_checked($stmt, $db, 'failed to read WordPress duplicate global styles details');
+            $posts = [];
+            while ($post = $detail_res->fetchArray(SQLITE3_ASSOC)) {
+                $posts[] = [
+                    'ID' => (int)$post['ID'],
+                    'post_title' => (string)$post['post_title'],
+                    'post_status' => (string)$post['post_status'],
+                ];
+            }
+            cow_merge_result_finalize_checked($detail_res, 'failed to finalize WordPress duplicate global styles details');
+            $stmt->reset();
+            $findings[] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => 'global-styles:' . $style['post_name'],
+                'reason' => 'multiple published WordPress global styles rows share the same style key',
+                'type' => 'plugin-wp-duplicate-global-styles',
+                'tables' => ['wp_posts'],
+                'validator' => 'forkpress-wordpress-core-global-styles@1',
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-global-styles',
+                    'post_type' => 'wp_global_styles',
+                    'post_name' => $style['post_name'],
+                ],
+                'manual_review_reason' => 'WordPress expects one published global styles row for a given style key; multiple rows make the active Site Editor styles ambiguous.',
+                'suggested_action' => 'Keep one published global styles row for the style key, or move the other style changes into the surviving row before accepting the merged state.',
+                'candidate' => [
+                    'post_type' => 'wp_global_styles',
+                    'post_name' => $style['post_name'],
+                    'duplicate_count' => $style['style_count'],
+                    'target_before_count' => (int)($before_styles[$style_key]['style_count'] ?? 0),
+                    'posts' => $posts,
+                ],
+            ];
+        }
+        return $findings;
+    } finally {
+        $db->close();
+    }
+}
+
+function cow_merge_wordpress_site_editor_object_counts(SQLite3 $db): array {
+    $objects = [];
+    $res = cow_merge_query_checked(
+        $db,
+        "SELECT post_type, post_name, COUNT(*) AS object_count
+         FROM wp_posts
+         WHERE post_type IN ('wp_template', 'wp_template_part')
+           AND post_status = 'publish'
+           AND post_name <> ''
+         GROUP BY post_type, post_name
+         ORDER BY post_type, post_name",
+        'failed to inspect WordPress Site Editor object rows'
+    );
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        $post_type = (string)$row['post_type'];
+        $post_name = (string)$row['post_name'];
+        $objects[$post_type . "\0" . $post_name] = [
+            'post_type' => $post_type,
+            'post_name' => $post_name,
+            'object_count' => (int)$row['object_count'],
+        ];
+    }
+    cow_merge_result_finalize_checked($res, 'failed to finalize WordPress Site Editor object inspection');
+    return $objects;
+}
+
+function cow_merge_collect_wordpress_duplicate_site_editor_object_findings(string $target_db, ?string $target_before_db = null): array {
+    $db = cow_merge_open_db($target_db, SQLITE3_OPEN_READONLY);
+    try {
+        $columns = array_fill_keys(cow_merge_table_columns($db, 'wp_posts'), true);
+        foreach (['ID', 'post_title', 'post_status', 'post_type', 'post_name'] as $column) {
+            if (!isset($columns[$column])) {
+                return [];
+            }
+        }
+
+        $before_objects = [];
+        if (is_string($target_before_db) && $target_before_db !== '' && is_file($target_before_db)) {
+            $before_db = cow_merge_open_db($target_before_db, SQLITE3_OPEN_READONLY);
+            try {
+                $before_objects = cow_merge_wordpress_site_editor_object_counts($before_db);
+            } finally {
+                $before_db->close();
+            }
+        }
+
+        $type_labels = [
+            'wp_template' => [
+                'conflict_type' => 'plugin-wp-duplicate-template-key',
+                'validator' => 'forkpress-wordpress-core-template-keys@1',
+                'object_prefix' => 'template:',
+                'label' => 'template',
+            ],
+            'wp_template_part' => [
+                'conflict_type' => 'plugin-wp-duplicate-template-part-key',
+                'validator' => 'forkpress-wordpress-core-template-part-keys@1',
+                'object_prefix' => 'template-part:',
+                'label' => 'template part',
+            ],
+        ];
+
+        $findings = [];
+        $objects = cow_merge_wordpress_site_editor_object_counts($db);
+        $stmt = cow_merge_prepare_checked(
+            $db,
+            "SELECT ID, post_title, post_status
+             FROM wp_posts
+             WHERE post_type = :post_type
+               AND post_status = 'publish'
+               AND post_name = :post_name
+             ORDER BY ID",
+            'failed to prepare WordPress duplicate Site Editor object details'
+        );
+        foreach ($objects as $object_key => $object) {
+            if ($object['object_count'] < 2) {
+                continue;
+            }
+            if ((int)($before_objects[$object_key]['object_count'] ?? 0) >= $object['object_count']) {
+                continue;
+            }
+            $labels = $type_labels[$object['post_type']] ?? null;
+            if ($labels === null) {
+                continue;
+            }
+            cow_merge_bind($stmt, ':post_type', $object['post_type']);
+            cow_merge_bind($stmt, ':post_name', $object['post_name']);
+            $detail_res = cow_merge_execute_checked($stmt, $db, 'failed to read WordPress duplicate Site Editor object details');
+            $posts = [];
+            while ($post = $detail_res->fetchArray(SQLITE3_ASSOC)) {
+                $posts[] = [
+                    'ID' => (int)$post['ID'],
+                    'post_title' => (string)$post['post_title'],
+                    'post_status' => (string)$post['post_status'],
+                ];
+            }
+            cow_merge_result_finalize_checked($detail_res, 'failed to finalize WordPress duplicate Site Editor object details');
+            $stmt->reset();
+            $findings[] = [
+                'plugin' => 'forkpress-wordpress-core',
+                'object' => $labels['object_prefix'] . $object['post_name'],
+                'reason' => 'multiple published WordPress Site Editor ' . $labels['label'] . ' rows share the same object key',
+                'type' => $labels['conflict_type'],
+                'tables' => ['wp_posts'],
+                'validator' => $labels['validator'],
+                'severity' => 'error',
+                'semantic_scope' => 'wordpress',
+                'logical_identity' => [
+                    'kind' => 'wordpress-site-editor-object',
+                    'post_type' => $object['post_type'],
+                    'post_name' => $object['post_name'],
+                ],
+                'manual_review_reason' => 'WordPress expects one published Site Editor ' . $labels['label'] . ' row for a given theme object key; multiple rows make template resolution ambiguous.',
+                'suggested_action' => 'Keep one published ' . $labels['label'] . ' row for the object key, or move the other template changes into the surviving row before accepting the merged state.',
+                'candidate' => [
+                    'post_type' => $object['post_type'],
+                    'post_name' => $object['post_name'],
+                    'duplicate_count' => $object['object_count'],
+                    'target_before_count' => (int)($before_objects[$object_key]['object_count'] ?? 0),
+                    'posts' => $posts,
+                ],
+            ];
+        }
+        return $findings;
+    } finally {
+        $db->close();
+    }
+}
+
 function cow_merge_collect_wordpress_semantic_findings(string $target_db, ?string $target_before_db = null): array {
-    return cow_merge_collect_wordpress_duplicate_page_route_findings($target_db, $target_before_db);
+    return array_merge(
+        cow_merge_collect_wordpress_duplicate_page_route_findings($target_db, $target_before_db),
+        cow_merge_collect_wordpress_duplicate_term_route_findings($target_db, $target_before_db),
+        cow_merge_collect_wordpress_duplicate_user_login_findings($target_db, $target_before_db),
+        cow_merge_collect_wordpress_duplicate_global_styles_findings($target_db, $target_before_db),
+        cow_merge_collect_wordpress_duplicate_site_editor_object_findings($target_db, $target_before_db)
+    );
 }
 
 function cow_merge_record_matching_file_decision(
