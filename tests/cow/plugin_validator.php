@@ -201,6 +201,49 @@ function create_plugin_serialized_validator_db(string $path): void {
     $db->close();
 }
 
+function create_woocommerce_hpos_validator_db(string $path): void {
+    $db = open_db($path);
+    $db->exec("CREATE TABLE wp_wc_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        status TEXT NOT NULL,
+        type TEXT NOT NULL,
+        total_amount TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_wc_order_addresses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        address_type TEXT NOT NULL,
+        first_name TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_woocommerce_order_items (
+        order_item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        order_item_name TEXT NOT NULL,
+        order_item_type TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_woocommerce_order_itemmeta (
+        meta_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_item_id INTEGER NOT NULL,
+        meta_key TEXT NOT NULL,
+        meta_value TEXT NOT NULL
+    )");
+    $db->exec("CREATE TABLE wp_options (
+        option_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        option_name TEXT NOT NULL,
+        option_value TEXT NOT NULL,
+        autoload TEXT NOT NULL DEFAULT 'yes'
+    )");
+    $db->exec("INSERT INTO wp_wc_orders (id, status, type, total_amount) VALUES (20, 'wc-processing', 'shop_order', '42.00')");
+    $db->exec("INSERT INTO wp_wc_order_addresses (id, order_id, address_type, first_name) VALUES (21, 20, 'billing', 'Base')");
+    $db->exec("INSERT INTO wp_woocommerce_order_items (order_item_id, order_id, order_item_name, order_item_type) VALUES (22, 20, 'Base product', 'line_item')");
+    $db->exec("INSERT INTO wp_woocommerce_order_itemmeta (meta_id, order_item_id, meta_key, meta_value) VALUES (23, 22, '_product_id', '100')");
+    $recent_orders = json_encode(['recent_order_ids' => [20]], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare("INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('woocommerce_recent_order_ids', :value, 'yes')");
+    $stmt->bindValue(':value', $recent_orders, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+}
+
 define('FORKPRESS_COW_MERGE_TESTS', true);
 require_once __DIR__ . '/../../scripts/cow/merge.php';
 
@@ -2102,6 +2145,199 @@ PHP);
             && (($payload['candidate']['file_safe'] ?? null) === false);
     }));
     assert_same(count($unsafe_asset_conflicts), 1, 'serialized plugin audit records unsafe file path evidence');
+
+    $woocommerce_base_root = $tmp . '/woocommerce-base';
+    $woocommerce_source_root = $tmp . '/woocommerce-source';
+    $woocommerce_target_root = $tmp . '/woocommerce-target';
+    $woocommerce_base = $woocommerce_base_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_source = $woocommerce_source_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_target = $woocommerce_target_root . '/wp-content/database/.ht.sqlite';
+    $woocommerce_metadata = $tmp . '/.forkpress/cow/merge/plugin-woocommerce-validator-metadata.sqlite';
+    $woocommerce_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-woocommerce-validator.json';
+
+    mkdir($woocommerce_base_root . '/wp-content/database', 0777, true);
+    create_woocommerce_hpos_validator_db($woocommerce_base);
+    write_test_file($woocommerce_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
+<?php
+$db = new SQLite3((string)getenv('FORKPRESS_MERGE_TARGET_DB'));
+$findings = [];
+$check_order = function (int $order_id, string $object, array $tables, array $candidate) use ($db, &$findings): void {
+    if ($order_id <= 0) {
+        return;
+    }
+    $order_exists = (int)$db->querySingle('SELECT COUNT(*) FROM wp_wc_orders WHERE id = ' . $order_id);
+    if ($order_exists === 1) {
+        return;
+    }
+    $findings[] = [
+        'plugin' => 'woocommerce',
+        'object' => $object,
+        'reason' => 'WooCommerce HPOS graph references a missing order row',
+        'type' => 'plugin-woocommerce-hpos-missing-order',
+        'tables' => $tables,
+        'validator' => 'woocommerce-hpos@forkpress-test',
+        'severity' => 'error',
+        'logical_identity' => [
+            'plugin' => 'woocommerce',
+            'kind' => 'shop_order',
+            'order_id' => $order_id,
+        ],
+        'candidate' => ['order_id' => $order_id, 'order_exists' => $order_exists] + $candidate,
+    ];
+};
+$addresses = $db->query('SELECT id, order_id, address_type, first_name FROM wp_wc_order_addresses ORDER BY id');
+while ($row = $addresses->fetchArray(SQLITE3_ASSOC)) {
+    $check_order((int)$row['order_id'], 'order-address:' . (int)$row['id'], ['wp_wc_orders', 'wp_wc_order_addresses'], [
+        'address_id' => (int)$row['id'],
+        'address_type' => (string)$row['address_type'],
+        'first_name' => (string)$row['first_name'],
+    ]);
+}
+$items = $db->query('SELECT order_item_id, order_id, order_item_name FROM wp_woocommerce_order_items ORDER BY order_item_id');
+while ($row = $items->fetchArray(SQLITE3_ASSOC)) {
+    $check_order((int)$row['order_id'], 'order-item:' . (int)$row['order_item_id'], ['wp_wc_orders', 'wp_woocommerce_order_items'], [
+        'order_item_id' => (int)$row['order_item_id'],
+        'order_item_name' => (string)$row['order_item_name'],
+    ]);
+}
+$metas = $db->query('SELECT m.meta_id, m.order_item_id, m.meta_key, m.meta_value, i.order_id
+    FROM wp_woocommerce_order_itemmeta m
+    LEFT JOIN wp_woocommerce_order_items i ON i.order_item_id = m.order_item_id
+    ORDER BY m.meta_id');
+while ($row = $metas->fetchArray(SQLITE3_ASSOC)) {
+    $item_exists = $row['order_id'] !== null;
+    $order_id = $item_exists ? (int)$row['order_id'] : 0;
+    if (!$item_exists) {
+        $findings[] = [
+            'plugin' => 'woocommerce',
+            'object' => 'order-itemmeta:' . (int)$row['meta_id'],
+            'reason' => 'WooCommerce order item metadata references a missing order item row',
+            'type' => 'plugin-woocommerce-hpos-missing-order-item',
+            'tables' => ['wp_woocommerce_order_items', 'wp_woocommerce_order_itemmeta'],
+            'validator' => 'woocommerce-hpos@forkpress-test',
+            'severity' => 'error',
+            'logical_identity' => [
+                'plugin' => 'woocommerce',
+                'kind' => 'order_item',
+                'order_item_id' => (int)$row['order_item_id'],
+            ],
+            'candidate' => [
+                'meta_id' => (int)$row['meta_id'],
+                'order_item_id' => (int)$row['order_item_id'],
+                'item_exists' => false,
+            ],
+        ];
+        continue;
+    }
+    $check_order($order_id, 'order-itemmeta:' . (int)$row['meta_id'], ['wp_wc_orders', 'wp_woocommerce_order_items', 'wp_woocommerce_order_itemmeta'], [
+        'meta_id' => (int)$row['meta_id'],
+        'order_item_id' => (int)$row['order_item_id'],
+        'meta_key' => (string)$row['meta_key'],
+    ]);
+}
+$option_value = $db->querySingle("SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_recent_order_ids'");
+$option_payload = is_string($option_value) ? json_decode($option_value, true) : null;
+if (is_array($option_payload)) {
+    foreach (($option_payload['recent_order_ids'] ?? []) as $index => $order_id) {
+        $check_order((int)$order_id, 'option:woocommerce_recent_order_ids:' . (string)$index, ['wp_options', 'wp_wc_orders'], [
+            'option_name' => 'woocommerce_recent_order_ids',
+            'json_path' => 'recent_order_ids.' . (string)$index,
+        ]);
+    }
+}
+echo json_encode([
+    'status' => $findings ? 'conflicts' : 'valid',
+    'findings' => $findings,
+], JSON_UNESCAPED_SLASHES);
+PHP);
+
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_source_root);
+    copy_tree_for_test($woocommerce_base_root, $woocommerce_target_root);
+    cow_merge_capture_file_base($woocommerce_base_root, $woocommerce_file_base);
+    cow_merge_allocate_autoincrement_bands($woocommerce_source, $woocommerce_metadata, 'feature-plugin-woocommerce-source');
+    cow_merge_allocate_autoincrement_bands($woocommerce_target, $woocommerce_metadata, 'main');
+
+    $db = open_db($woocommerce_source);
+    $db->exec('DELETE FROM wp_wc_orders WHERE id = 20');
+    $db->close();
+
+    $db = open_db($woocommerce_target);
+    $db->exec("UPDATE wp_wc_order_addresses SET first_name = 'Target' WHERE id = 21");
+    $db->exec("UPDATE wp_woocommerce_order_items SET order_item_name = 'Target product' WHERE order_item_id = 22");
+    $db->exec("UPDATE wp_woocommerce_order_itemmeta SET meta_value = '200' WHERE meta_id = 23");
+    $target_recent_orders = json_encode(['recent_order_ids' => [20], 'target_note' => 'edited on main'], JSON_UNESCAPED_SLASHES);
+    $stmt = $db->prepare("UPDATE wp_options SET option_value = :value WHERE option_name = 'woocommerce_recent_order_ids'");
+    $stmt->bindValue(':value', $target_recent_orders, SQLITE3_TEXT);
+    $stmt->execute();
+    $db->close();
+
+    $woocommerce_result = cow_merge_branch_state(
+        $woocommerce_base,
+        $woocommerce_source,
+        $woocommerce_target,
+        $woocommerce_metadata,
+        'feature-plugin-woocommerce-source',
+        'main',
+        $woocommerce_file_base,
+        $woocommerce_source_root,
+        $woocommerce_target_root
+    );
+
+    assert_same($woocommerce_result['status'], 'completed_with_conflicts', 'WooCommerce HPOS validator holds orphaned order graphs for review');
+    assert_same((int)($woocommerce_result['plugin_validators'] ?? 0), 1, 'WooCommerce HPOS validator is discovered from mu-plugins during merge');
+    assert_same((int)($woocommerce_result['plugin_validator_conflicts'] ?? 0), 4, 'WooCommerce HPOS validator records address, item, itemmeta, and option order graph conflicts');
+    assert_same((int)scalar($woocommerce_target, 'SELECT COUNT(*) FROM wp_wc_orders WHERE id = 20'), 0, 'WooCommerce HPOS validator leaves the source order delete staged for review');
+    assert_same(scalar($woocommerce_target, 'SELECT first_name FROM wp_wc_order_addresses WHERE id = 21'), 'Target', 'WooCommerce HPOS validator preserves target address edits for review');
+    assert_same(scalar($woocommerce_target, 'SELECT order_item_name FROM wp_woocommerce_order_items WHERE order_item_id = 22'), 'Target product', 'WooCommerce HPOS validator preserves target order item edits for review');
+    assert_same(scalar($woocommerce_target, 'SELECT meta_value FROM wp_woocommerce_order_itemmeta WHERE meta_id = 23'), '200', 'WooCommerce HPOS validator preserves target itemmeta edits for review');
+    $woocommerce_option = json_decode((string)scalar($woocommerce_target, "SELECT option_value FROM wp_options WHERE option_name = 'woocommerce_recent_order_ids'"), true);
+    assert_same($woocommerce_option['target_note'] ?? null, 'edited on main', 'WooCommerce HPOS validator preserves target option edits for review');
+    assert_same($woocommerce_option['recent_order_ids'] ?? null, [20], 'WooCommerce HPOS validator keeps stale cached order IDs visible');
+
+    $woocommerce_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'conflict_type' => 'plugin-woocommerce-hpos-missing-order',
+    ]);
+    assert_same(count($woocommerce_audit['conflicts']), 4, 'WooCommerce HPOS validator exposes every stale order reference as plugin audit conflicts');
+    $woocommerce_preview = implode("\n", array_map(fn($conflict) => (string)($conflict['chosen_preview'] ?? ''), $woocommerce_audit['conflicts']));
+    assert_true(str_contains($woocommerce_preview, '"order_id":20'), 'WooCommerce HPOS audit includes the missing order ID');
+    $woocommerce_objects = [];
+    foreach ($woocommerce_audit['conflicts'] as $conflict) {
+        $payload = cow_merge_decode_payload_json((string)($conflict['chosen_payload'] ?? ''), 'WooCommerce HPOS validator payload');
+        $woocommerce_objects[] = (string)($payload['object'] ?? '');
+    }
+    sort($woocommerce_objects);
+    assert_same(
+        $woocommerce_objects,
+        ['option:woocommerce_recent_order_ids:0', 'order-address:21', 'order-item:22', 'order-itemmeta:23'],
+        'WooCommerce HPOS audit exposes the stale address, item, itemmeta, and cached option objects'
+    );
+    $woocommerce_logical_identity_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'plugin_logical_identity' => json_encode(['plugin' => 'woocommerce', 'kind' => 'shop_order', 'order_id' => 20], JSON_UNESCAPED_SLASHES),
+    ]);
+    assert_same(count($woocommerce_logical_identity_audit['conflicts']), 4, 'WooCommerce HPOS audit filters conflicts by plugin logical order identity');
+    $woocommerce_group_audit = cow_merge_audit_report($woocommerce_metadata, (int)$woocommerce_result['run_id'], 10, [
+        'scope' => 'plugin',
+        'records' => 'conflicts',
+        'plugin' => 'woocommerce',
+        'group_by' => 'plugin-logical-identity',
+    ]);
+    $woocommerce_group_counts = [];
+    foreach ($woocommerce_group_audit['conflict_groups'] as $group) {
+        $woocommerce_group_counts[(string)$group['group_key']] = (int)$group['conflict_count'];
+    }
+    $woocommerce_order_group_count = 0;
+    foreach ($woocommerce_group_counts as $group_key => $conflict_count) {
+        if (str_contains($group_key, '"woocommerce"') && str_contains($group_key, '"shop_order"') && str_contains($group_key, '"order_id":20')) {
+            $woocommerce_order_group_count += $conflict_count;
+        }
+    }
+    assert_same($woocommerce_order_group_count, 4, 'WooCommerce HPOS audit groups stale graph findings by logical order identity');
 
     $env_validator = $tmp . '/plugin-validator-env.php';
     write_test_file($env_validator, <<<'PHP'
