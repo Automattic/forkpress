@@ -282,6 +282,135 @@ function cow_merge_values_equal(mixed $a, mixed $b): bool {
     return cow_merge_value_key($a) === cow_merge_value_key($b);
 }
 
+function cow_merge_normalize_root_host(?string $root_host): string {
+    $root_host = trim((string)($root_host ?? ''));
+    if ($root_host === '') {
+        return 'wp.localhost';
+    }
+    if (str_contains($root_host, '://')) {
+        $parsed_host = parse_url($root_host, PHP_URL_HOST);
+        if (is_string($parsed_host) && $parsed_host !== '') {
+            return strtolower($parsed_host);
+        }
+    }
+    $root_host = preg_replace('~/.*$~', '', $root_host) ?? $root_host;
+    $root_host = preg_replace('/:\d+$/', '', $root_host) ?? $root_host;
+    return strtolower($root_host !== '' ? $root_host : 'wp.localhost');
+}
+
+function cow_merge_branch_url_host(string $branch, string $root_host): string {
+    return $branch === 'main' ? $root_host : $branch . '.' . $root_host;
+}
+
+function cow_merge_set_url_rewrite_context(string $source_branch, string $target_branch, ?string $root_host): void {
+    $root_host = cow_merge_normalize_root_host($root_host ?: (getenv('FORKPRESS_ROOT_HOST') ?: null));
+    $source_host = cow_merge_branch_url_host($source_branch, $root_host);
+    $target_host = cow_merge_branch_url_host($target_branch, $root_host);
+    $GLOBALS['cow_merge_url_rewrite_context'] = [
+        'source_host' => strtolower($source_host),
+        'target_host' => strtolower($target_host),
+    ];
+}
+
+function cow_merge_clear_url_rewrite_context(): void {
+    unset($GLOBALS['cow_merge_url_rewrite_context']);
+}
+
+function cow_merge_rewrite_url_text_for_target(string $value): string {
+    $context = $GLOBALS['cow_merge_url_rewrite_context'] ?? null;
+    if (!is_array($context)) {
+        return $value;
+    }
+    $source_host = (string)($context['source_host'] ?? '');
+    $target_host = (string)($context['target_host'] ?? '');
+    if ($source_host === '' || $target_host === '' || $source_host === $target_host) {
+        return $value;
+    }
+
+    $plain_pattern = '~https?://' . preg_quote($source_host, '~') . '(:\d+)?(?=[/\?#"\']|&quot;|$)~i';
+    $value = preg_replace_callback($plain_pattern, static function (array $matches) use ($target_host): string {
+        return 'http://' . $target_host . ($matches[1] ?? '');
+    }, $value) ?? $value;
+
+    $escaped_pattern = '~https?:\\\\/\\\\/' . preg_quote($source_host, '~') . '(:\d+)?(?=[\\\\/\?#"\']|&quot;|$)~i';
+    return preg_replace_callback($escaped_pattern, static function (array $matches) use ($target_host): string {
+        return 'http:\\/\\/' . $target_host . ($matches[1] ?? '');
+    }, $value) ?? $value;
+}
+
+function cow_merge_rewrite_url_decoded_value_for_target(mixed $value, bool &$changed): mixed {
+    if (is_array($value)) {
+        $out = [];
+        foreach ($value as $key => $child) {
+            $out[$key] = cow_merge_rewrite_url_decoded_value_for_target($child, $changed);
+        }
+        return $out;
+    }
+    if (is_string($value)) {
+        $rewritten = cow_merge_rewrite_url_text_for_target($value);
+        if ($rewritten !== $value) {
+            $changed = true;
+        }
+        return $rewritten;
+    }
+    return $value;
+}
+
+function cow_merge_value_looks_serialized(string $value): bool {
+    return $value === 'N;' || preg_match('/^(?:a|O|s|i|b|d|C|R|r):/', $value) === 1;
+}
+
+function cow_merge_rewrite_url_value_for_target(mixed $value): mixed {
+    if (!is_string($value) || $value === '') {
+        return $value;
+    }
+    if (!is_array($GLOBALS['cow_merge_url_rewrite_context'] ?? null)) {
+        return $value;
+    }
+    if (strpos($value, 'http://') === false && strpos($value, 'https://') === false && strpos($value, 'http:\\/\\/') === false && strpos($value, 'https:\\/\\/') === false) {
+        return $value;
+    }
+
+    if (cow_merge_value_looks_serialized($value)) {
+        $decoded = @unserialize($value, ['allowed_classes' => false]);
+        if ($decoded !== false || $value === 'b:0;') {
+            $changed = false;
+            $rewritten = cow_merge_rewrite_url_decoded_value_for_target($decoded, $changed);
+            return $changed ? serialize($rewritten) : $value;
+        }
+        return $value;
+    }
+
+    $first = ltrim($value);
+    if ($first !== '' && ($first[0] === '{' || $first[0] === '[')) {
+        $decoded = json_decode($value, true);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            $changed = false;
+            $rewritten = cow_merge_rewrite_url_decoded_value_for_target($decoded, $changed);
+            if ($changed) {
+                $encoded = json_encode($rewritten, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                if (is_string($encoded)) {
+                    return $encoded;
+                }
+            }
+            return $value;
+        }
+    }
+
+    return cow_merge_rewrite_url_text_for_target($value);
+}
+
+function cow_merge_rewrite_row_urls_for_target(?array $row): ?array {
+    if ($row === null) {
+        return null;
+    }
+    $rewritten = $row;
+    foreach ($rewritten as $column => $value) {
+        $rewritten[$column] = cow_merge_rewrite_url_value_for_target($value);
+    }
+    return $rewritten;
+}
+
 function cow_merge_path_to_unix(string $path): string {
     return str_replace(DIRECTORY_SEPARATOR, '/', $path);
 }
@@ -20063,10 +20192,11 @@ function cow_merge_apply_source_table(
     $row_keys = cow_merge_sort_row_keys_by_self_foreign_keys($target, $table, array_keys($rows), $rows);
     foreach ($row_keys as $identity_json) {
         $entry = $rows[$identity_json];
+        $source_row_for_target = cow_merge_rewrite_row_urls_for_target($entry['row']);
         if (!$pk_cols) {
-            $insert_result = cow_merge_try_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $entry['row'], $columns);
+            $insert_result = cow_merge_try_insert_row_with_rowid($target, $table, (int)$entry['rowid'], $source_row_for_target, $columns);
         } else {
-            $insert_result = cow_merge_try_insert_row($target, $table, $entry['row'], $columns);
+            $insert_result = cow_merge_try_insert_row($target, $table, $source_row_for_target, $columns);
         }
         if (!($insert_result['ok'] ?? false)) {
             if (cow_merge_record_row_target_constraint(
@@ -20075,7 +20205,7 @@ function cow_merge_apply_source_table(
                 $table,
                 $identity_json,
                 null,
-                $entry['row'],
+                $source_row_for_target,
                 null,
                 'insert',
                 (string)($insert_result['error'] ?? 'SQLite constraint failed')
@@ -20086,7 +20216,7 @@ function cow_merge_apply_source_table(
         }
         if (!$pk_cols) {
             $new_rowid = (int)($insert_result['rowid'] ?? 0);
-            cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $entry['row']);
+            cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $entry['identity'], $source_row_for_target);
         }
         cow_merge_record_decision(
             $meta,
@@ -20099,7 +20229,7 @@ function cow_merge_apply_source_table(
             null,
             $entry['row'],
             null,
-            $entry['row']
+            $source_row_for_target
         );
         $applied++;
     }
@@ -21464,6 +21594,7 @@ function cow_merge_table_rows(
         }
 
         if ($base_row === null && $source_row !== null && $target_row === null) {
+            $source_row_for_target = cow_merge_rewrite_row_urls_for_target($source_row);
             $id_band_violation = $pk_cols
                 ? cow_merge_autoincrement_id_band_violation($meta, $source_branch, $table, $source_row, $pk_cols)
                 : null;
@@ -21519,7 +21650,7 @@ function cow_merge_table_rows(
             }
             if ($pk_cols) {
                 $current_row = cow_merge_select_current_row($target, $table, $identity, $pk_cols);
-                if ($current_row !== null && cow_merge_row_values_equal($current_row, $source_row, $row_columns)) {
+                if ($current_row !== null && cow_merge_row_values_equal($current_row, $source_row_for_target, $row_columns)) {
                     cow_merge_record_decision(
                         $meta,
                         $run_id,
@@ -21537,10 +21668,10 @@ function cow_merge_table_rows(
                     continue;
                 }
             }
-            $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row, !$pk_cols);
+            $unique_collision = cow_merge_find_unique_collision($target, $table, $source_row_for_target, !$pk_cols);
             if ($unique_collision !== null) {
-                $unique_columns = cow_merge_all_columns($columns, array_keys($source_row), array_keys($unique_collision['row']));
-                if (!$pk_cols && cow_merge_row_values_equal($source_row, $unique_collision['row'], $unique_columns)) {
+                $unique_columns = cow_merge_all_columns($columns, array_keys($source_row_for_target), array_keys($unique_collision['row']));
+                if (!$pk_cols && cow_merge_row_values_equal($source_row_for_target, $unique_collision['row'], $unique_columns)) {
                     if (!isset($unique_collision['rowid'])) {
                         throw new RuntimeException("cannot adopt $table unique collision identity because the target rowid is unavailable");
                     }
@@ -21652,7 +21783,7 @@ function cow_merge_table_rows(
             $insert_result = cow_merge_try_insert_row_preserving_payload(
                 $target,
                 $table,
-                $source_row,
+                $source_row_for_target,
                 $columns,
                 $identity,
                 $pk_cols
@@ -21664,7 +21795,7 @@ function cow_merge_table_rows(
                     $table,
                     $key,
                     null,
-                    $source_row,
+                    $source_row_for_target,
                     null,
                     'insert',
                     (string)($insert_result['error'] ?? 'SQLite constraint failed')
@@ -21675,9 +21806,9 @@ function cow_merge_table_rows(
             }
             $new_rowid = (int)($insert_result['rowid'] ?? 0);
             if (!$pk_cols) {
-                cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $identity, $source_row);
+                cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, $new_rowid, $identity, $source_row_for_target);
             }
-            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source inserted row and target did not change it', null, $source_row, null, $source_row);
+            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source inserted row and target did not change it', null, $source_row, null, $source_row_for_target);
             $applied++;
             continue;
         }
@@ -21817,6 +21948,7 @@ function cow_merge_table_rows(
             if ($where_identity === null) {
                 throw new RuntimeException("cannot update $table row without a target identity");
             }
+            $source_row_for_target = cow_merge_rewrite_row_urls_for_target($source_row);
             $parent_insert_collision_violation = cow_merge_foreign_key_parent_insert_collision_violation($base, $source, $target, $table, $source_row);
             if ($parent_insert_collision_violation !== null) {
                 if (cow_merge_record_row_target_constraint(
@@ -21854,7 +21986,7 @@ function cow_merge_table_rows(
             $unique_collision = cow_merge_find_unique_collision(
                 $target,
                 $table,
-                $source_row,
+                $source_row_for_target,
                 !$pk_cols,
                 $identity,
                 $pk_cols,
@@ -21891,7 +22023,7 @@ function cow_merge_table_rows(
                 }
                 continue;
             }
-            $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $source_row, $columns);
+            $update_result = cow_merge_try_update_row_preserving_payload($target, $table, $where_identity, $pk_cols, $source_row_for_target, $columns);
             if (!($update_result['ok'] ?? false)) {
                 if (cow_merge_record_row_target_constraint(
                     $meta,
@@ -21899,7 +22031,7 @@ function cow_merge_table_rows(
                     $table,
                     $key,
                     $base_row,
-                    $source_row,
+                    $source_row_for_target,
                     $target_row,
                     'update',
                     (string)($update_result['error'] ?? 'SQLite constraint failed')
@@ -21909,9 +22041,9 @@ function cow_merge_table_rows(
                 continue;
             }
             if (!$pk_cols) {
-                cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_row);
+                cow_merge_remember_row_identity($meta, $run_id, $target_branch, $table, (int)$where_identity['rowid'], $identity, $source_row_for_target);
             }
-            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source changed row and target did not change it', $base_row, $source_row, $target_row, $source_row);
+            cow_merge_record_decision($meta, $run_id, $table, $key, null, 'source-applied', 'source changed row and target did not change it', $base_row, $source_row, $target_row, $source_row_for_target);
             $applied++;
             continue;
         }
@@ -22026,12 +22158,13 @@ function cow_merge_table_rows(
                 continue;
             }
             if (!$target_changed || cow_merge_values_equal($s, $t)) {
-                $merged[$col] = $s;
+                $source_value_for_target = cow_merge_rewrite_url_value_for_target($s);
+                $merged[$col] = $source_value_for_target;
                 if (!$target_changed) {
-                    $pending_source_cell_decisions[] = [$col, 'source changed cell and target did not change it', $b, $s, $t, $s];
+                    $pending_source_cell_decisions[] = [$col, 'source changed cell and target did not change it', $b, $s, $t, $source_value_for_target];
                     $row_applied++;
                 } else {
-                    $pending_source_cell_decisions[] = [$col, 'source and target changed cell to the same value', $b, $s, $t, $t];
+                    $pending_source_cell_decisions[] = [$col, 'source and target changed cell to the same value', $b, $s, $t, $source_value_for_target];
                     $row_applied++;
                 }
                 continue;
@@ -22804,7 +22937,8 @@ function cow_merge_branch_state(
     ?string $base_files = null,
     ?string $source_root = null,
     ?string $target_root = null,
-    array $plugin_validators = []
+    array $plugin_validators = [],
+    ?string $root_host = null
 ): array {
     $file_args = [$base_files, $source_root, $target_root];
     $has_file_args = array_filter($file_args, fn($value) => $value !== null && $value !== '');
@@ -22831,6 +22965,7 @@ function cow_merge_branch_state(
     $attempted_run_id = null;
     $preserve_rollback_snapshots = false;
     $whole_branch_crash_recovery_artifact = null;
+    cow_merge_set_url_rewrite_context($source_branch, $target_branch, $root_host);
     try {
         $result = cow_merge_databases(
             $base_db,
@@ -23020,6 +23155,7 @@ function cow_merge_branch_state(
         }
         throw $e;
     } finally {
+        cow_merge_clear_url_rewrite_context();
         if (!$preserve_rollback_snapshots && $target_snapshot !== null) {
             cow_merge_cleanup_sqlite_snapshot($target_snapshot);
         }
@@ -23679,7 +23815,8 @@ if (realpath($argv[0] ?? '') === __FILE__) {
             $args['base-files'] ?? null,
             $args['source-root'] ?? null,
             $args['target-root'] ?? null,
-            isset($args['plugin-validator']) ? [$args['plugin-validator']] : []
+            isset($args['plugin-validator']) ? [$args['plugin-validator']] : [],
+            $args['root-host'] ?? null
         );
         echo "forkpress: merged {$args['source']} into {$args['target']}\n";
         echo "  run:       {$result['run_id']}\n";

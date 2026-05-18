@@ -426,7 +426,7 @@ function forkpress_cow_install_row_identity_tracking(): void {
 
 forkpress_cow_install_row_identity_tracking();
 
-function forkpress_branch_url(string $branch, ?string $uri = null): string {
+function forkpress_root_host(): string {
     $root_host = null;
     if (function_exists('forkpress_experiment_root_host')) {
         $root_host = forkpress_experiment_root_host();
@@ -434,8 +434,11 @@ function forkpress_branch_url(string $branch, ?string $uri = null): string {
     if (!is_string($root_host) || $root_host === '') {
         $root_host = getenv('FORKPRESS_ROOT_HOST');
     }
-    $root_host = is_string($root_host) && $root_host !== '' ? $root_host : 'wp.localhost';
+    return is_string($root_host) && $root_host !== '' ? $root_host : 'wp.localhost';
+}
 
+function forkpress_branch_url(string $branch, ?string $uri = null): string {
+    $root_host = forkpress_root_host();
     $current_host = $_SERVER['HTTP_HOST'] ?? '';
     $port = preg_match('/:(\d+)$/', $current_host, $m) ? ':' . $m[1] : '';
     $host = $branch === 'main' ? $root_host : $branch . '.' . $root_host;
@@ -447,6 +450,160 @@ function forkpress_branch_url(string $branch, ?string $uri = null): string {
 
     return $scheme . '://' . $host . $port . $uri;
 }
+
+function forkpress_current_preview_origin(): ?string {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    if (!is_string($host) || $host === '') {
+        return null;
+    }
+    return (is_ssl() ? 'https' : 'http') . '://' . $host;
+}
+
+function forkpress_url_origin_from_value(string $url): ?string {
+    $parts = @parse_url($url);
+    if (!is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+        return null;
+    }
+    $scheme = strtolower((string) $parts['scheme']);
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        return null;
+    }
+    $origin = $scheme . '://' . strtolower((string) $parts['host']);
+    if (isset($parts['port']) && is_int($parts['port'])) {
+        $origin .= ':' . $parts['port'];
+    }
+    return $origin;
+}
+
+function forkpress_raw_url_options(): array {
+    global $wpdb;
+    if (!isset($wpdb) || !is_object($wpdb) || empty($wpdb->options)) {
+        return [];
+    }
+    $table = (string) $wpdb->options;
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+        return [];
+    }
+    $quoted_table = '`' . str_replace('`', '``', $table) . '`';
+    $rows = $wpdb->get_col("SELECT option_value FROM $quoted_table WHERE option_name IN ('home', 'siteurl')");
+    return is_array($rows) ? array_values(array_filter($rows, 'is_string')) : [];
+}
+
+function forkpress_branch_host(string $branch): string {
+    $root_host = forkpress_root_host();
+    return $branch === 'main' ? $root_host : $branch . '.' . $root_host;
+}
+
+function forkpress_rewrite_branch_host_urls(string $buffer, array $source_hosts, string $target_origin): string {
+    $target_parts = @parse_url($target_origin);
+    if (!is_array($target_parts) || empty($target_parts['host'])) {
+        return $buffer;
+    }
+    $target_scheme = isset($target_parts['scheme']) && is_string($target_parts['scheme']) ? $target_parts['scheme'] : 'http';
+    $target_host = strtolower((string) $target_parts['host']);
+    foreach ($source_hosts as $source_host) {
+        if (!is_string($source_host) || $source_host === '' || strtolower($source_host) === $target_host) {
+            continue;
+        }
+        $plain_pattern = '~https?://' . preg_quote($source_host, '~') . '(:\d+)?(?=[/\?#"\']|&quot;|$)~i';
+        $buffer = preg_replace_callback($plain_pattern, static function (array $matches) use ($target_scheme, $target_host): string {
+            return $target_scheme . '://' . $target_host . ($matches[1] ?? '');
+        }, $buffer) ?? $buffer;
+
+        $escaped_pattern = '~https?:\\\\/\\\\/' . preg_quote($source_host, '~') . '(:\d+)?(?=[\\\\/\?#"\']|&quot;|$)~i';
+        $buffer = preg_replace_callback($escaped_pattern, static function (array $matches) use ($target_scheme, $target_host): string {
+            return $target_scheme . ':\\/\\/' . $target_host . ($matches[1] ?? '');
+        }, $buffer) ?? $buffer;
+    }
+    return $buffer;
+}
+
+function forkpress_rewrite_origin_urls(string $buffer, string $source_origin, string $target_origin): string {
+    if ($source_origin === '' || $source_origin === $target_origin) {
+        return $buffer;
+    }
+    $plain_pattern = '~' . preg_quote($source_origin, '~') . '(?=[/\?#"\']|&quot;|$)~i';
+    $buffer = preg_replace($plain_pattern, $target_origin, $buffer) ?? $buffer;
+
+    $escaped_source = str_replace('/', '\\/', $source_origin);
+    $escaped_target = str_replace('/', '\\/', $target_origin);
+    $escaped_pattern = '~' . preg_quote($escaped_source, '~') . '(?=[\\\\/\?#"\']|&quot;|$)~i';
+    return preg_replace($escaped_pattern, $escaped_target, $buffer) ?? $buffer;
+}
+
+function forkpress_rewrite_branch_response_urls(string $buffer): string {
+    if ($buffer === '' || (strpos($buffer, 'http://') === false && strpos($buffer, 'https://') === false && strpos($buffer, 'http:\\/\\/') === false && strpos($buffer, 'https:\\/\\/') === false)) {
+        return $buffer;
+    }
+
+    $target_origin = forkpress_current_preview_origin();
+    if ($target_origin === null) {
+        return $buffer;
+    }
+
+    $content_type = '';
+    foreach (headers_list() as $header) {
+        if (stripos($header, 'Content-Type:') === 0) {
+            $content_type = strtolower($header);
+            break;
+        }
+    }
+    if ($content_type !== '' && !preg_match('~(text/|application/(json|javascript|x-javascript|xml)|\+json|\+xml)~', $content_type)) {
+        return $buffer;
+    }
+
+    $origins = [];
+    foreach (forkpress_raw_url_options() as $raw_url) {
+        $origin = forkpress_url_origin_from_value($raw_url);
+        if ($origin !== null) {
+            $origins[$origin] = true;
+        }
+    }
+    $current_branch = forkpress_current_branch() ?: 'main';
+    foreach (forkpress_local_branches($current_branch) as $branch) {
+        $host = forkpress_branch_host($branch);
+        $origins['http://' . $host] = true;
+        $origins['https://' . $host] = true;
+    }
+
+    unset($origins[$target_origin]);
+    if (!$origins) {
+        return $buffer;
+    }
+
+    foreach (array_keys($origins) as $origin) {
+        $buffer = forkpress_rewrite_origin_urls($buffer, $origin, $target_origin);
+    }
+
+    $source_hosts = [];
+    foreach (array_keys($origins) as $origin) {
+        $parts = @parse_url($origin);
+        if (is_array($parts) && isset($parts['host']) && is_string($parts['host'])) {
+            $source_hosts[] = strtolower($parts['host']);
+        }
+    }
+    return forkpress_rewrite_branch_host_urls($buffer, array_values(array_unique($source_hosts)), $target_origin);
+}
+
+function forkpress_start_branch_url_rewriter(): void {
+    if (forkpress_env_is_disabled('FORKPRESS_BRANCH_URL_REWRITE')) {
+        return;
+    }
+    if (defined('REST_REQUEST') && REST_REQUEST) {
+        return;
+    }
+    if (function_exists('wp_doing_ajax') && wp_doing_ajax()) {
+        return;
+    }
+    if (forkpress_current_branch() === null || forkpress_current_preview_origin() === null) {
+        return;
+    }
+    ob_start('forkpress_rewrite_branch_response_urls');
+}
+
+add_action('template_redirect', 'forkpress_start_branch_url_rewriter', 0);
+add_action('admin_init', 'forkpress_start_branch_url_rewriter', 0);
+add_action('login_init', 'forkpress_start_branch_url_rewriter', 0);
 
 function forkpress_local_branches(string $current_branch): array {
     $branch_list = getenv('FORKPRESS_BRANCH_LIST');
