@@ -29,7 +29,6 @@ use forkpress_git::{
 };
 #[cfg(feature = "dev-experiments")]
 use forkpress_runtime::run_php_script;
-#[cfg(feature = "dev-experiments")]
 use forkpress_runtime::write_filtered_output;
 use forkpress_runtime::{
     PortableRuntime, php_base_command, prepare_runtime as prepare_embedded_runtime,
@@ -2847,6 +2846,16 @@ fn remote_clone_command(
             cache_root.display()
         );
     }
+    if !cache_root.join("wp-content/database/.ht.sqlite").is_file()
+        && cache_root.join("wp-config.php").is_file()
+    {
+        prepare_runtime(layout)?;
+        let runtime = PortableRuntime::from_layout(layout);
+        remote_clone_import_mysql_database(shared, layout, &runtime, &args, &cache_root)
+            .with_context(
+                || "remote site did not include ForkPress SQLite data and MySQL import failed",
+            )?;
+    }
 
     let manifest = add_remote_site(
         layout,
@@ -2923,6 +2932,90 @@ fn remote_clone_cache_root(layout: &Layout, name: &str) -> Result<PathBuf> {
         bail!("remote site name must contain at least one ASCII letter or number");
     }
     Ok(layout.cow_dir.join("remote-sites").join(name).join("cache"))
+}
+
+fn remote_clone_import_mysql_database(
+    shared: &SharedPaths,
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &RemoteCloneArgs,
+    cache_root: &Path,
+) -> Result<()> {
+    let export_path = cache_root
+        .parent()
+        .ok_or_else(|| anyhow!("failed to resolve remote cache parent"))?
+        .join("mysql-export.jsonl");
+    let export_file = File::create(&export_path)
+        .with_context(|| format!("failed to create {}", export_path.display()))?;
+    let exporter = fs::read_to_string(layout.runtime_dir.join("scripts/cow/mysql_export.php"))
+        .context("failed to read bundled MySQL export helper")?;
+
+    let mut command = remote_clone_ssh_command(args);
+    command
+        .arg(&args.ssh)
+        .arg(format!("php -- {}", shell_quote(&args.remote_path)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(export_file))
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .context("failed to start ssh for remote MySQL export")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(exporter.as_bytes())
+            .context("failed to send MySQL export helper over ssh")?;
+    }
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for remote MySQL export")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "remote MySQL export failed with status {}{}{}",
+            output.status,
+            if stderr.trim().is_empty() { "" } else { ": " },
+            stderr.trim()
+        );
+    }
+    let metadata = fs::metadata(&export_path)
+        .with_context(|| format!("failed to stat {}", export_path.display()))?;
+    if metadata.len() == 0 {
+        bail!("remote MySQL export produced no data");
+    }
+
+    let db_path = cache_root.join("wp-content/database/.ht.sqlite");
+    let mut import = php_base_command(layout, runtime, shared);
+    import
+        .arg(
+            layout
+                .runtime_dir
+                .join("scripts/cow/mysql_import_sqlite.php"),
+        )
+        .arg(&export_path)
+        .arg(&db_path);
+    let output = import
+        .output()
+        .context("failed to run bundled MySQL-to-SQLite importer")?;
+    write_filtered_output(&output.stdout, &output.stderr)?;
+    if !output.status.success() {
+        bail!(
+            "MySQL-to-SQLite importer exited with status {}",
+            output.status
+        );
+    }
+    let _ = fs::remove_file(&export_path);
+    Ok(())
+}
+
+fn remote_clone_ssh_command(args: &RemoteCloneArgs) -> Command {
+    let mut command = Command::new("ssh");
+    if let Some(key) = &args.ssh_key {
+        command.arg("-i").arg(key);
+    }
+    if let Some(port) = args.ssh_port {
+        command.arg("-p").arg(port.to_string());
+    }
+    command
 }
 
 fn remote_clone_rsync_source(ssh: &str, remote_path: &str) -> String {
@@ -8324,6 +8417,44 @@ mod git_helper_tests {
             force: false,
         };
         assert_eq!(remote_clone_rsync_ssh_command(&clone), None);
+    }
+
+    #[test]
+    fn remote_clone_mysql_export_ssh_reuses_credentials() {
+        let clone = RemoteCloneArgs {
+            name: "production".to_string(),
+            ssh: "deploy@example.com".to_string(),
+            ssh_key: Some(PathBuf::from("/Users/alex/.ssh/forkpress id")),
+            ssh_port: Some(2222),
+            remote_path: "/srv/www/example with spaces".to_string(),
+            branch: None,
+            remote_url: None,
+            local_url: None,
+            include_uploads: false,
+            full_sync: false,
+            excludes: Vec::new(),
+            no_delete: false,
+            force: false,
+        };
+        let mut command = remote_clone_ssh_command(&clone);
+        command
+            .arg(&clone.ssh)
+            .arg(format!("php -- {}", shell_quote(&clone.remote_path)));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "-i",
+                "/Users/alex/.ssh/forkpress id",
+                "-p",
+                "2222",
+                "deploy@example.com",
+                "php -- '/srv/www/example with spaces'",
+            ]
+        );
     }
 
     #[test]

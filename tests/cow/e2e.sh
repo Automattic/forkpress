@@ -1415,6 +1415,89 @@ test ! -e "$WORK/remote-thin-branch/wp-content/uploads/2026/05/large-upload.jpg"
 autoinc_runtime_request remote-thin-branch insert "$TMP/autoinc-remote-thin-insert.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-thin-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $has_db_base = is_file($argv[4]); $has_file_base = is_file($argv[5]); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $has_db_base && $has_file_base && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-thin-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-thin-branch/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/bases/remote-thin-branch.sqlite" "$WORK_DIR/cow/merge/file-bases/remote-thin-branch.json"
 
+log_step "remote clone imports MySQL-backed WordPress cache before branching"
+REMOTE_MYSQL_SOURCE="$TMP/remote-mysql-source"
+mkdir -p "$REMOTE_MYSQL_SOURCE"
+cp -R "$WORK/main/." "$REMOTE_MYSQL_SOURCE/"
+rm -rf "$REMOTE_MYSQL_SOURCE/wp-content/database"
+cat > "$REMOTE_MYSQL_SOURCE/wp-config.php" <<'PHP'
+<?php
+define('DB_NAME', 'wordpress');
+define('DB_USER', 'wordpress');
+define('DB_PASSWORD', 'wordpress');
+define('DB_HOST', 'localhost');
+$table_prefix = 'wp_';
+PHP
+cat > "$FAKE_RSYNC_BIN/ssh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+php -r '
+function emit($record) { echo json_encode($record, JSON_UNESCAPED_SLASHES), "\n"; }
+emit(["type" => "meta", "database" => "wordpress", "table_prefix" => "wp_"]);
+emit([
+    "type" => "table",
+    "name" => "wp_posts",
+    "columns" => [
+        ["name" => "ID", "type" => "bigint(20) unsigned", "null" => "NO", "key" => "PRI", "default" => null, "extra" => "auto_increment"],
+        ["name" => "post_title", "type" => "text", "null" => "NO", "key" => "", "default" => null, "extra" => ""],
+        ["name" => "post_status", "type" => "varchar(20)", "null" => "NO", "key" => "", "default" => "publish", "extra" => ""]
+    ],
+    "indexes" => [
+        ["name" => "post_status", "unique" => false, "seq" => 1, "column" => "post_status"]
+    ]
+]);
+emit([
+    "type" => "row",
+    "table" => "wp_posts",
+    "values" => [
+        "ID" => base64_encode("11"),
+        "post_title" => base64_encode("Imported remote MySQL page"),
+        "post_status" => base64_encode("publish")
+    ]
+]);
+emit([
+    "type" => "table",
+    "name" => "wp_options",
+    "columns" => [
+        ["name" => "option_id", "type" => "bigint(20) unsigned", "null" => "NO", "key" => "PRI", "default" => null, "extra" => "auto_increment"],
+        ["name" => "option_name", "type" => "varchar(191)", "null" => "NO", "key" => "UNI", "default" => "", "extra" => ""],
+        ["name" => "option_value", "type" => "longtext", "null" => "NO", "key" => "", "default" => null, "extra" => ""],
+        ["name" => "autoload", "type" => "varchar(20)", "null" => "NO", "key" => "", "default" => "yes", "extra" => ""]
+    ],
+    "indexes" => [
+        ["name" => "option_name", "unique" => true, "seq" => 1, "column" => "option_name"]
+    ]
+]);
+emit([
+    "type" => "row",
+    "table" => "wp_options",
+    "values" => [
+        "option_id" => base64_encode("1"),
+        "option_name" => base64_encode("siteurl"),
+        "option_value" => base64_encode("https://mysql.example.test"),
+        "autoload" => base64_encode("yes")
+    ]
+]);
+'
+SH
+chmod +x "$FAKE_RSYNC_BIN/ssh"
+PATH="$FAKE_RSYNC_BIN:$PATH" "$BIN" remote --work-dir "$WORK_DIR" clone mysql-prod \
+  --ssh fake-mysql-remote \
+  --path "$REMOTE_MYSQL_SOURCE" \
+  --branch remote-mysql-branch \
+  --remote-url "https://mysql.example.test/" \
+  > "$TMP/remote-mysql-clone.out"
+grep -F "forkpress: remote site 'mysql-prod' cloned" "$TMP/remote-mysql-clone.out" >/dev/null
+grep -F "mysql:     imported 2 tables, 2 rows into wp-content/database/.ht.sqlite" "$TMP/remote-mysql-clone.out" >/dev/null
+grep -F "forkpress: remote cache 'mysql-prod' branched to 'remote-mysql-branch'" "$TMP/remote-mysql-clone.out" >/dev/null
+test -f "$WORK_DIR/cow/remote-sites/mysql-prod/cache/wp-content/database/.ht.sqlite"
+test -f "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+test -f "$WORK_DIR/cow/merge/bases/remote-mysql-branch.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/remote-mysql-branch.json"
+php -r '$db = new SQLite3($argv[1]); $title = $db->querySingle("SELECT post_title FROM wp_posts WHERE ID = 11"); $seq = (int)$db->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_posts'\''"); exit($title === "Imported remote MySQL page" && $seq >= 11 ? 0 : 1);' "$WORK/remote-mysql-branch/wp-content/database/.ht.sqlite"
+php -r '$meta = new SQLite3($argv[1]); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-mysql-branch'\'' AND table_name = '\''wp_posts'\''", true); exit($band && (int)$band["band_start"] > 11 ? 0 : 1);' "$WORK_DIR/cow/merge/metadata.sqlite"
+
 if [ "${FORKPRESS_E2E_ONLY:-}" = "remote-cache" ]; then
   log_step "remote cache branch slice complete"
   exit 0

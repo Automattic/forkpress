@@ -229,8 +229,10 @@ forkpress remote clone production \
 ```
 
 The first sync is thin by default: uploads, caches, backups, logs, and upgrade
-temp files are skipped so the branch can boot quickly. Use `--include-uploads`
-or `--full-sync` when you need more of the remote tree locally.
+temp files are skipped so the branch can boot quickly. ForkPress can branch from
+an existing ForkPress SQLite sidecar or import a normal MySQL-backed WordPress
+database over the same SSH connection. Use `--include-uploads` or `--full-sync`
+when you need more of the remote tree locally.
 
 Install plugins from the branch's WordPress admin at
 `/wp-admin/plugin-install.php`. ForkPress tracks the WordPress.org top 100
@@ -480,7 +482,7 @@ Useful log files:
 | `forkpress agents [dir]` | Create agent branches and Git worktrees. |
 | `forkpress commit -m "message"` | Commit and push the current Git branch back to ForkPress. |
 | `forkpress pull` | Pull with rebase and autostash. |
-| `forkpress remote clone <name> --ssh <host> --path <wp-root> --branch <branch>` | Thin-clone a boot-ready remote WordPress root over SSH, skipping uploads, caches, backups, logs, and upgrade temp files by default, then create a local COW branch. |
+| `forkpress remote clone <name> --ssh <host> --path <wp-root> --branch <branch>` | Thin-clone a boot-ready remote WordPress root over SSH, import MySQL into SQLite when needed, then create a local COW branch. |
 | `forkpress logs --file <name>` | Read WordPress, PHP, server, and maintenance logs. |
 | `forkpress storage status` | Show selected storage and mount state. |
 | `forkpress storage mount` | Attach mount-backed storage. |

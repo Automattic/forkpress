@@ -42,8 +42,15 @@ forkpress remote clone production \
 ```
 
 The remote path must be a materialized WordPress root. It needs `wp-load.php`
-and, for COW branch creation, the ForkPress-compatible SQLite database at
-`wp-content/database/.ht.sqlite`.
+and `wp-config.php`.
+
+If the remote site already has ForkPress's SQLite sidecar at
+`wp-content/database/.ht.sqlite`, ForkPress uses it directly. If the remote
+site is a normal MySQL-backed WordPress install, ForkPress reads the database
+connection constants from `wp-config.php`, exports the WordPress tables over the
+same SSH connection, and imports them into the local cache as
+`wp-content/database/.ht.sqlite` before creating the branch. The remote PHP must
+have `mysqli` enabled.
 
 ForkPress uses `rsync` over SSH. By default it creates a boot cache and skips
 large or rebuildable directories:
@@ -171,9 +178,10 @@ and plugin-specific semantic recipes, see
 
 ## Troubleshooting
 
-If branch creation reports that the source branch database does not exist, the
-remote cache is not a ForkPress-compatible SQLite WordPress root. Register or
-sync a cache that includes `wp-content/database/.ht.sqlite`.
+If MySQL import fails, confirm that remote PHP has `mysqli`, that `DB_NAME`,
+`DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `$table_prefix` are string literals in
+`wp-config.php`, and that the SSH user can connect to the site's MySQL database
+from the remote host.
 
 If `rsync` fails, verify the SSH target, key, port, and remote path outside
 ForkPress first:

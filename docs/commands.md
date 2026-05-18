@@ -46,7 +46,7 @@ audit queues, stale reviews, and source/target/apply-reviewed choices, see
 | `forkpress commit -m "message"` | Commit and push the current Git branch back to ForkPress. |
 | `forkpress pull` | Pull with rebase and autostash. |
 | `forkpress agents [dir]` | Create agent branches and Git worktrees. |
-| `forkpress remote clone <name> --ssh <host> --ssh-key <key> --ssh-port <port> --path <wp-root> --url <url> --branch <branch>` | Thin-clone a boot-ready remote WordPress root over SSH, skipping uploads, caches, backups, logs, and upgrade temp files by default, then create a local COW branch. |
+| `forkpress remote clone <name> --ssh <host> --ssh-key <key> --ssh-port <port> --path <wp-root> --url <url> --branch <branch>` | Thin-clone a boot-ready remote WordPress root over SSH, import MySQL into the local SQLite sidecar when needed, then create a local COW branch. |
 | `forkpress remote add <name> --cache-root <dir>` | Register an existing local remote-site cache. |
 | `forkpress remote branch <name> <branch>` | Create a local COW branch from a registered remote cache. |
 
