@@ -841,6 +841,46 @@ try {
         'same-post comment count recompute is auditable'
     );
 
+    $pending_comment_base = $tmp . '/pending-comment-count-base.sqlite';
+    $pending_comment_source = $tmp . '/pending-comment-count-source.sqlite';
+    $pending_comment_target = $tmp . '/pending-comment-count-target.sqlite';
+    $pending_comment_metadata = $tmp . '/.forkpress/cow/merge/pending-comment-count-metadata.sqlite';
+
+    smoke_create_posts_db($pending_comment_base);
+    $db = smoke_open_db($pending_comment_base);
+    smoke_insert_post($db, 16000100, 'Shared Pending Comment Count Page', 'Shared pending comment count content', 'page', 'shared-pending-comment-count-page');
+    $db->close();
+    copy($pending_comment_base, $pending_comment_source);
+    copy($pending_comment_base, $pending_comment_target);
+
+    $db = smoke_open_db($pending_comment_source);
+    smoke_insert_user($db, 16000101, 'branch-approved-commenter', 'branch-approved-commenter@example.test', 'Branch Approved Commenter');
+    smoke_insert_comment($db, 16000102, 16000100, 16000101, 'Branch Approved Commenter', 'Branch approved comment body');
+    smoke_insert_user($db, 16000105, 'branch-pending-commenter', 'branch-pending-commenter@example.test', 'Branch Pending Commenter');
+    smoke_insert_comment($db, 16000106, 16000100, 16000105, 'Branch Pending Commenter', 'Branch pending comment body');
+    $db->exec("UPDATE wp_comments SET comment_approved = '0' WHERE comment_ID = 16000106");
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000100');
+    $db->close();
+
+    $db = smoke_open_db($pending_comment_target);
+    smoke_insert_user($db, 16000103, 'main-pending-commenter', 'main-pending-commenter@example.test', 'Main Pending Commenter');
+    smoke_insert_comment($db, 16000104, 16000100, 16000103, 'Main Pending Commenter', 'Main pending comment body');
+    $db->exec("UPDATE wp_comments SET comment_approved = '0' WHERE comment_ID = 16000104");
+    smoke_insert_user($db, 16000107, 'main-approved-commenter', 'main-approved-commenter@example.test', 'Main Approved Commenter');
+    smoke_insert_comment($db, 16000108, 16000100, 16000107, 'Main Approved Commenter', 'Main approved comment body');
+    $db->exec('UPDATE wp_posts SET comment_count = 1 WHERE ID = 16000100');
+    $db->close();
+
+    $pending_comment_result = cow_merge_databases($pending_comment_base, $pending_comment_source, $pending_comment_target, $pending_comment_metadata, 'feature-smoke-pending-comment-count', 'main');
+    assert_same($pending_comment_result['status'], 'completed', 'same-post approved and pending comment inserts complete cleanly');
+    assert_same((int)smoke_scalar($pending_comment_target, 'SELECT COUNT(*) FROM wp_comments WHERE comment_post_ID = 16000100'), 4, 'same-post pending comment merge preserves all branch comments');
+    assert_same((int)smoke_scalar($pending_comment_target, 'SELECT comment_count FROM wp_posts WHERE ID = 16000100'), 2, 'same-post comment count ignores pending comments');
+    assert_same(
+        (int)smoke_scalar($pending_comment_metadata, "SELECT COUNT(*) FROM merge_decisions WHERE table_name = 'wp_posts' AND column_name = 'comment_count' AND decision = 'source-applied' AND reason = 'recomputed WordPress post comment count from merged comments'"),
+        1,
+        'pending comment count recompute is auditable'
+    );
+
     $threaded_comment_base = $tmp . '/threaded-comment-base.sqlite';
     $threaded_comment_source = $tmp . '/threaded-comment-source.sqlite';
     $threaded_comment_target = $tmp . '/threaded-comment-target.sqlite';
