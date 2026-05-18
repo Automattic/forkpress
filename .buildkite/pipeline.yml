@@ -18,6 +18,15 @@ steps:
   - label: ":crab: Linux tests (workspace, excl. CLI)"
     key: linux-tests
     command: .buildkite/commands/linux-tests.sh
+    # We run heavy work as root inside docker (see linux-tests.sh's chown
+    # trap). The chown trap protects future builds, but agents that ran
+    # previous builds without the trap can still hold root-owned files
+    # under `.build/`. The default `git clean -fxdq` (`-x` removes ignored
+    # paths) trips on those — drop `-x` so the cleanup only touches files
+    # git tracks. Cargo workspace tests don't touch `.build/`, so leaving
+    # stale ignored content there is harmless for this step.
+    env:
+      BUILDKITE_GIT_CLEAN_FLAGS: "-fdq"
     plugins:
       - $CI_TOOLKIT_PLUGIN
       - $DOCKER_PLUGIN:
@@ -35,6 +44,10 @@ steps:
     key: linux-build
     depends_on: linux-tests
     command: .buildkite/commands/linux-build.sh
+    # Same rationale as `linux-tests`: keep `git clean` away from `.build/`
+    # so a still-polluted agent doesn't fail before our chown trap can run.
+    env:
+      BUILDKITE_GIT_CLEAN_FLAGS: "-fdq"
     plugins:
       - $CI_TOOLKIT_PLUGIN
       - $DOCKER_PLUGIN:
