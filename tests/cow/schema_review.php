@@ -1887,8 +1887,8 @@ SQL);
     assert_same($table_restore_revalidated['carried'], 1, 'schema table restore revalidation carries changed source evidence to needs-action');
     assert_same(
         scalar($table_restore_revalidate_metadata, "SELECT revalidation_class FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"),
-        'unclassified',
-        'schema table restore source drift remains unclassified until a schema planner proves compatibility'
+        'compatible-source-drift',
+        'schema table restore source drift is classified compatible when the current restore validates'
     );
     assert_true(
         str_contains((string)scalar($table_restore_revalidate_metadata, "SELECT stale_reason FROM merge_revalidations WHERE conflict_id = $table_restore_revalidate_conflict_id ORDER BY id DESC LIMIT 1"), 'source changed'),
@@ -1908,7 +1908,28 @@ SQL);
     ]);
     $table_restore_revalidate_conflicts = array_values(array_filter($table_restore_revalidate_audit['conflicts'], fn($conflict) => (int)($conflict['id'] ?? 0) === $table_restore_revalidate_conflict_id));
     assert_same(count($table_restore_revalidate_conflicts), 1, 'schema table restore source drift returns the reviewed conflict to the needs-action audit queue');
-    assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'unclassified', 'schema table restore audit exposes conservative unclassified revalidation');
+    assert_same($table_restore_revalidate_conflicts[0]['revalidation_class'] ?? null, 'compatible-source-drift', 'schema table restore audit exposes compatible source-drift revalidation');
+    assert_true($table_restore_revalidate_conflicts[0]['after_revalidate_supported'] ?? false, 'schema table restore advertises guarded after-revalidate support');
+    $table_restore_revalidate_resolution = cow_merge_resolve_conflict(
+        $table_restore_revalidate_metadata,
+        $table_restore_revalidate_conflict_id,
+        'source',
+        true,
+        'Apply current source table restore after compatible source drift.',
+        'cow-test',
+        true
+    );
+    assert_same($table_restore_revalidate_resolution['status'], 'applied', 'compatible schema table restore source drift resolves after revalidation');
+    assert_same(
+        scalar($table_restore_revalidate_target, "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'plugin_restore_revalidate_label_idx'"),
+        null,
+        'compatible schema table restore defers current source indexes that still have their own schema conflicts'
+    );
+    assert_same(
+        scalar($table_restore_revalidate_target, 'SELECT label FROM plugin_restore_revalidate WHERE id = 1'),
+        'Alpha',
+        'compatible schema table restore restores source rows after revalidation'
+    );
 
     $table_restore_target_drift_base = $tmp . '/table-restore-target-drift-base.sqlite';
     $table_restore_target_drift_source = $tmp . '/table-restore-target-drift-source.sqlite';

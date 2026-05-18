@@ -13950,9 +13950,10 @@ function cow_merge_resolve_schema_conflict(
         'schema-source-added-trigger',
         'schema-source-changed-trigger',
         'schema-conflict',
+        'schema-target-dropped-table',
     ];
     if ($after_revalidate && ($choice !== 'source' || !in_array($conflict_type, $after_revalidate_schema_types, true))) {
-        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
+        throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger, table restore, or table rebuild drift only');
     }
 
     $source_payload = cow_merge_decode_payload_json((string)$conflict['source_payload'], 'source');
@@ -14128,25 +14129,46 @@ function cow_merge_resolve_schema_conflict(
                 $apply_source = $mutate_source;
             }
         } elseif ($conflict_type === 'schema-target-dropped-table' && $object === '') {
-            if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
-            }
             $restore_payload = cow_merge_normalize_source_table_restore_payload($source_payload);
+            if ($after_revalidate) {
+                $current_source_sql = cow_merge_table_sql($source, $table);
+                $current_source_restore = $current_source_sql === null
+                    ? null
+                    : cow_merge_source_table_restore_payload($source, $table, $current_source_sql);
+                $current_target_sql = cow_merge_table_sql($target, $table);
+                cow_merge_require_after_revalidate(
+                    $meta,
+                    $conflict_id,
+                    cow_merge_payload_json($current_source_restore),
+                    cow_merge_payload_json($current_target_sql)
+                );
+                $latest_revalidation = cow_merge_latest_revalidation($meta, $conflict_id);
+                if ((string)($latest_revalidation['revalidation_class'] ?? '') !== 'compatible-source-drift') {
+                    throw new RuntimeException('latest schema table restore revalidation did not prove source drift is compatible');
+                }
+                if ($current_source_restore === null) {
+                    throw new RuntimeException('source table no longer exists after latest merge revalidation');
+                }
+                $restore_payload = $current_source_restore;
+                $previous = $current_target_sql;
+            }
             if ($target_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected target table payload");
             }
-            $current_source_sql = cow_merge_table_sql($source, $table);
-            if (!cow_merge_values_equal($current_source_sql, $restore_payload['table_sql'])) {
-                throw new RuntimeException('source table schema no longer matches the audited conflict source value; rerun merge before resolving');
-            }
-            foreach ($restore_payload['indexes'] as $index) {
-                if (!cow_merge_values_equal(cow_merge_index_sql($source, (string)$index['name']), (string)$index['sql'])) {
-                    throw new RuntimeException('source table index no longer matches the audited conflict source value; rerun merge before resolving');
+            if (!$after_revalidate) {
+                $current_source_sql = cow_merge_table_sql($source, $table);
+                if (!cow_merge_values_equal($current_source_sql, $restore_payload['table_sql'])) {
+                    throw new RuntimeException('source table schema no longer matches the audited conflict source value; rerun merge before resolving');
                 }
-            }
-            foreach ($restore_payload['triggers'] as $trigger) {
-                if (!cow_merge_values_equal(cow_merge_schema_object_sql($source, 'trigger', (string)$trigger['name']), (string)$trigger['sql'])) {
-                    throw new RuntimeException('source table trigger no longer matches the audited conflict source value; rerun merge before resolving');
+                foreach ($restore_payload['indexes'] as $index) {
+                    if (!cow_merge_values_equal(cow_merge_index_sql($source, (string)$index['name']), (string)$index['sql'])) {
+                        throw new RuntimeException('source table index no longer matches the audited conflict source value; rerun merge before resolving');
+                    }
+                }
+                foreach ($restore_payload['triggers'] as $trigger) {
+                    if (!cow_merge_values_equal(cow_merge_schema_object_sql($source, 'trigger', (string)$trigger['name']), (string)$trigger['sql'])) {
+                        throw new RuntimeException('source table trigger no longer matches the audited conflict source value; rerun merge before resolving');
+                    }
                 }
             }
             $current_target_sql = cow_merge_table_sql($target, $table);
@@ -14192,7 +14214,7 @@ function cow_merge_resolve_schema_conflict(
             }
         } elseif ($conflict_type === 'schema-source-dropped-table' && $object === '') {
             if ($after_revalidate) {
-                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger or table rebuild drift only');
+                throw new InvalidArgumentException('--after-revalidate currently supports source resolution for compatible source-added/source-changed index/view/trigger, table restore, or table rebuild drift only');
             }
             if ($source_payload !== null) {
                 throw new RuntimeException("schema conflict #$conflict_id has an unexpected source table payload");
@@ -17446,6 +17468,7 @@ function cow_merge_conflict_resolution_contract(string $table, string $conflict_
             'schema-source-added-trigger',
             'schema-source-changed-trigger',
             'schema-conflict',
+            'schema-target-dropped-table',
         ], true)) {
             $contract['after_revalidate'] = true;
         }
@@ -17874,6 +17897,31 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                         'current_target_payload' => $current_target_payload,
                     ];
                 }
+                $revalidation_class = 'unclassified';
+                if (!$source_fresh && $target_fresh && $current_source_restore !== null) {
+                    $source_branch = (string)($conflict['source_branch'] ?? '');
+                    $target_branch = (string)($conflict['target_branch'] ?? '');
+                    $source = cow_merge_open_db($source_db, SQLITE3_OPEN_READONLY);
+                    $target = cow_merge_open_db($target_db, SQLITE3_OPEN_READWRITE);
+                    try {
+                        cow_merge_validate_source_table_restore(
+                            $source,
+                            $target,
+                            $meta,
+                            (int)($conflict['run_id'] ?? 0),
+                            $source_branch,
+                            $target_branch,
+                            $table,
+                            $current_source_restore
+                        );
+                        $revalidation_class = 'compatible-source-drift';
+                    } catch (Throwable) {
+                        $revalidation_class = 'unclassified';
+                    } finally {
+                        $source->close();
+                        $target->close();
+                    }
+                }
                 $reason = !$source_fresh && !$target_fresh
                     ? 'schema table restore source and target changed after review'
                     : (!$source_fresh
@@ -17882,7 +17930,7 @@ function cow_merge_audit_conflict_target_staleness(SQLite3 $meta, array $conflic
                 return [
                     'stale_status' => 'stale',
                     'stale_reason' => $reason,
-                    'revalidation_class' => 'unclassified',
+                    'revalidation_class' => $revalidation_class,
                     'current_source_payload' => $current_source_payload,
                     'current_target_payload' => $current_target_payload,
                 ];

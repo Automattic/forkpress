@@ -145,10 +145,13 @@ reviewed conflicts back to `needs-action`. Source-added index, view, and
 trigger conflicts can be classified as `compatible-schema-*-target-drift` when
 the source object still matches review, the original target had no same-name
 object, target drifted to a same-name object, and a dry-run source replacement
-validates over the current target. Other schema drift remains `unclassified`:
-treating changed DDL as compatible source drift requires a schema-specific
-planner that can prove the same dependency graph and target preconditions still
-hold.
+validates over the current target. Dropped-table restore conflicts can be
+classified as `compatible-source-drift` when the target table is still absent
+and a dry-run restore of the current source table, rows, and dependencies
+validates; source indexes or triggers that already have their own schema
+conflicts remain deferred to those conflicts. Other schema drift remains `unclassified`: treating
+changed DDL as compatible source drift requires a schema-specific planner that
+can prove the same dependency graph and target preconditions still hold.
 Table rebuild conflicts also record rebuild-plan evidence for direct
 indexes/triggers, dependent views, and dependent view triggers. That closes the
 specific stale-audit blind spot where table SQL stayed unchanged but a source
