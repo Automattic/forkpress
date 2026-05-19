@@ -71,18 +71,28 @@ steps:
       - github_commit_status:
           context: "Buildkite / Linux build"
 
-  # TODO: GHA also runs the matrix on `x86_64-apple-darwin` via the
-  # `macos-15-intel` runner. No Intel Mac queue is visible in a8c BK; raise
-  # with infrastructure if Intel mac coverage is required for parity.
-  - label: ":apple: Mac aarch64 cow-e2e"
-    key: mac-aarch64-cow-e2e
-    command: .buildkite/commands/mac-aarch64-cow-e2e.sh
+  - label: ":apple: Mac aarch64 tests"
+    key: mac-aarch64-tests
+    command: .buildkite/commands/mac-aarch64-tests.sh
     plugins: [$CI_TOOLKIT_PLUGIN]
     agents:
       queue: mac
     notify:
       - github_commit_status:
-          context: "Buildkite / Mac aarch64 cow-e2e"
+          context: "Buildkite / Mac aarch64 tests"
+
+  - label: ":apple: Mac aarch64 build"
+    key: mac-aarch64-build
+    depends_on: mac-aarch64-tests
+    command: .buildkite/commands/mac-aarch64-build.sh
+    artifact_paths:
+      - "target/aarch64-apple-darwin/release/forkpress"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: mac
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Mac aarch64 build"
 
   - label: ":windows: Windows cow-check"
     key: windows-cow-check
