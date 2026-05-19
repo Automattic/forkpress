@@ -9,6 +9,7 @@ use std::process::Command;
 use zip::ZipArchive;
 
 const STARTUP_WARNING_FILTER: &str = "Missing arginfo";
+const FORKPRESS_PHP_MEMORY_LIMIT: &str = "512M";
 
 #[derive(Debug, Clone)]
 pub struct PortableRuntime {
@@ -43,6 +44,28 @@ mod tests {
         } else {
             assert_eq!(bundled_php_name(), "php");
         }
+    }
+
+    #[test]
+    fn php_base_command_uses_forkpress_memory_limit() {
+        let root =
+            std::env::temp_dir().join(format!("forkpress-runtime-test-{}", std::process::id()));
+        let layout = Layout::new(root.join(".forkpress")).unwrap();
+        let runtime = PortableRuntime {
+            php: PathBuf::from("/tmp/forkpress-php"),
+        };
+        let shared = SharedPaths {
+            work_dir: layout.work_dir.clone(),
+            php_bin: None,
+        };
+
+        let command = php_base_command(&layout, &runtime, &shared);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.contains(&"memory_limit=512M".to_string()));
     }
 }
 
@@ -128,6 +151,8 @@ pub fn php_base_command(
 ) -> Command {
     let mut command = php_command(runtime, shared);
     command
+        .arg("-d")
+        .arg(format!("memory_limit={FORKPRESS_PHP_MEMORY_LIMIT}"))
         .arg("-d")
         .arg("display_errors=Off")
         .arg("-d")
