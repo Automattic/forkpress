@@ -1258,25 +1258,24 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         min-height: 440px;
         min-width: 760px;
     }
-    .fp-lane-label { fill: #50575e; font-size: 12px; font-weight: 650; }
-    .fp-lane-line { stroke: #dcdcde; stroke-width: 2; }
-    .fp-lane-stem { stroke: #c3c4c7; stroke-width: 3; }
-    .fp-lane-head { cursor: pointer; fill: #fff; stroke: #8c8f94; stroke-width: 2; }
-    .fp-row-line { stroke: #f0f0f1; stroke-width: 1; }
-    .fp-row-label { fill: #1d2327; font-size: 11px; font-weight: 700; }
-    .fp-row-status { fill: #646970; font-size: 10px; }
-    .fp-cross-point { fill: #fff; stroke: #c3c4c7; stroke-width: 1.5; }
-    .fp-edge { fill: none; stroke-width: 3; }
-    .fp-edge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
-    .fp-edge.is-resolved { stroke: var(--ok); }
+    .fp-row-hit { cursor: pointer; fill: transparent; }
+    .fp-row-hit:hover { fill: #f6f7f7; }
+    .fp-timeline-lane { fill: none; stroke-linecap: round; stroke-width: 3.5; }
+    .fp-timeline-merge { fill: none; stroke-linecap: round; stroke-width: 3; }
+    .fp-timeline-merge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
+    .fp-timeline-merge.is-resolved { stroke: var(--ok); }
+    .fp-row-divider { stroke: #f0f0f1; stroke-width: 1; }
+    .fp-row-title { fill: #1d2327; font-size: 12px; font-weight: 700; pointer-events: none; }
+    .fp-row-meta { fill: #646970; font-size: 11px; pointer-events: none; }
+    .fp-branch-pill { fill: #f6f7f7; stroke: #dcdcde; stroke-width: 1; }
+    .fp-branch-pill-text { fill: #50575e; font-size: 10px; font-weight: 650; pointer-events: none; }
     .fp-node { cursor: pointer; stroke: #fff; stroke-width: 3; }
     .fp-node.is-current { stroke: #1d2327; stroke-width: 4; }
     .fp-node.is-conflict { fill: var(--conflict); }
     .fp-node.is-resolved { fill: var(--ok); }
     .fp-node.is-setup { fill: #f6f7f7; stroke: #8c8f94; }
     .fp-node.is-failed { fill: var(--danger); }
-    .fp-merge-dot { fill: #fff; stroke-width: 3; }
-    .fp-node-label { fill: #1d2327; font-size: 11px; font-weight: 700; pointer-events: none; }
+    .fp-merge-dot { fill: #fff; stroke-width: 3; cursor: pointer; }
     .fp-conflict-badge { fill: var(--danger); }
     .fp-conflict-badge.is-resolved { fill: var(--ok); }
     .fp-badge-text { fill: #fff; font-size: 10px; font-weight: 700; pointer-events: none; }
@@ -1559,6 +1558,41 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (status.indexOf('failed') !== -1 || status.indexOf('rolled_back') !== -1) return ' is-failed';
         return ' is-clean';
     }
+    function branchColor(name, lanes) {
+        var index = Math.max(0, lanes.indexOf(name));
+        return colors[index % colors.length];
+    }
+    function runLabel(run) {
+        var source = String(run.source_branch || '?');
+        var target = String(run.target_branch || source || '?');
+        var prefix = '#' + String(run.id || '');
+        if (source === target) {
+            return prefix + ' ' + source;
+        }
+        return prefix + ' ' + source + ' -> ' + target;
+    }
+    function runMeta(run) {
+        var status = String(run.status || '');
+        var parts = [status];
+        var conflict = conflictSummary(run);
+        if (conflict.total > 0) {
+            parts.push(conflict.unresolved + ' unresolved / ' + conflict.total + ' conflicts');
+        } else if (Number(run.decision_count || 0) > 0) {
+            parts.push(String(run.decision_count) + ' decisions');
+        }
+        var when = run.finished_at || run.started_at || '';
+        if (when) parts.push(when);
+        return parts.filter(Boolean).join('  ·  ');
+    }
+    function drawPill(text, x, y, color) {
+        var width = Math.max(46, Math.min(150, 14 + String(text).length * 6.3));
+        var rect = svg('rect', { x: x, y: y - 12, width: width, height: 18, rx: 9, class: 'fp-branch-pill', stroke: color });
+        var label = svg('text', { x: x + 8, y: y + 1, class: 'fp-branch-pill-text' });
+        label.textContent = text.length > 20 ? text.slice(0, 18) + '...' : text;
+        graph.appendChild(rect);
+        graph.appendChild(label);
+        return width;
+    }
     function laneNames(entries) {
         var map = {};
         var ordered = [];
@@ -1601,72 +1635,90 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function renderGraph() {
         var entries = sortedRunEntries();
         var lanes = laneNames(entries);
-        var left = 150;
-        var top = 82;
-        var laneGap = 132;
-        var rowGap = 58;
-        var width = Math.max(900, left + Math.max(lanes.length, 1) * laneGap + 72);
-        var height = Math.max(520, top + Math.max(entries.length, 1) * rowGap + 56);
+        var graphLeft = 58;
+        var laneGap = 24;
+        var graphWidth = Math.max(1, lanes.length) * laneGap;
+        var textX = graphLeft + graphWidth + 48;
+        var top = 44;
+        var rowGap = 56;
+        var rowHeight = 48;
+        var width = Math.max(1040, textX + 720);
+        var height = Math.max(520, top + Math.max(entries.length, 1) * rowGap + 34);
         graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
         graph.setAttribute('width', width);
         graph.setAttribute('height', height);
         graph.innerHTML = '';
         var x = {};
         lanes.forEach(function (name, index) {
-            x[name] = left + index * laneGap;
-            var color = colors[index % colors.length];
-            graph.appendChild(svg('line', { x1: x[name], x2: x[name], y1: 46, y2: height - 34, class: 'fp-lane-stem' }));
-            var label = svg('text', { x: x[name], y: 26, class: 'fp-lane-label', 'text-anchor': 'middle' });
-            label.textContent = name;
-            graph.appendChild(label);
-            var head = svg('circle', { cx: x[name], cy: 46, r: 8, class: 'fp-lane-head', stroke: color, 'data-kind': 'branch', 'data-name': name });
-            head.appendChild(svg('title', {})).textContent = 'Branch ' + name;
-            graph.appendChild(head);
+            x[name] = graphLeft + index * laneGap;
+            graph.appendChild(svg('path', {
+                d: 'M ' + x[name] + ' ' + (top - 24) + ' L ' + x[name] + ' ' + (height - 24),
+                class: 'fp-timeline-lane',
+                stroke: branchColor(name, lanes),
+                opacity: name === 'main' ? '.55' : '.38'
+            }));
         });
         entries.forEach(function (entry, rowIndex) {
             var run = entry.run;
             var source = String(run.source_branch || '?');
             var target = String(run.target_branch || source || '?');
-            var sx = x[source] !== undefined ? x[source] : (x[target] || left);
+            var sx = x[source] !== undefined ? x[source] : (x[target] || graphLeft);
             var tx = x[target] !== undefined ? x[target] : sx;
             var y = top + rowIndex * rowGap;
-            var laneIndex = Math.max(0, lanes.indexOf(source));
-            var color = colors[laneIndex % colors.length];
+            var sourceColor = branchColor(source, lanes);
+            var targetColor = branchColor(target, lanes);
             var conflict = conflictSummary(run);
             var visual = runVisualClass(run);
             var isMerge = source !== target;
-            graph.appendChild(svg('line', { x1: 8, x2: width - 28, y1: y, y2: y, class: 'fp-row-line' }));
-            lanes.forEach(function (lane) {
-                var point = svg('circle', { cx: x[lane], cy: y, r: 3.5, class: 'fp-cross-point' });
-                point.appendChild(svg('title', {})).textContent = lane + ' at revision #' + String(run.id || rowIndex + 1);
-                graph.appendChild(point);
+            var hit = svg('rect', {
+                x: 0,
+                y: y - rowHeight / 2,
+                width: width,
+                height: rowHeight,
+                class: 'fp-row-hit',
+                'data-kind': 'run',
+                'data-index': entry.index
             });
+            graph.appendChild(hit);
+            graph.appendChild(svg('line', { x1: 0, x2: width - 20, y1: y + rowHeight / 2, y2: y + rowHeight / 2, class: 'fp-row-divider' }));
             if (isMerge) {
-                var edge = svg('path', {
-                    d: 'M ' + sx + ' ' + y + ' C ' + (sx + ((tx - sx) * 0.45)) + ' ' + y + ', ' + (sx + ((tx - sx) * 0.55)) + ' ' + y + ', ' + tx + ' ' + y,
-                    class: 'fp-edge' + (visual.indexOf('is-conflict') !== -1 ? ' is-conflict' : '') + (visual.indexOf('is-resolved') !== -1 ? ' is-resolved' : ''),
-                    stroke: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : color)
+                var bend = Math.max(16, Math.abs(tx - sx) / 2);
+                var mergePath = svg('path', {
+                    d: 'M ' + sx + ' ' + (y - 18) + ' C ' + sx + ' ' + (y - 4) + ', ' + (tx + (sx < tx ? -bend : bend)) + ' ' + (y - 4) + ', ' + tx + ' ' + y,
+                    class: 'fp-timeline-merge' + (visual.indexOf('is-conflict') !== -1 ? ' is-conflict' : '') + (visual.indexOf('is-resolved') !== -1 ? ' is-resolved' : ''),
+                    stroke: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : sourceColor),
+                    'data-kind': 'run',
+                    'data-index': entry.index
                 });
-                graph.appendChild(edge);
-                graph.appendChild(svg('circle', { cx: sx, cy: y, r: 5, class: 'fp-merge-dot', stroke: color }));
+                graph.appendChild(mergePath);
+                graph.appendChild(svg('circle', { cx: sx, cy: y - 18, r: 4.5, class: 'fp-merge-dot', stroke: sourceColor, 'data-kind': 'run', 'data-index': entry.index }));
             }
             var node = svg('circle', {
                 cx: tx,
                 cy: y,
                 r: visual.indexOf('is-setup') !== -1 ? 8 : 11,
-                fill: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : color),
+                fill: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : targetColor),
                 class: 'fp-node' + visual,
                 'data-kind': 'run',
                 'data-index': entry.index
             });
             node.appendChild(svg('title', {})).textContent = '#' + String(run.id || '') + ' ' + source + ' -> ' + target + ' / ' + String(run.status || '');
             graph.appendChild(node);
-            var rowLabel = svg('text', { x: 14, y: y - 5, class: 'fp-row-label' });
-            rowLabel.textContent = '#' + String(run.id || rowIndex + 1) + ' ' + source + ' -> ' + target;
-            graph.appendChild(rowLabel);
-            var rowStatus = svg('text', { x: 14, y: y + 12, class: 'fp-row-status' });
-            rowStatus.textContent = String(run.status || '') + (conflict.total > 0 ? ' / conflicts ' + conflict.unresolved + ' unresolved of ' + conflict.total : '');
-            graph.appendChild(rowStatus);
+            var title = svg('text', { x: textX, y: y - 6, class: 'fp-row-title' });
+            title.textContent = runLabel(run);
+            graph.appendChild(title);
+            var meta = svg('text', { x: textX, y: y + 12, class: 'fp-row-meta' });
+            meta.textContent = runMeta(run);
+            graph.appendChild(meta);
+            var pillX = textX + 280;
+            pillX += drawPill(source, pillX, y - 7, sourceColor) + 8;
+            if (isMerge) {
+                var arrow = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
+                arrow.textContent = 'into';
+                graph.appendChild(arrow);
+                pillX += 30;
+                drawPill(target, pillX, y - 7, targetColor);
+            }
             if (conflict.total > 0) {
                 graph.appendChild(svg('circle', { cx: tx + 10, cy: y - 14, r: 9, class: 'fp-conflict-badge' + (conflict.unresolved === 0 && run._conflictSummary ? ' is-resolved' : '') }));
                 var badge = svg('text', { x: tx + 10, y: y - 10, class: 'fp-badge-text', 'text-anchor': 'middle' });
@@ -1674,7 +1726,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 graph.appendChild(badge);
             }
         });
-        summary.textContent = lanes.length + ' branches / ' + entries.length + ' revision records / newest first';
+        summary.textContent = lanes.length + ' graph lanes / ' + entries.length + ' timeline revisions / newest first';
     }
     function setDetail(title, rows, actions, object) {
         detailTitle.textContent = title;

@@ -241,11 +241,11 @@ if (is_resource($lock)) {
         $early_body = stream_get_contents($pipes[1]);
         assert_true(str_contains($early_body, 'ForkPress Branches'), 'out-of-band branch manager renders before lock release');
         assert_true(str_contains($early_body, 'fp-graph'), 'out-of-band branch manager renders the branch graph surface');
-        assert_true(str_contains($early_body, 'fp-lane-stem'), 'out-of-band branch manager renders branches as graph lanes');
-        assert_true(str_contains($early_body, 'fp-row-label'), 'out-of-band branch manager renders revisions as graph rows');
-        assert_true(str_contains($early_body, 'fp-cross-point'), 'out-of-band branch manager renders lane cross-section points for each revision row');
+        assert_true(str_contains($early_body, 'fp-timeline-lane'), 'out-of-band branch manager renders compact git-style graph lanes');
+        assert_true(str_contains($early_body, 'fp-timeline-merge'), 'out-of-band branch manager renders merge curves between lanes');
+        assert_true(str_contains($early_body, 'fp-row-title'), 'out-of-band branch manager renders revisions as timeline rows');
         assert_true(str_contains($early_body, 'sortedRunEntries'), 'out-of-band branch manager sorts real revision records, not one row per branch');
-        assert_true(str_contains($early_body, 'revision records / newest first'), 'out-of-band branch manager labels revision timeline direction');
+        assert_true(str_contains($early_body, 'timeline revisions / newest first'), 'out-of-band branch manager labels revision timeline direction');
         assert_true(str_contains($early_body, 'annotateConflictRuns'), 'out-of-band branch manager annotates conflict runs with review state');
         assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
         assert_true(str_contains($early_body, 'forkpress_branch_conflicts'), 'out-of-band branch manager can revisit conflicts');
