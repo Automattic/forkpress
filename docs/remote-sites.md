@@ -194,8 +194,13 @@ If `rsync` fails, verify the SSH target, key, port, and remote path outside
 ForkPress first:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -p 2222 deploy@example.com 'test -f /srv/www/example/wp-load.php'
+ssh -i ~/.ssh/id_ed25519 -p 2222 -o ConnectTimeout=10 -o BatchMode=yes deploy@example.com 'test -f /srv/www/example/wp-load.php'
 ```
+
+If that command times out, ForkPress cannot reach the site's SSH service from
+your current network. Confirm the hosting provider's SSH port, whether SSH is
+enabled, and whether the host firewall or IP allowlist permits your current IP.
+Some managed hosts use a custom SSH port instead of `22` or `2222`.
 
 If uploads are missing in the local preview, that is the default thin-clone
 behavior. Re-run the clone with `--include-uploads` or `--full-sync`.

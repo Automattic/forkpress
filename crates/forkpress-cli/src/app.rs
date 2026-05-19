@@ -74,6 +74,7 @@ mod zfs_engine;
 const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
 const RUNTIME_BUNDLE_ID: &str = env!("FORKPRESS_RUNTIME_BUNDLE_ID");
 const FORKPRESS_COW_PARENT_LIFECYCLE_LOCK: &str = "FORKPRESS_COW_PARENT_LIFECYCLE_LOCK";
+const REMOTE_CLONE_SSH_CONNECT_TIMEOUT_SECONDS: u16 = 10;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -2428,7 +2429,7 @@ fn shell_quote_path(path: &std::path::Path) -> String {
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '@'))
     {
         return value.to_string();
     }
@@ -2853,13 +2854,29 @@ fn remote_clone_command(
 
     fs::create_dir_all(&cache_root)
         .with_context(|| format!("failed to create {}", cache_root.display()))?;
+    if let Some(key) = &args.ssh_key {
+        if !key.is_file() {
+            bail!(
+                "SSH key does not exist or is not a file: {}. Use an absolute key path or leave the shell to expand `~` before running ForkPress.",
+                key.display()
+            );
+        }
+    }
     let rsync_args = remote_clone_rsync_args(&args, &cache_root);
-    let status = Command::new("rsync").args(&rsync_args).status().context(
+    let output = Command::new("rsync").args(&rsync_args).output().context(
         "failed to start rsync; install rsync or use `forkpress remote add --cache-root`",
     )?;
-    if !status.success() {
-        bail!("rsync exited with {status}");
+    if !output.status.success() {
+        bail!(
+            "{}",
+            remote_clone_rsync_failure_message(
+                &args,
+                &output.status.to_string(),
+                &String::from_utf8_lossy(&output.stderr)
+            )
+        );
     }
+    write_filtered_output(&output.stdout, &output.stderr)?;
     if !cache_root.join("wp-load.php").is_file() {
         bail!(
             "remote clone did not produce a WordPress root at {}; expected wp-load.php",
@@ -3035,6 +3052,9 @@ fn remote_clone_ssh_command(args: &RemoteCloneArgs) -> Command {
     if let Some(port) = args.ssh_port {
         command.arg("-p").arg(port.to_string());
     }
+    command.arg("-o").arg(format!(
+        "ConnectTimeout={REMOTE_CLONE_SSH_CONNECT_TIMEOUT_SECONDS}"
+    ));
     command
 }
 
@@ -3085,7 +3105,91 @@ fn remote_clone_rsync_ssh_command(args: &RemoteCloneArgs) -> Option<String> {
         command.push_str(" -p ");
         command.push_str(&port.to_string());
     }
+    command.push_str(" -o ConnectTimeout=");
+    command.push_str(&REMOTE_CLONE_SSH_CONNECT_TIMEOUT_SECONDS.to_string());
     Some(command)
+}
+
+fn remote_clone_ssh_check_command(args: &RemoteCloneArgs) -> String {
+    let mut command = String::from("ssh");
+    if let Some(key) = &args.ssh_key {
+        command.push_str(" -i ");
+        command.push_str(&shell_quote_path(key));
+    }
+    if let Some(port) = args.ssh_port {
+        command.push_str(" -p ");
+        command.push_str(&port.to_string());
+    }
+    command.push_str(" -o ConnectTimeout=");
+    command.push_str(&REMOTE_CLONE_SSH_CONNECT_TIMEOUT_SECONDS.to_string());
+    command.push_str(" -o BatchMode=yes ");
+    command.push_str(&shell_quote(&args.ssh));
+    command.push(' ');
+    command.push_str(&shell_quote(&format!(
+        "test -f {}",
+        shell_quote(&remote_clone_wp_load_path(&args.remote_path))
+    )));
+    command
+}
+
+fn remote_clone_wp_load_path(remote_path: &str) -> String {
+    let mut path = remote_path.trim_end_matches('/').to_string();
+    path.push_str("/wp-load.php");
+    path
+}
+
+fn remote_clone_rsync_failure_message(
+    args: &RemoteCloneArgs,
+    status: &str,
+    stderr: &str,
+) -> String {
+    let trimmed = stderr.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let mut message = format!(
+        "remote clone could not sync {} with rsync ({status}).",
+        remote_clone_rsync_source(&args.ssh, &args.remote_path)
+    );
+
+    if lower.contains("operation timed out")
+        || lower.contains("connection timed out")
+        || lower.contains("no route to host")
+    {
+        message.push_str(&format!(
+            "\n\nSSH did not connect to {} on port {} before timing out. This is a network/hosting reachability problem, not a WordPress import problem. Check the SSH port, hosting firewall or IP allowlist, VPN/network, and whether SSH is enabled for this site.",
+            args.ssh,
+            args.ssh_port.unwrap_or(22)
+        ));
+    } else if lower.contains("connection refused") {
+        message.push_str(&format!(
+            "\n\nThe host refused SSH on port {}. Check the SSH port configured by the host; many managed WordPress hosts do not use 22 or 2222.",
+            args.ssh_port.unwrap_or(22)
+        ));
+    } else if lower.contains("permission denied") {
+        message.push_str(
+            "\n\nSSH reached the server but authentication failed. Check the SSH user, key, key permissions, and whether the key is loaded in your agent if it has a passphrase.",
+        );
+    } else if lower.contains("no such file")
+        || lower.contains("not a directory")
+        || lower.contains("change_dir")
+    {
+        message.push_str(
+            "\n\nSSH reached the server, but rsync could not read the remote WordPress path. Check --path and confirm that wp-load.php exists there.",
+        );
+    } else {
+        message.push_str(
+            "\n\nVerify the SSH target, key, port, and remote WordPress path outside ForkPress before retrying.",
+        );
+    }
+
+    message.push_str("\n\nTry this SSH check:\n  ");
+    message.push_str(&remote_clone_ssh_check_command(args));
+    if trimmed.is_empty() {
+        message.push_str("\n\nrsync did not print stderr.");
+    } else {
+        message.push_str("\n\nrsync stderr:\n");
+        message.push_str(trimmed);
+    }
+    message
 }
 
 fn remote_clone_default_excludes(include_uploads: bool) -> Vec<&'static str> {
@@ -8343,7 +8447,7 @@ mod git_helper_tests {
                     .expect("missing rsync ssh command after -e")
                     .as_str()
             }),
-            Some("ssh -i '/Users/alex/.ssh/forkpress id' -p 2222")
+            Some("ssh -i '/Users/alex/.ssh/forkpress id' -p 2222 -o ConnectTimeout=10")
         );
         assert!(rsync.contains(&"--delete".to_string()));
         assert!(rsync.contains(&"wp-content/uploads/".to_string()));
@@ -8475,9 +8579,71 @@ mod git_helper_tests {
                 "/Users/alex/.ssh/forkpress id",
                 "-p",
                 "2222",
+                "-o",
+                "ConnectTimeout=10",
                 "deploy@example.com",
                 "php -- '/srv/www/example with spaces'",
             ]
+        );
+    }
+
+    #[test]
+    fn remote_clone_rsync_timeout_error_is_actionable() {
+        let clone = RemoteCloneArgs {
+            name: "production".to_string(),
+            ssh: "deploy@example.com".to_string(),
+            ssh_key: Some(PathBuf::from("/Users/alex/.ssh/forkpress id")),
+            ssh_port: Some(2222),
+            remote_path: "/srv/www/example".to_string(),
+            branch: Some("production-main".to_string()),
+            remote_url: Some("https://example.com".to_string()),
+            local_url: None,
+            include_uploads: false,
+            full_sync: false,
+            excludes: Vec::new(),
+            no_delete: false,
+            force: false,
+        };
+        let message = remote_clone_rsync_failure_message(
+            &clone,
+            "exit status: 255",
+            "ssh: connect to host example.com port 2222: Operation timed out\nrsync error: unexplained error (code 255)",
+        );
+
+        assert!(message.contains("remote clone could not sync deploy@example.com:/srv/www/example/ with rsync (exit status: 255)."));
+        assert!(
+            message.contains(
+                "SSH did not connect to deploy@example.com on port 2222 before timing out."
+            )
+        );
+        assert!(message.contains("network/hosting reachability problem"));
+        assert!(message.contains("hosting firewall or IP allowlist"));
+        assert!(message.contains("ssh -i '/Users/alex/.ssh/forkpress id' -p 2222 -o ConnectTimeout=10 -o BatchMode=yes deploy@example.com 'test -f /srv/www/example/wp-load.php'"));
+        assert!(message.contains("rsync stderr:"));
+        assert!(message.contains("Operation timed out"));
+    }
+
+    #[test]
+    fn remote_clone_ssh_check_command_quotes_remote_paths() {
+        let clone = RemoteCloneArgs {
+            name: "production".to_string(),
+            ssh: "deploy@example.com".to_string(),
+            ssh_key: None,
+            ssh_port: None,
+            remote_path: "/srv/www/example with spaces".to_string(),
+            branch: None,
+            remote_url: None,
+            local_url: None,
+            include_uploads: false,
+            full_sync: false,
+            excludes: Vec::new(),
+            no_delete: false,
+            force: false,
+        };
+
+        assert_eq!(
+            remote_clone_ssh_check_command(&clone),
+            "ssh -o ConnectTimeout=10 -o BatchMode=yes deploy@example.com 'test -f '\\''/srv/www/example with spaces/wp-load.php'\\'''"
         );
     }
 
