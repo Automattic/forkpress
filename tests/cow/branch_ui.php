@@ -172,6 +172,10 @@ $_SERVER = [
     'HTTP_ACCEPT' => $async ? 'application/json' : 'text/html',
     'REQUEST_URI' => '/wp-admin/',
 ];
+$forwarded_proto = getenv('FORKPRESS_TEST_FORWARDED_PROTO');
+if (is_string($forwarded_proto) && $forwarded_proto !== '') {
+    $_SERVER['HTTP_X_FORWARDED_PROTO'] = $forwarded_proto;
+}
 if ($async) {
     $_SERVER['HTTP_X_FORKPRESS_ASYNC'] = '1';
 }
@@ -324,6 +328,19 @@ assert_same(
     ['branch', '--work-dir', $work_dir, 'create', 'new_feature', '--from', 'feature'],
     'branch create admin action uses safe branch birth CLI path'
 );
+
+$forwarded_create = run_branch_ui_action(
+    ['action' => 'forkpress_branch_create', 'branch' => 'forwarded_feature', 'from' => 'feature'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_FORWARDED_PROTO' => 'https']
+);
+$forwarded_create_payload = decode_branch_ui_payload($forwarded_create);
+assert_same($forwarded_create['status'], 0, 'branch create respects forwarded HTTPS proxy headers');
+assert_same($forwarded_create_payload['url'] ?? null, 'https://forwarded_feature.wp.localhost:18080/wp-admin/', 'branch create returns HTTPS branch admin URL behind a proxy');
+assert_same($forwarded_create_payload['branches'][1]['url'] ?? null, 'https://wp.localhost:18080/wp-admin/', 'branch create returns HTTPS main URL behind a proxy');
 
 $non_async_create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'no_async_feature', 'from' => 'feature'],

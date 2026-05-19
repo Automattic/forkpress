@@ -222,12 +222,35 @@ function forkpress_cow_branch_conflict_audit_filters(): array {
     return ['error' => null, 'args' => $args, 'filters' => $filters];
 }
 
+function forkpress_cow_request_scheme(): string {
+    $forwarded = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
+    if (is_string($forwarded) && $forwarded !== '') {
+        $scheme = strtolower(trim(explode(',', $forwarded)[0]));
+        if (in_array($scheme, ['http', 'https'], true)) {
+            return $scheme;
+        }
+    }
+    $forwarded_ssl = strtolower((string)($_SERVER['HTTP_X_FORWARDED_SSL'] ?? ''));
+    if ($forwarded_ssl === 'on' || $forwarded_ssl === '1') {
+        return 'https';
+    }
+    $https = strtolower((string)($_SERVER['HTTPS'] ?? ''));
+    if ($https !== '' && $https !== 'off') {
+        return 'https';
+    }
+    $request_scheme = strtolower((string)($_SERVER['REQUEST_SCHEME'] ?? ''));
+    if (in_array($request_scheme, ['http', 'https'], true)) {
+        return $request_scheme;
+    }
+    return 'http';
+}
+
 function forkpress_cow_branch_url(string $branch, string $uri = '/wp-admin/'): string {
     $root_host = getenv('FORKPRESS_ROOT_HOST') ?: 'wp.localhost';
     $current_host = $_SERVER['HTTP_HOST'] ?? '';
     $port = preg_match('/:(\d+)$/', $current_host, $m) ? ':' . $m[1] : '';
     $host = $branch === 'main' ? $root_host : $branch . '.' . $root_host;
-    return 'http://' . $host . $port . $uri;
+    return forkpress_cow_request_scheme() . '://' . $host . $port . $uri;
 }
 
 function forkpress_cow_branch_manager_url(string $branch): string {
@@ -2166,8 +2189,8 @@ function forkpress_cow_handle_branch_manager(string $path, string $current_branc
     echo str_replace('__STATE__', forkpress_cow_json_encode([
         'currentBranch' => $current_branch,
         'branches' => forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/'),
-        'actionUrl' => forkpress_cow_branch_url($current_branch, '/_forkpress/action'),
-        'rootUrl' => forkpress_cow_branch_url('main', '/_forkpress/branches'),
+        'actionUrl' => '/_forkpress/action',
+        'rootUrl' => '/_forkpress/branches',
     ]), forkpress_cow_branch_manager_html($current_branch));
     return true;
 }

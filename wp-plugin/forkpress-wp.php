@@ -437,12 +437,38 @@ function forkpress_root_host(): string {
     return is_string($root_host) && $root_host !== '' ? $root_host : 'wp.localhost';
 }
 
+function forkpress_request_scheme(): string {
+    $forwarded = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '';
+    if (is_string($forwarded) && $forwarded !== '') {
+        $scheme = strtolower(trim(explode(',', $forwarded)[0]));
+        if (in_array($scheme, ['http', 'https'], true)) {
+            return $scheme;
+        }
+    }
+    $forwarded_ssl = strtolower((string)($_SERVER['HTTP_X_FORWARDED_SSL'] ?? ''));
+    if ($forwarded_ssl === 'on' || $forwarded_ssl === '1') {
+        return 'https';
+    }
+    if (function_exists('is_ssl') && is_ssl()) {
+        return 'https';
+    }
+    $https = strtolower((string)($_SERVER['HTTPS'] ?? ''));
+    if ($https !== '' && $https !== 'off') {
+        return 'https';
+    }
+    $request_scheme = strtolower((string)($_SERVER['REQUEST_SCHEME'] ?? ''));
+    if (in_array($request_scheme, ['http', 'https'], true)) {
+        return $request_scheme;
+    }
+    return 'http';
+}
+
 function forkpress_branch_url(string $branch, ?string $uri = null): string {
     $root_host = forkpress_root_host();
     $current_host = $_SERVER['HTTP_HOST'] ?? '';
     $port = preg_match('/:(\d+)$/', $current_host, $m) ? ':' . $m[1] : '';
     $host = $branch === 'main' ? $root_host : $branch . '.' . $root_host;
-    $scheme = is_ssl() ? 'https' : 'http';
+    $scheme = forkpress_request_scheme();
     $uri = $uri ?? ($_SERVER['REQUEST_URI'] ?? '/wp-admin/');
     if (!is_string($uri) || $uri === '') {
         $uri = '/wp-admin/';
