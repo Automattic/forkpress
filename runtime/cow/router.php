@@ -915,6 +915,11 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             return true;
         }
 
+        $review_note = forkpress_cow_branch_post_value('note');
+        if (strlen($review_note) > 2000) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Keep conflict review notes under 2000 characters.');
+            return true;
+        }
         $notes = [
             'pending' => 'Marked pending from the WordPress branch switcher.',
             'needs-action' => 'Marked needs-action from the WordPress branch switcher.',
@@ -927,7 +932,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             '--status',
             $status,
             '--note',
-            $notes[$status],
+            $review_note !== '' ? $review_note : $notes[$status],
             '--reviewer',
             'wordpress-ui',
         ]);
@@ -1004,6 +1009,11 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             }
         }
 
+        $review_note = forkpress_cow_branch_post_value('note');
+        if (strlen($review_note) > 2000) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Keep conflict resolution notes under 2000 characters.');
+            return true;
+        }
         $notes = [
             'source' => 'Applied source choice from the WordPress branch switcher.',
             'target' => 'Applied target choice from the WordPress branch switcher.',
@@ -1027,7 +1037,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             $note = $notes[$choice];
         }
         $resolve_args[] = '--note';
-        $resolve_args[] = $note;
+        $resolve_args[] = $review_note !== '' ? $review_note : $note;
         $resolve_args[] = '--reviewer';
         $resolve_args[] = 'wordpress-ui';
         [$code, $output] = forkpress_cow_branch_run_cli($resolve_args);
@@ -1260,13 +1270,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-row-hit { cursor: pointer; fill: transparent; }
     .fp-row-hit:hover { fill: #f6f7f7; }
-    .fp-timeline-lane { fill: none; stroke-linecap: round; stroke-width: 3.5; }
-    .fp-timeline-merge { fill: none; stroke-linecap: round; stroke-width: 3; }
+    .fp-timeline-lane { fill: none; stroke-linecap: round; stroke-width: 4; }
+    .fp-timeline-fork { fill: none; stroke-linecap: round; stroke-width: 4; }
+    .fp-timeline-merge { fill: none; stroke-linecap: round; stroke-width: 4; }
     .fp-timeline-merge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
     .fp-timeline-merge.is-resolved { stroke: var(--ok); }
     .fp-row-divider { stroke: #f0f0f1; stroke-width: 1; }
     .fp-row-title { fill: #1d2327; font-size: 12px; font-weight: 700; pointer-events: none; }
     .fp-row-meta { fill: #646970; font-size: 11px; pointer-events: none; }
+    .fp-lane-cap { fill: #fff; stroke-width: 2.5; }
+    .fp-lane-end { fill: #f6f7f7; stroke-width: 2; }
+    .fp-lane-label { fill: #50575e; font-size: 10px; font-weight: 700; pointer-events: none; }
     .fp-branch-pill { fill: #f6f7f7; stroke: #dcdcde; stroke-width: 1; }
     .fp-branch-pill-text { fill: #50575e; font-size: 10px; font-weight: 650; pointer-events: none; }
     .fp-node { cursor: pointer; stroke: #fff; stroke-width: 3; }
@@ -1385,6 +1399,39 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-conflict-title { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
     .fp-conflict-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .fp-conflict-grid {
+        display: grid;
+        gap: 8px;
+        grid-template-columns: 1fr 1fr;
+    }
+    .fp-conflict-value {
+        display: grid;
+        gap: 4px;
+        min-width: 0;
+    }
+    .fp-conflict-value label,
+    .fp-conflict-note label,
+    .fp-conflict-choice label {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+    textarea {
+        border: 1px solid #c3c4c7;
+        border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        min-height: 72px;
+        padding: 7px 8px;
+        resize: vertical;
+        width: 100%;
+    }
+    textarea[readonly] { background: #f6f7f7; color: #1d2327; }
+    .fp-conflict-note, .fp-conflict-choice {
+        display: grid;
+        gap: 4px;
+    }
     pre {
         background: #f6f7f7;
         border: 1px solid var(--line);
@@ -1399,6 +1446,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         .fp-layout { grid-template-columns: 1fr; padding: 12px; }
         .fp-topbar { flex-wrap: wrap; padding: 10px 14px; }
         .fp-open-admin { margin-left: 0; }
+        .fp-conflict-grid { grid-template-columns: 1fr; }
     }
 </style>
 </head>
@@ -1558,6 +1606,44 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (status.indexOf('failed') !== -1 || status.indexOf('rolled_back') !== -1) return ' is-failed';
         return ' is-clean';
     }
+    function isSetupRun(run) {
+        var status = String(run && run.status || '');
+        var policy = String(run && run.policy || '');
+        var base = String(run && run.base_ref || '');
+        return status === 'id_bands_allocated'
+            || status === 'identity_captured'
+            || policy === 'autoincrement-id-band-allocation'
+            || policy === 'sidecar-row-identity-capture'
+            || base === 'autoincrement-id-band'
+            || base === 'identity-capture';
+    }
+    function isBranchForkRun(run) {
+        var source = String(run && run.source_branch || '');
+        var target = String(run && run.target_branch || '');
+        var policy = String(run && run.policy || '');
+        var base = String(run && run.base_ref || '');
+        return source !== ''
+            && source === target
+            && source !== 'main'
+            && (policy === 'autoincrement-id-band-allocation' || base === 'autoincrement-id-band');
+    }
+    function branchForkParents(entries) {
+        var parents = {};
+        (entries || []).slice().reverse().forEach(function (entry) {
+            var run = entry.run || {};
+            var source = String(run.source_branch || '');
+            var target = String(run.target_branch || '');
+            if (!source || !target || source === target) return;
+            if (!parents[source]) parents[source] = target;
+            if (!parents[target] && target !== 'main') parents[target] = source;
+        });
+        (entries || []).forEach(function (entry) {
+            var run = entry.run || {};
+            var branch = String(run.source_branch || '');
+            if (isBranchForkRun(run) && !parents[branch]) parents[branch] = 'main';
+        });
+        return parents;
+    }
     function branchColor(name, lanes) {
         var index = Math.max(0, lanes.indexOf(name));
         return colors[index % colors.length];
@@ -1592,6 +1678,25 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         graph.appendChild(rect);
         graph.appendChild(label);
         return width;
+    }
+    function laneActivity(entries, lanes) {
+        var activity = {};
+        var forkParents = branchForkParents(entries);
+        function touch(name, rowIndex) {
+            name = String(name || '');
+            if (!name || !activity[name]) return;
+            if (activity[name].first === null || rowIndex < activity[name].first) activity[name].first = rowIndex;
+            if (activity[name].last === null || rowIndex > activity[name].last) activity[name].last = rowIndex;
+        }
+        lanes.forEach(function (lane) { activity[lane] = { first: null, last: null }; });
+        entries.forEach(function (entry, rowIndex) {
+            var run = entry.run || {};
+            [run.source_branch, run.target_branch].forEach(function (name) {
+                touch(name, rowIndex);
+            });
+            if (isBranchForkRun(run)) touch(forkParents[String(run.source_branch || '')] || 'main', rowIndex);
+        });
+        return activity;
     }
     function laneNames(entries) {
         var map = {};
@@ -1635,28 +1740,48 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function renderGraph() {
         var entries = sortedRunEntries();
         var lanes = laneNames(entries);
-        var graphLeft = 58;
-        var laneGap = 24;
+        var forkParents = branchForkParents(entries);
+        var graphLeft = 72;
+        var laneGap = 54;
         var graphWidth = Math.max(1, lanes.length) * laneGap;
-        var textX = graphLeft + graphWidth + 48;
-        var top = 44;
-        var rowGap = 56;
-        var rowHeight = 48;
-        var width = Math.max(1040, textX + 720);
+        var textX = graphLeft + graphWidth + 56;
+        var top = 58;
+        var rowGap = 64;
+        var rowHeight = 56;
+        var width = Math.max(1120, textX + 720);
         var height = Math.max(520, top + Math.max(entries.length, 1) * rowGap + 34);
         graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
         graph.setAttribute('width', width);
         graph.setAttribute('height', height);
         graph.innerHTML = '';
         var x = {};
+        var activity = laneActivity(entries, lanes);
         lanes.forEach(function (name, index) {
             x[name] = graphLeft + index * laneGap;
+        });
+        lanes.forEach(function (name) {
+            var span = activity[name];
+            if (!span || span.first === null || span.last === null) return;
+            var color = branchColor(name, lanes);
+            var startY = top + span.first * rowGap - 18;
+            var endY = top + span.last * rowGap + 18;
             graph.appendChild(svg('path', {
-                d: 'M ' + x[name] + ' ' + (top - 24) + ' L ' + x[name] + ' ' + (height - 24),
+                d: 'M ' + x[name] + ' ' + startY + ' L ' + x[name] + ' ' + endY,
                 class: 'fp-timeline-lane',
-                stroke: branchColor(name, lanes),
-                opacity: name === 'main' ? '.55' : '.38'
+                stroke: color,
+                opacity: name === 'main' ? '.72' : '.58'
             }));
+            var cap = svg('circle', { cx: x[name], cy: startY, r: 4, class: 'fp-lane-cap', stroke: color });
+            cap.appendChild(svg('title', {})).textContent = name + ' latest visible revision';
+            graph.appendChild(cap);
+            var end = svg('circle', { cx: x[name], cy: endY, r: 4, class: 'fp-lane-end', stroke: color });
+            end.appendChild(svg('title', {})).textContent = name + ' oldest visible revision';
+            graph.appendChild(end);
+            if (span.first < 6) {
+                var label = svg('text', { x: x[name] + 7, y: startY - 4, class: 'fp-lane-label' });
+                label.textContent = name.length > 15 ? name.slice(0, 13) + '...' : name;
+                graph.appendChild(label);
+            }
         });
         entries.forEach(function (entry, rowIndex) {
             var run = entry.run;
@@ -1670,6 +1795,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var conflict = conflictSummary(run);
             var visual = runVisualClass(run);
             var isMerge = source !== target;
+            var isFork = isBranchForkRun(run);
+            var forkParent = forkParents[source] || 'main';
+            var px = x[forkParent] !== undefined ? x[forkParent] : graphLeft;
             var hit = svg('rect', {
                 x: 0,
                 y: y - rowHeight / 2,
@@ -1681,17 +1809,30 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             });
             graph.appendChild(hit);
             graph.appendChild(svg('line', { x1: 0, x2: width - 20, y1: y + rowHeight / 2, y2: y + rowHeight / 2, class: 'fp-row-divider' }));
+            if (isFork && px !== sx) {
+                var forkPath = svg('path', {
+                    d: 'M ' + px + ' ' + y + ' C ' + px + ' ' + (y - 26) + ', ' + sx + ' ' + (y - 26) + ', ' + sx + ' ' + (y - 2),
+                    class: 'fp-timeline-fork',
+                    stroke: sourceColor,
+                    opacity: '.92',
+                    'data-kind': 'run',
+                    'data-index': entry.index
+                });
+                forkPath.appendChild(svg('title', {})).textContent = source + ' branched from ' + forkParent;
+                graph.appendChild(forkPath);
+                graph.appendChild(svg('circle', { cx: px, cy: y, r: 5, class: 'fp-merge-dot', stroke: branchColor(forkParent, lanes), 'data-kind': 'run', 'data-index': entry.index }));
+            }
             if (isMerge) {
-                var bend = Math.max(16, Math.abs(tx - sx) / 2);
+                var bend = Math.max(28, Math.abs(tx - sx) / 2);
                 var mergePath = svg('path', {
-                    d: 'M ' + sx + ' ' + (y - 18) + ' C ' + sx + ' ' + (y - 4) + ', ' + (tx + (sx < tx ? -bend : bend)) + ' ' + (y - 4) + ', ' + tx + ' ' + y,
+                    d: 'M ' + sx + ' ' + (y - 26) + ' C ' + sx + ' ' + (y - 4) + ', ' + (tx + (sx < tx ? -bend : bend)) + ' ' + (y - 4) + ', ' + tx + ' ' + y,
                     class: 'fp-timeline-merge' + (visual.indexOf('is-conflict') !== -1 ? ' is-conflict' : '') + (visual.indexOf('is-resolved') !== -1 ? ' is-resolved' : ''),
                     stroke: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : sourceColor),
                     'data-kind': 'run',
                     'data-index': entry.index
                 });
                 graph.appendChild(mergePath);
-                graph.appendChild(svg('circle', { cx: sx, cy: y - 18, r: 4.5, class: 'fp-merge-dot', stroke: sourceColor, 'data-kind': 'run', 'data-index': entry.index }));
+                graph.appendChild(svg('circle', { cx: sx, cy: y - 26, r: 5, class: 'fp-merge-dot', stroke: sourceColor, 'data-kind': 'run', 'data-index': entry.index }));
             }
             var node = svg('circle', {
                 cx: tx,
@@ -1702,16 +1843,25 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 'data-kind': 'run',
                 'data-index': entry.index
             });
-            node.appendChild(svg('title', {})).textContent = '#' + String(run.id || '') + ' ' + source + ' -> ' + target + ' / ' + String(run.status || '');
+            node.appendChild(svg('title', {})).textContent = isFork ? ('#' + String(run.id || '') + ' ' + source + ' branched from ' + forkParent) : ('#' + String(run.id || '') + ' ' + source + ' -> ' + target + ' / ' + String(run.status || ''));
             graph.appendChild(node);
             var title = svg('text', { x: textX, y: y - 6, class: 'fp-row-title' });
-            title.textContent = runLabel(run);
+            title.textContent = isFork ? ('#' + String(run.id || '') + ' ' + source + ' branched from ' + forkParent) : runLabel(run);
             graph.appendChild(title);
             var meta = svg('text', { x: textX, y: y + 12, class: 'fp-row-meta' });
             meta.textContent = runMeta(run);
             graph.appendChild(meta);
             var pillX = textX + 280;
-            pillX += drawPill(source, pillX, y - 7, sourceColor) + 8;
+            if (isFork) {
+                pillX += drawPill(forkParent, pillX, y - 7, branchColor(forkParent, lanes)) + 8;
+                var forkText = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
+                forkText.textContent = 'forks';
+                graph.appendChild(forkText);
+                pillX += 34;
+                drawPill(source, pillX, y - 7, sourceColor);
+            } else {
+                pillX += drawPill(source, pillX, y - 7, sourceColor) + 8;
+            }
             if (isMerge) {
                 var arrow = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
                 arrow.textContent = 'into';
@@ -1745,6 +1895,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         });
         (actions || []).forEach(function (action) { detailActions.appendChild(action); });
         raw.textContent = object ? JSON.stringify(object, null, 2) : '';
+        raw.style.display = object ? 'block' : 'none';
     }
     function link(label, href) {
         var a = document.createElement('a');
@@ -1760,6 +1911,65 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (extraClass) b.className = extraClass;
         b.addEventListener('click', fn);
         return b;
+    }
+    function textNode(tag, className, text) {
+        var node = document.createElement(tag);
+        if (className) node.className = className;
+        node.textContent = text === undefined || text === null ? '' : String(text);
+        return node;
+    }
+    function cleanPreview(value) {
+        if (value === undefined || value === null) return '';
+        var text = String(value);
+        try {
+            var parsed = JSON.parse(text);
+            if (typeof parsed === 'string') return parsed;
+        } catch (error) {}
+        return text;
+    }
+    function decodeAuditPayload(value) {
+        if (value === undefined || value === null || value === '') return '';
+        if (typeof value !== 'string') return JSON.stringify(value, null, 2);
+        try {
+            var payload = JSON.parse(value);
+            if (payload && payload.type === 'bytes' && typeof payload.base64 === 'string') {
+                var binary = atob(payload.base64);
+                if (window.TextDecoder) {
+                    var bytes = new Uint8Array(binary.length);
+                    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+                }
+                return binary;
+            }
+            return JSON.stringify(payload, null, 2);
+        } catch (error) {
+            return value;
+        }
+    }
+    function conflictValue(record, key, previewKey) {
+        if (record[previewKey] !== undefined && record[previewKey] !== null && record[previewKey] !== '') {
+            return cleanPreview(record[previewKey]);
+        }
+        return decodeAuditPayload(record[key]);
+    }
+    function conflictObjectLabel(record) {
+        if (record.table_name && record.column_name) return record.table_name + '.' + record.column_name;
+        if (record.path) return record.path;
+        if (record.file_path) return record.file_path;
+        if (record.plugin_object) return record.plugin_object;
+        return record.conflict_key || ('Conflict #' + record.id);
+    }
+    function conflictValueField(label, value) {
+        var wrap = document.createElement('div');
+        wrap.className = 'fp-conflict-value';
+        var labelNode = document.createElement('label');
+        labelNode.textContent = label;
+        var textarea = document.createElement('textarea');
+        textarea.readOnly = true;
+        textarea.value = value || '';
+        wrap.appendChild(labelNode);
+        wrap.appendChild(textarea);
+        return wrap;
     }
     function selectBranch(name) {
         var item = branch(name);
@@ -1797,32 +2007,69 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var list = Array.isArray(payload.records) ? payload.records : [];
         setStatus(list.length ? 'warn' : 'ok', payload.message || 'Loaded conflict details.');
         conflicts.innerHTML = '';
+        raw.textContent = '';
+        raw.style.display = 'none';
         list.forEach(function (record) {
             var node = document.createElement('div');
             node.className = 'fp-conflict';
-            var title = document.createElement('div');
-            title.className = 'fp-conflict-title';
-            title.textContent = record.conflict_key || record.path || record.table_name || ('Conflict #' + record.id);
-            var meta = document.createElement('div');
-            meta.className = 'fp-conflict-meta';
-            meta.textContent = [record.conflict_type, record.lifecycle_state, record.next_action, record.plugin].filter(Boolean).join(' / ');
+            var title = textNode('div', 'fp-conflict-title', '#' + String(record.id || '') + ' ' + conflictObjectLabel(record));
+            var metaParts = [
+                record.conflict_type,
+                record.lifecycle_state,
+                record.next_action,
+                record.stale_status ? 'stale: ' + record.stale_status : '',
+                record.review_status ? 'review: ' + record.review_status : '',
+                record.latest_resolution_status ? 'resolution: ' + record.latest_resolution_status : ''
+            ].filter(Boolean);
+            var meta = textNode('div', 'fp-conflict-meta', metaParts.join(' / '));
+            var values = document.createElement('div');
+            values.className = 'fp-conflict-grid';
+            values.appendChild(conflictValueField('Base', conflictValue(record, 'base_payload', 'base_preview')));
+            values.appendChild(conflictValueField('Source', conflictValue(record, 'source_payload', 'source_preview')));
+            values.appendChild(conflictValueField('Target', conflictValue(record, 'target_payload', 'target_preview')));
+            values.appendChild(conflictValueField('Chosen / current target', conflictValue(record, 'chosen_payload', 'chosen_preview') || conflictValue(record, 'current_target_payload', 'current_target_preview')));
+            var noteWrap = document.createElement('div');
+            noteWrap.className = 'fp-conflict-note';
+            var noteLabel = document.createElement('label');
+            noteLabel.textContent = 'Review note';
+            var note = document.createElement('textarea');
+            note.value = record.review_note || '';
+            note.placeholder = 'Record why this choice is correct, what still needs action, or what changed after revalidation.';
+            noteWrap.appendChild(noteLabel);
+            noteWrap.appendChild(note);
+            var choiceWrap = document.createElement('div');
+            choiceWrap.className = 'fp-conflict-choice';
+            var choiceLabel = document.createElement('label');
+            choiceLabel.textContent = 'Resolution choice';
+            var choice = document.createElement('select');
+            (Array.isArray(record.resolution_choices) ? record.resolution_choices : ['source', 'target']).forEach(function (value) {
+                var option = document.createElement('option');
+                option.value = value;
+                option.textContent = value === 'source' ? 'Use source value' : (value === 'target' ? 'Keep target value' : value);
+                option.selected = record.latest_resolution_choice === value;
+                choice.appendChild(option);
+            });
+            choiceWrap.appendChild(choiceLabel);
+            choiceWrap.appendChild(choice);
             var row = document.createElement('div');
             row.className = 'fp-buttons';
             if (record.id && record.lifecycle_state !== 'resolved') {
-                row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run); }));
-                if (Array.isArray(record.resolution_choices) && record.resolution_choices.indexOf('source') !== -1) {
-                    row.appendChild(button('Use source', function () { resolveConflict(record.id, 'source', payload.run); }));
-                }
-                if (Array.isArray(record.resolution_choices) && record.resolution_choices.indexOf('target') !== -1) {
-                    row.appendChild(button('Keep target', function () { resolveConflict(record.id, 'target', payload.run); }));
-                }
+                row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
+                row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
+                row.appendChild(button('Apply selected', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
+            } else if (record.id && record.latest_resolution_status && record.latest_resolution_applied !== 1) {
+                row.appendChild(button('Apply reviewed choice', function () { resolveConflict(record.id, '', payload.run, note.value, true); }, 'primary'));
+            } else {
+                row.appendChild(textNode('span', 'fp-conflict-meta', 'Resolved; no action needed.'));
             }
             node.appendChild(title);
             node.appendChild(meta);
+            node.appendChild(values);
+            node.appendChild(noteWrap);
+            node.appendChild(choiceWrap);
             node.appendChild(row);
             conflicts.appendChild(node);
         });
-        raw.textContent = JSON.stringify(payload, null, 2);
     }
     function loadTree() {
         setStatus('warn', 'Loading branch graph...');
@@ -1857,11 +2104,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             setStatus('error', error.message || 'Could not load conflicts.');
         });
     }
-    function reviewConflict(id, value, run) {
-        post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || '') }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
+    function reviewConflict(id, value, run, note) {
+        post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
     }
-    function resolveConflict(id, choice, run) {
-        post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice, run: String(run || '') }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
+    function resolveConflict(id, choice, run, note, applyReviewed) {
+        post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '' }).then(function () { loadConflicts(run); loadTree(); }).catch(function (error) { setStatus('error', error.message); });
     }
     graph.addEventListener('click', function (event) {
         var target = event.target.closest ? event.target.closest('[data-kind]') : null;

@@ -242,6 +242,11 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'ForkPress Branches'), 'out-of-band branch manager renders before lock release');
         assert_true(str_contains($early_body, 'fp-graph'), 'out-of-band branch manager renders the branch graph surface');
         assert_true(str_contains($early_body, 'fp-timeline-lane'), 'out-of-band branch manager renders compact git-style graph lanes');
+        assert_true(str_contains($early_body, 'fp-timeline-fork'), 'out-of-band branch manager renders branch fork curves');
+        assert_true(str_contains($early_body, 'laneActivity'), 'out-of-band branch manager computes finite branch lifetimes from revision rows');
+        assert_true(str_contains($early_body, 'branchForkParents'), 'out-of-band branch manager infers branch fork parents for timeline rendering');
+        assert_true(str_contains($early_body, 'isBranchForkRun'), 'out-of-band branch manager treats branch setup rows as fork points');
+        assert_true(str_contains($early_body, 'fp-lane-end'), 'out-of-band branch manager renders branch line end caps');
         assert_true(str_contains($early_body, 'fp-timeline-merge'), 'out-of-band branch manager renders merge curves between lanes');
         assert_true(str_contains($early_body, 'fp-row-title'), 'out-of-band branch manager renders revisions as timeline rows');
         assert_true(str_contains($early_body, 'sortedRunEntries'), 'out-of-band branch manager sorts real revision records, not one row per branch');
@@ -249,6 +254,10 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'annotateConflictRuns'), 'out-of-band branch manager annotates conflict runs with review state');
         assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
         assert_true(str_contains($early_body, 'forkpress_branch_conflicts'), 'out-of-band branch manager can revisit conflicts');
+        assert_true(str_contains($early_body, 'fp-conflict-grid'), 'out-of-band branch manager renders conflict values as review fields');
+        assert_true(str_contains($early_body, 'decodeAuditPayload'), 'out-of-band branch manager decodes audit payloads for review');
+        assert_true(str_contains($early_body, 'Review note'), 'out-of-band branch manager exposes editable review notes');
+        assert_true(str_contains($early_body, 'Apply selected'), 'out-of-band branch manager exposes a selected conflict resolution action');
         assert_true(str_contains($early_body, 'Branch actions'), 'out-of-band branch manager keeps create and merge actions available');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
 

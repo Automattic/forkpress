@@ -1664,6 +1664,10 @@ function forkpress_handle_branch_review_conflict(): void {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose pending, needs-action, or reviewed for the conflict review status.');
     }
 
+    $review_note = forkpress_branch_post_value('note');
+    if (strlen($review_note) > 2000) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Keep conflict review notes under 2000 characters.');
+    }
     $notes = [
         'pending' => 'Marked pending from the WordPress branch switcher.',
         'needs-action' => 'Marked needs-action from the WordPress branch switcher.',
@@ -1676,7 +1680,7 @@ function forkpress_handle_branch_review_conflict(): void {
         '--status',
         $status,
         '--note',
-        $notes[$status],
+        $review_note !== '' ? $review_note : $notes[$status],
         '--reviewer',
         'wordpress-ui',
     ]);
@@ -1725,6 +1729,10 @@ function forkpress_handle_branch_resolve_conflict(): void {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose source or target for the conflict resolution.');
     }
 
+    $review_note = forkpress_branch_post_value('note');
+    if (strlen($review_note) > 2000) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Keep conflict resolution notes under 2000 characters.');
+    }
     $run = forkpress_branch_post_int('run');
     if ($apply_reviewed && $run !== null) {
         [$code, $output, $revalidation] = forkpress_branch_revalidate_merge_run($run);
@@ -1775,7 +1783,7 @@ function forkpress_handle_branch_resolve_conflict(): void {
         $note = $notes[$choice];
     }
     $resolve_args[] = '--note';
-    $resolve_args[] = $note;
+    $resolve_args[] = $review_note !== '' ? $review_note : $note;
     $resolve_args[] = '--reviewer';
     $resolve_args[] = 'wordpress-ui';
     [$code, $output] = forkpress_branch_run_cli($resolve_args);

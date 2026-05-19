@@ -558,6 +558,17 @@ assert_same(
     'branch conflict review admin action records a first-class merge review note'
 );
 
+$custom_conflict_review = run_branch_ui_action(
+    ['action' => 'forkpress_branch_review_conflict', 'conflict' => '7', 'run' => '42', 'status' => 'needs-action', 'note' => 'Check the source value with the editor before applying.'],
+    ['main', 'feature']
+);
+assert_same($custom_conflict_review['status'], 0, 'branch conflict review accepts editable notes');
+assert_same(
+    array_slice($custom_conflict_review['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-review', 'conflict', '7', '--status', 'needs-action', '--note', 'Check the source value with the editor before applying.', '--reviewer', 'wordpress-ui'],
+    'branch conflict review passes editable branch-manager notes to the CLI'
+);
+
 $invalid_conflict_review = run_branch_ui_action(
     ['action' => 'forkpress_branch_review_conflict', 'conflict' => '7', 'status' => 'done'],
     ['main', 'feature']
@@ -580,6 +591,17 @@ assert_same(
     array_slice($conflict_resolution['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'source', '--apply', '--note', 'Applied source choice from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
     'branch conflict resolution admin action applies a first-class merge resolution'
+);
+
+$custom_conflict_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'target', 'note' => 'Keep the production copy because the source branch is stale.'],
+    ['main', 'feature']
+);
+assert_same($custom_conflict_resolution['status'], 0, 'branch conflict resolution accepts editable notes');
+assert_same(
+    array_slice($custom_conflict_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'target', '--apply', '--note', 'Keep the production copy because the source branch is stale.', '--reviewer', 'wordpress-ui'],
+    'branch conflict resolution passes editable branch-manager notes to the CLI'
 );
 
 $invalid_conflict_resolution = run_branch_ui_action(
