@@ -100,6 +100,10 @@ steps:
       - $DOCKER_PLUGIN:
           image: "$DOCKER_NODE_IMAGE"
           propagate-environment: true
+          # `buildkite-agent` binary lives on the host. Mount it in so
+          # the artifact-upload step at the end of docs-validate.sh can
+          # find it on PATH inside the container.
+          mount-buildkite-agent: true
     agents:
       queue: default
     notify:
