@@ -18,20 +18,21 @@ steps:
   - label: ":crab: Linux tests (workspace, excl. CLI)"
     key: linux-tests
     command: .buildkite/commands/linux-tests.sh
-    # We run heavy work as root inside docker (see linux-tests.sh's chown
-    # trap). The chown trap protects future builds, but agents that ran
-    # previous builds without the trap can still hold root-owned files
-    # under `.build/`. The default `git clean -fxdq` (`-x` removes ignored
-    # paths) trips on those — drop `-x` so the cleanup only touches files
-    # git tracks. Cargo workspace tests don't touch `.build/`, so leaving
-    # stale ignored content there is harmless for this step.
-    env:
-      BUILDKITE_GIT_CLEAN_FLAGS: "-fdq"
     plugins:
       - $CI_TOOLKIT_PLUGIN
       - $DOCKER_PLUGIN:
           image: "$DOCKER_RUST_IMAGE"
           propagate-environment: true
+          # a8c BK has `DOCKER_USERNS_REMAP=true`, which would otherwise
+          # make container root map to an unprivileged subuid on the
+          # host (e.g. 100000). Anything we write under `.build/` then
+          # ends up owned by 100000:100000 on the host; the agent's
+          # `git clean -ffxdq` (run as `buildkite-agent`) can't remove
+          # those files and falls over on the next checkout. Forcing
+          # `--userns=host` keeps container root = host root, so the
+          # chown trap in our script actually restores
+          # `buildkite-agent` ownership before exit.
+          userns: host
           environment:
             - "CARGO_TERM_COLOR=always"
     agents:
@@ -47,15 +48,13 @@ steps:
     artifact_paths:
       - "target/x86_64-unknown-linux-musl/release/forkpress"
       - "target/x86_64-unknown-linux-musl/release/forkpress-dev"
-    # Same rationale as `linux-tests`: keep `git clean` away from `.build/`
-    # so a still-polluted agent doesn't fail before our chown trap can run.
-    env:
-      BUILDKITE_GIT_CLEAN_FLAGS: "-fdq"
     plugins:
       - $CI_TOOLKIT_PLUGIN
       - $DOCKER_PLUGIN:
           image: "$DOCKER_RUST_IMAGE"
           propagate-environment: true
+          # See `linux-tests` for why `userns: host` is required.
+          userns: host
           # static-php-cli queries `api.github.com/repos/.../releases` for
           # every dependency to discover the latest source URL. Unauth
           # requests share the agent's NAT IP rate limit (60/hr); after a
@@ -144,16 +143,15 @@ steps:
     command: .buildkite/commands/docs-validate.sh
     artifact_paths:
       - "docs-dist/**/*"
-    # Same rationale as the Linux Rust steps: drop `-x` so polluted
-    # `node_modules/` left root-owned by a previous docker run doesn't
-    # break the agent's checkout phase.
-    env:
-      BUILDKITE_GIT_CLEAN_FLAGS: "-fdq"
     plugins:
       - $CI_TOOLKIT_PLUGIN
       - $DOCKER_PLUGIN:
           image: "$DOCKER_NODE_IMAGE"
           propagate-environment: true
+          # See `linux-tests` for why `userns: host` is required —
+          # without it `node_modules/` ends up owned by an unmapped
+          # subuid that the agent can't clean up.
+          userns: host
     agents:
       queue: default
     notify:
