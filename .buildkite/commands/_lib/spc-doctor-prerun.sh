@@ -11,11 +11,13 @@
 #   spc_doctor_prerun x86_64-unknown-linux-musl
 #   spc_doctor_prerun x86_64-unknown-linux-musl-dev   # for FORKPRESS_RUNTIME_PROFILE=dev
 #
-# Keep `SPC_REF` here in sync with `SPC_REF` in `scripts/build-dist.sh`.
-# Drift is non-fatal: build-dist.sh fetches+checks-out the right ref
-# afterward, but doctor would have run against the older revision.
+# Keep this in sync with `scripts/build-dist.sh` by honoring
+# `FORKPRESS_STATIC_PHP_CLI_REF` first, with legacy `SPC_REF` as a
+# compatibility fallback. Drift is non-fatal: build-dist.sh
+# fetches+checks-out the right ref afterward, but doctor would have
+# run against the older revision.
 
-SPC_REF="${SPC_REF:-8d038f435da7845926ba425dfbae0278cd0e0746}"
+SPC_REF="${FORKPRESS_STATIC_PHP_CLI_REF:-${SPC_REF:-8d038f435da7845926ba425dfbae0278cd0e0746}}"
 
 spc_doctor_prerun() {
   local dist_name="$1"
