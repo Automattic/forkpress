@@ -25,7 +25,7 @@ jobs:
         if: env.RELEASE_PREPARE_TOKEN_PRESENT == 'true'
         run: gh api "repos/${GITHUB_REPOSITORY}" --jq .full_name >/dev/null
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: trunk
           fetch-depth: 0

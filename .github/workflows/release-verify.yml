@@ -58,7 +58,7 @@ jobs:
         env:
           RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ steps.ref.outputs.checkout_ref }}
           fetch-depth: 0
@@ -112,7 +112,7 @@ jobs:
       WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
       WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
 
@@ -143,7 +143,7 @@ jobs:
       # and the PHP/lib compilation when inputs haven't changed. Cache key
       # includes every input that affects the produced binaries.
       - name: Cache .build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .build
           key: >-
@@ -285,7 +285,7 @@ jobs:
             Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue | Out-Null
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: forkpress-${{ matrix.target }}
           path: |
