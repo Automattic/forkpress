@@ -75,6 +75,7 @@ const RUNTIME_BUNDLE: &[u8] = include_bytes!(env!("FORKPRESS_RUNTIME_BUNDLE"));
 const RUNTIME_BUNDLE_ID: &str = env!("FORKPRESS_RUNTIME_BUNDLE_ID");
 const FORKPRESS_COW_PARENT_LIFECYCLE_LOCK: &str = "FORKPRESS_COW_PARENT_LIFECYCLE_LOCK";
 const REMOTE_CLONE_SSH_CONNECT_TIMEOUT_SECONDS: u16 = 10;
+const REMOTE_CLONE_BOOT_DEPENDENCY_RETRIES: usize = 5;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -2926,26 +2927,68 @@ fn remote_clone_command(
         if cache.has_wp_load { "yes" } else { "no" }
     );
 
-    if let Some(branch) = args.branch {
+    if let Some(branch) = args.branch.clone() {
         prepare_runtime(layout)?;
         let runtime = PortableRuntime::from_layout(layout);
         let _lock = lock_cow_operations(layout)?;
         ensure_cow_file_view_ready(layout)?;
-        let report = branch_remote_site(
-            layout,
-            &runtime,
-            shared,
-            RemoteBranchOptions {
-                remote: manifest.name.clone(),
-                branch,
-                replace_existing: args.force,
-                url_hint: branchctl_url_hint(layout).ok(),
-            },
-        )?;
-        if report.replaced_existing {
+        let branch_existed_before_clone = cow_branch_exists(layout, &branch)?;
+        let url_hint = branchctl_url_hint(layout).ok();
+        let mut replace_existing = args.force;
+        let mut fetched_boot_dependencies = Vec::new();
+        let report = loop {
+            match branch_remote_site(
+                layout,
+                &runtime,
+                shared,
+                RemoteBranchOptions {
+                    remote: manifest.name.clone(),
+                    branch: branch.clone(),
+                    replace_existing,
+                    url_hint: url_hint.clone(),
+                },
+            ) {
+                Ok(report) => break report,
+                Err(error) => {
+                    let missing = remote_clone_missing_boot_dependency_from_error(
+                        &error, layout, &branch, &args,
+                    );
+                    let Some(missing) = missing else {
+                        return Err(error);
+                    };
+                    if fetched_boot_dependencies.contains(&missing)
+                        || fetched_boot_dependencies.len() >= REMOTE_CLONE_BOOT_DEPENDENCY_RETRIES
+                    {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "remote clone fetched boot dependency {} but the branch still did not boot",
+                                missing.display()
+                            )
+                        });
+                    }
+                    println!("  boot dep:  fetching {}", missing.display());
+                    remote_clone_fetch_boot_dependency(&args, &manifest.cache_root, &missing)
+                        .with_context(|| {
+                            format!(
+                                "remote clone branch preview needed {}, but ForkPress could not fetch it from the remote",
+                                missing.display()
+                            )
+                        })?;
+                    fetched_boot_dependencies.push(missing);
+                    replace_existing = true;
+                }
+            }
+        };
+        if report.replaced_existing && branch_existed_before_clone {
             println!(
                 "forkpress: replaced existing branch '{}' from remote cache '{}'",
                 report.branch, report.remote.name
+            );
+        } else if !fetched_boot_dependencies.is_empty() {
+            println!(
+                "forkpress: recreated branch '{}' after fetching {} boot dependency file(s)",
+                report.branch,
+                fetched_boot_dependencies.len()
             );
         }
         println!(
@@ -3091,6 +3134,59 @@ fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsS
     out
 }
 
+fn remote_clone_fetch_boot_dependency(
+    args: &RemoteCloneArgs,
+    cache_root: &Path,
+    relative_path: &Path,
+) -> Result<()> {
+    let rsync_args = remote_clone_boot_dependency_rsync_args(args, cache_root, relative_path);
+    let output = Command::new("rsync")
+        .args(&rsync_args)
+        .output()
+        .context("failed to start rsync while fetching a branch boot dependency")?;
+    if !output.status.success() {
+        bail!(
+            "rsync could not fetch {} from {} ({})\n\nrsync stderr:\n{}",
+            relative_path.display(),
+            remote_clone_rsync_source(&args.ssh, &args.remote_path),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    write_filtered_output(&output.stdout, &output.stderr)?;
+    Ok(())
+}
+
+fn remote_clone_boot_dependency_rsync_args(
+    args: &RemoteCloneArgs,
+    cache_root: &Path,
+    relative_path: &Path,
+) -> Vec<OsString> {
+    let mut out = vec![OsString::from("-azR")];
+    if let Some(ssh_command) = remote_clone_rsync_ssh_command(args) {
+        out.push(OsString::from("-e"));
+        out.push(OsString::from(ssh_command));
+    }
+    out.push(OsString::from(remote_clone_rsync_relative_source(
+        &args.ssh,
+        &args.remote_path,
+        relative_path,
+    )));
+    out.push(cache_root.as_os_str().to_os_string());
+    out
+}
+
+fn remote_clone_rsync_relative_source(
+    ssh: &str,
+    remote_path: &str,
+    relative_path: &Path,
+) -> String {
+    let mut path = remote_path.trim_end_matches('/').to_string();
+    path.push_str("/./");
+    path.push_str(&relative_path.to_string_lossy().replace('\\', "/"));
+    format!("{ssh}:{path}")
+}
+
 fn remote_clone_rsync_ssh_command(args: &RemoteCloneArgs) -> Option<String> {
     if args.ssh_key.is_none() && args.ssh_port.is_none() {
         return None;
@@ -3208,6 +3304,105 @@ fn remote_clone_default_excludes(include_uploads: bool) -> Vec<&'static str> {
         excludes.insert(0, "wp-content/uploads/");
     }
     excludes
+}
+
+fn remote_clone_missing_boot_dependency_from_error(
+    error: &anyhow::Error,
+    layout: &Layout,
+    branch: &str,
+    args: &RemoteCloneArgs,
+) -> Option<PathBuf> {
+    let mut message = String::new();
+    for cause in error.chain() {
+        message.push_str(&cause.to_string());
+        message.push('\n');
+    }
+    remote_clone_missing_boot_dependency(
+        &message,
+        &cow_branch_root(layout, branch),
+        args.include_uploads,
+        args.full_sync,
+    )
+}
+
+fn remote_clone_missing_boot_dependency(
+    message: &str,
+    branch_root: &Path,
+    include_uploads: bool,
+    full_sync: bool,
+) -> Option<PathBuf> {
+    if full_sync {
+        return None;
+    }
+
+    let mut quoted = false;
+    let mut current = String::new();
+    for ch in message.chars() {
+        if ch == '\'' {
+            if quoted {
+                if let Some(relative) =
+                    remote_clone_recoverable_boot_dependency(&current, branch_root, include_uploads)
+                {
+                    return Some(relative);
+                }
+                current.clear();
+            }
+            quoted = !quoted;
+        } else if quoted {
+            current.push(ch);
+        }
+    }
+    None
+}
+
+fn remote_clone_recoverable_boot_dependency(
+    candidate: &str,
+    branch_root: &Path,
+    include_uploads: bool,
+) -> Option<PathBuf> {
+    let path = Path::new(candidate);
+    let relative = path.strip_prefix(branch_root).ok()?;
+    if !remote_clone_relative_path_is_safe(relative) {
+        return None;
+    }
+    let relative_slash = relative.to_string_lossy().replace('\\', "/");
+    if remote_clone_boot_dependency_prefixes(include_uploads)
+        .iter()
+        .any(|prefix| relative_slash.starts_with(prefix))
+    {
+        Some(relative.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn remote_clone_relative_path_is_safe(path: &Path) -> bool {
+    let mut has_component = false;
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(_) => {
+                has_component = true;
+            }
+            _ => return false,
+        }
+    }
+    has_component
+}
+
+fn remote_clone_boot_dependency_prefixes(include_uploads: bool) -> Vec<&'static str> {
+    let mut prefixes = vec![
+        "wp-content/cache/",
+        "wp-content/upgrade/",
+        "wp-content/backups/",
+        "wp-content/backup-db/",
+        "wp-content/ai1wm-backups/",
+        "wp-content/updraft/",
+        "wp-content/wflogs/",
+    ];
+    if !include_uploads {
+        prefixes.insert(0, "wp-content/uploads/");
+    }
+    prefixes
 }
 
 fn remote_add_command(layout: &Layout, args: RemoteAddArgs) -> Result<i32> {
@@ -8488,6 +8683,86 @@ mod git_helper_tests {
         assert!(rsync.contains(&"wp-content/cache/".to_string()));
         assert!(rsync.contains(&"wp-content/upgrade/".to_string()));
         assert!(rsync.contains(&"deploy@example.com:/srv/www/example/".to_string()));
+    }
+
+    #[test]
+    fn remote_clone_detects_missing_excluded_upload_boot_dependency() {
+        let branch_root = Path::new("/tmp/forkpress/site/feature");
+        let message = "branch preview PHP exception while booting http://feature.wp.localhost:18080/: Failed opening required '/tmp/forkpress/site/feature/wp-content/uploads/forkpress-required/bootstrap.php' (include_path='.:') in /tmp/forkpress/site/feature/wp-content/plugins/forkpress-upload-loader/forkpress-upload-loader.php:5";
+
+        assert_eq!(
+            remote_clone_missing_boot_dependency(message, branch_root, false, false).as_deref(),
+            Some(Path::new(
+                "wp-content/uploads/forkpress-required/bootstrap.php"
+            ))
+        );
+        assert_eq!(
+            remote_clone_missing_boot_dependency(message, branch_root, true, false),
+            None
+        );
+        assert_eq!(
+            remote_clone_missing_boot_dependency(message, branch_root, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_clone_missing_boot_dependency_ignores_unmanaged_paths() {
+        let branch_root = Path::new("/tmp/forkpress/site/feature");
+        let plugin_message = "Failed opening required '/tmp/forkpress/site/feature/wp-content/plugins/plugin/vendor/autoload.php'";
+        let outside_message =
+            "Failed opening required '/tmp/forkpress/site/other/wp-content/uploads/file.php'";
+
+        assert_eq!(
+            remote_clone_missing_boot_dependency(plugin_message, branch_root, false, false),
+            None
+        );
+        assert_eq!(
+            remote_clone_missing_boot_dependency(outside_message, branch_root, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_clone_boot_dependency_rsync_fetches_single_relative_path() {
+        let clone = RemoteCloneArgs {
+            name: "production".to_string(),
+            ssh: "deploy@example.com".to_string(),
+            ssh_key: Some(PathBuf::from("/Users/alex/.ssh/forkpress id")),
+            ssh_port: Some(2222),
+            remote_path: "/srv/www/example/".to_string(),
+            branch: Some("production-main".to_string()),
+            remote_url: Some("https://example.com".to_string()),
+            local_url: None,
+            include_uploads: false,
+            full_sync: false,
+            excludes: Vec::new(),
+            no_delete: false,
+            force: false,
+        };
+
+        let rsync = remote_clone_boot_dependency_rsync_args(
+            &clone,
+            Path::new("/tmp/cache"),
+            Path::new("wp-content/uploads/forkpress-required/bootstrap.php"),
+        );
+        let rsync: Vec<String> = rsync
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(rsync[0], "-azR");
+        assert_eq!(
+            rsync.iter().position(|arg| arg == "-e").map(|index| {
+                rsync
+                    .get(index + 1)
+                    .expect("missing rsync ssh command after -e")
+                    .as_str()
+            }),
+            Some("ssh -i '/Users/alex/.ssh/forkpress id' -p 2222 -o ConnectTimeout=10")
+        );
+        assert!(rsync.contains(&"deploy@example.com:/srv/www/example/./wp-content/uploads/forkpress-required/bootstrap.php".to_string()));
+        assert!(rsync.contains(&"/tmp/cache".to_string()));
     }
 
     #[test]

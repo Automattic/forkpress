@@ -160,7 +160,18 @@ where
     write_filtered_output(&output.stdout, &output.stderr)?;
 
     if !output.status.success() {
-        bail!("{script_rel} exited with status {}", output.status);
+        let stdout = output_excerpt(&String::from_utf8_lossy(&output.stdout));
+        let stderr = output_excerpt(&filtered_stderr_text(&output.stderr));
+        let mut message = format!("{script_rel} exited with status {}", output.status);
+        if !stdout.is_empty() {
+            message.push_str("\nstdout:\n");
+            message.push_str(&stdout);
+        }
+        if !stderr.is_empty() {
+            message.push_str("\nstderr:\n");
+            message.push_str(&stderr);
+        }
+        bail!("{message}");
     }
 
     Ok(())
@@ -177,11 +188,30 @@ pub fn write_filtered_output(stdout: &[u8], stderr: &[u8]) -> Result<()> {
     let mut out = std::io::stdout().lock();
     out.write_all(stdout)?;
 
-    let stderr_text = String::from_utf8_lossy(stderr);
-    for line in stderr_text.lines() {
-        if !line.contains(STARTUP_WARNING_FILTER) {
-            writeln!(std::io::stderr().lock(), "{line}")?;
-        }
+    let stderr_text = filtered_stderr_text(stderr);
+    if !stderr_text.is_empty() {
+        writeln!(std::io::stderr().lock(), "{stderr_text}")?;
     }
     Ok(())
+}
+
+fn filtered_stderr_text(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| !line.contains(STARTUP_WARNING_FILTER))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn output_excerpt(text: &str) -> String {
+    const LIMIT: usize = 4000;
+    let trimmed = text.trim();
+    if trimmed.len() <= LIMIT {
+        return trimmed.to_string();
+    }
+    let mut end = LIMIT;
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...\n[truncated]", &trimmed[..end])
 }
