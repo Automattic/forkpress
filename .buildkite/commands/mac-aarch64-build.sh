@@ -26,5 +26,22 @@ FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
 echo "--- :crab: cargo build --release forkpress ($TARGET)"
 cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
 
+echo "--- :fastlane: Installing Developer ID cert via match"
+bundle install
+bundle exec fastlane set_up_signing
+
+# Sign before the e2e so the test exercises the same hardened-runtime
+# binary the artifact upload ships.
+echo "--- :lock: Codesigning forkpress ($TARGET)"
+scripts/macos/codesign.sh "target/$TARGET/release/forkpress" \
+  --entitlements scripts/macos/entitlements.plist
+
 echo "--- :cow: COW strategy e2e (APFS sparsebundle)"
 FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE=1 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
+
+if [ "${FORKPRESS_SKIP_NOTARIZE:-0}" = "1" ]; then
+  echo "--- :fast_forward: FORKPRESS_SKIP_NOTARIZE=1 — skipping notarization"
+else
+  echo "--- :apple: Notarizing forkpress ($TARGET)"
+  scripts/macos/notarize.sh "target/$TARGET/release/forkpress"
+fi

@@ -21,3 +21,15 @@ FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo build --release --target "$TARGET" -p f
 
 ls -lh "target/$TARGET/release/forkpress"
 file "target/$TARGET/release/forkpress" || true
+
+echo "--- :fastlane: Installing Developer ID cert via match"
+bundle install
+bundle exec fastlane set_up_signing
+
+# Sign as a smoke check on the codesign chain, but skip notarization —
+# this binary has no embedded runtime (built with FORKPRESS_RUNTIME_BUNDLE=
+# /dev/null above) and is unrunnable, so notarizing it would waste the
+# notary API quota on a non-shippable artifact.
+echo "--- :lock: Codesigning forkpress ($TARGET)"
+scripts/macos/codesign.sh "target/$TARGET/release/forkpress" \
+  --entitlements scripts/macos/entitlements.plist
