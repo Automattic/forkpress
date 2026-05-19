@@ -64,7 +64,7 @@ jobs:
             printf 'ref=%s\n' "$MERGE_COMMIT_SHA" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ steps.requested_ref.outputs.ref }}
           fetch-depth: 0
@@ -135,7 +135,7 @@ jobs:
       WINDOWS_CODESIGN_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_CERT_BASE64 }}
       WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
 
@@ -166,7 +166,7 @@ jobs:
       # and the PHP/lib compilation when inputs haven't changed. Cache key
       # includes every input that affects the produced binaries.
       - name: Cache .build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .build
           key: >-
@@ -312,7 +312,7 @@ jobs:
             Dismount-DiskImage -ImagePath $vhdPath -ErrorAction SilentlyContinue | Out-Null
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: forkpress-${{ matrix.target }}
           path: |
@@ -333,7 +333,7 @@ jobs:
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           fetch-depth: 0
@@ -346,7 +346,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: forkpress-*
           merge-multiple: true
@@ -382,7 +382,7 @@ jobs:
             exit 1
           fi
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           target_commitish: ${{ needs.preflight.outputs.checkout_ref }}
@@ -394,7 +394,7 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ needs.preflight.outputs.is_prerelease }}
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         if: needs.preflight.outputs.is_prerelease != 'true'
         with:
           repository: Automattic/homebrew-tap
