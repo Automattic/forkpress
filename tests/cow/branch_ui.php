@@ -314,6 +314,10 @@ assert_same($create['status'], 0, 'branch create admin action exits cleanly');
 assert_same($create_payload['success'] ?? null, true, 'branch create admin action returns JSON success');
 assert_same($create_payload['message'] ?? null, 'Created branch new_feature.', 'branch create admin action reports the created branch');
 assert_same($create_payload['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create admin action redirects to the new branch admin');
+assert_same($create_payload['branches'][0]['name'] ?? null, 'new_feature', 'branch create response marks the new branch as current in refreshed switcher data');
+assert_same($create_payload['branches'][0]['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create response gives the new branch a usable admin URL');
+assert_same($create_payload['branches'][1]['url'] ?? null, 'http://wp.localhost:18080/wp-admin/', 'branch create response gives main its own admin URL');
+assert_same($create_payload['branches'][2]['url'] ?? null, 'http://feature.wp.localhost:18080/wp-admin/', 'branch create response keeps existing branch URLs distinct');
 assert_same(count($create['argv']), 1, 'branch create admin action invokes ForkPress CLI once');
 assert_same(
     array_slice($create['argv'][0] ?? [], 1),
@@ -1148,7 +1152,8 @@ $switcher_render = run_branch_ui_action(
 $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
 assert_true(str_contains($switcher_html, 'Open branch manager'), 'branch switcher links to the full branch manager page');
-assert_true(str_contains($switcher_html, '/wp-admin/admin.php?page=forkpress-branches'), 'branch switcher uses the wp-admin branch manager URL');
+assert_true(str_contains($switcher_html, '/_forkpress/branches'), 'branch switcher uses the out-of-band branch manager URL');
+assert_true(str_contains($switcher_html, "window.location.assign(payload.url)"), 'branch switcher navigates to the new branch after create');
 assert_true(str_contains($switcher_html, 'forkpress_branch_history'), 'branch switcher renders branch history action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_history'), 'branch switcher renders branch history nonce');
 assert_true(str_contains($switcher_html, 'Show merge history'), 'branch switcher renders branch history button text');
@@ -1224,59 +1229,10 @@ $admin_page_html = (string)($admin_page_payload['html'] ?? '');
 $admin_page_menus = $admin_page_payload['menus'] ?? [];
 assert_same($admin_page['status'], 0, 'branch manager admin page renders cleanly');
 assert_true(str_contains($admin_page_html, '<h1>ForkPress Branches</h1>'), 'branch manager admin page has a wp-admin page title');
-assert_true(str_contains($admin_page_html, 'action="\/wp-admin\/admin-post.php"') || str_contains($admin_page_html, 'action="/wp-admin/admin-post.php"'), 'branch manager admin page posts to admin-post.php');
-assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_create"'), 'branch manager admin page renders create form action');
-assert_true(str_contains($admin_page_html, 'id="forkpress-branch-create-name"'), 'branch manager admin page renders branch name input');
-assert_true(str_contains($admin_page_html, 'name="from"'), 'branch manager admin page renders source branch selector for creates');
-assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_merge"'), 'branch manager admin page renders merge form action');
-assert_true(str_contains($admin_page_html, 'name="source"'), 'branch manager admin page renders merge source selector');
-assert_true(str_contains($admin_page_html, 'name="target"'), 'branch manager admin page renders merge target selector');
-assert_true(str_contains($admin_page_html, 'id="forkpress-branch-history-load"'), 'branch manager admin page renders merge history button');
-assert_true(str_contains($admin_page_html, 'id="forkpress-branch-tree-load"'), 'branch manager admin page renders branch tree button');
-assert_true(str_contains($admin_page_html, 'forkpress_branch_history'), 'branch manager admin page renders merge history action');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_history'), 'branch manager admin page renders merge history nonce');
-assert_true(str_contains($admin_page_html, 'forkpress_branch_tree'), 'branch manager admin page renders branch tree action');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_tree'), 'branch manager admin page renders branch tree nonce');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-history-list'), 'branch manager admin page renders merge history list target');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-tree-list'), 'branch manager admin page renders branch tree list target');
-assert_true(str_contains($admin_page_html, "source + ' -> ' + target"), 'branch manager admin page renders source-to-target history rows');
-assert_true(str_contains($admin_page_html, "target + ' <- ' + branches[target].join(', ')"), 'branch manager admin page renders target-to-source branch tree rows');
-assert_true(str_contains($admin_page_html, 'forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit action');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit nonce');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-review-conflicts'), 'branch manager admin page renders conflict drilldown buttons');
-assert_true(str_contains($admin_page_html, 'function fetchConflicts'), 'branch manager admin page renders conflict drilldown fetch handler');
-assert_true(str_contains($admin_page_html, 'function renderConflicts'), 'branch manager admin page renders conflict drilldown display handler');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-list'), 'branch manager admin page renders conflict list target');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-actions'), 'branch manager admin page renders conflict action controls');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_review_conflict'), 'branch manager admin page renders conflict review nonce');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_resolve_conflict'), 'branch manager admin page renders conflict resolution nonce');
-assert_true(str_contains($admin_page_html, 'function fetchConflictReview'), 'branch manager admin page renders conflict review handler');
-assert_true(str_contains($admin_page_html, 'function fetchConflictResolution'), 'branch manager admin page renders conflict resolution handler');
-assert_true(str_contains($admin_page_html, 'function conflictResolutionChoiceAvailable'), 'branch manager admin page checks conflict resolution availability');
-assert_true(str_contains($admin_page_html, 'function conflictApplyReviewedAvailable'), 'branch manager admin page checks apply-reviewed availability');
-assert_true(str_contains($admin_page_html, 'Use source'), 'branch manager admin page renders source resolution action');
-assert_true(str_contains($admin_page_html, 'Keep target'), 'branch manager admin page renders target resolution action');
-assert_true(str_contains($admin_page_html, 'Apply reviewed'), 'branch manager admin page renders apply-reviewed action');
+assert_true(str_contains($admin_page_html, 'Open ForkPress branch manager'), 'wp-admin branch page links to the out-of-band manager');
+assert_true(str_contains($admin_page_html, '/_forkpress/branches'), 'wp-admin branch page points at the out-of-band manager URL');
+assert_true(!str_contains($admin_page_html, 'id="forkpress-branch-create-name"'), 'wp-admin branch page no longer owns branch creation UI');
 assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
-
-$admin_page_with_driver = run_branch_ui_action(
-    ['action' => 'forkpress_branch_admin_page'],
-    ['main', 'feature'],
-    false,
-    true,
-    true,
-    ['FORKPRESS_PLUGIN_MERGE_DRIVERS' => json_encode(['forkpress-plugin-graph' => realpath($plugin_driver)], JSON_UNESCAPED_SLASHES)]
-);
-$admin_page_with_driver_payload = decode_branch_ui_payload($admin_page_with_driver);
-$admin_page_with_driver_html = (string)($admin_page_with_driver_payload['html'] ?? '');
-assert_same($admin_page_with_driver['status'], 0, 'branch manager admin page with plugin driver renders cleanly');
-assert_true(str_contains($admin_page_with_driver_html, 'forkpress_branch_run_plugin_driver'), 'branch manager admin page renders plugin driver action');
-assert_true(str_contains($admin_page_with_driver_html, 'nonce-forkpress_branch_run_plugin_driver'), 'branch manager admin page renders plugin driver nonce');
-assert_true(str_contains($admin_page_with_driver_html, 'pluginDrivers'), 'branch manager admin page exposes approved plugin driver metadata');
-assert_true(str_contains($admin_page_with_driver_html, $driver_key), 'branch manager admin page exposes the approved plugin driver key');
-assert_true(str_contains($admin_page_with_driver_html, 'function driverForConflict'), 'branch manager admin page renders plugin driver matching helper');
-assert_true(str_contains($admin_page_with_driver_html, 'function fetchPluginDriver'), 'branch manager admin page renders plugin driver client handler');
-assert_true(str_contains($admin_page_with_driver_html, 'Run plugin driver'), 'branch manager admin page renders plugin driver button text');
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],

@@ -144,7 +144,7 @@ function forkpress_cow_acquire_request_lock(): bool {
 
 function forkpress_cow_is_admin_branch_action(string $path): bool {
     $action = $_REQUEST['action'] ?? '';
-    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
+    if (!is_string($action) || !in_array($action, ['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_history', 'forkpress_branch_tree', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'], true)) {
         return false;
     }
     if ($path === '/wp-admin/admin-post.php') {
@@ -230,12 +230,16 @@ function forkpress_cow_branch_url(string $branch, string $uri = '/wp-admin/'): s
     return 'http://' . $host . $port . $uri;
 }
 
+function forkpress_cow_branch_manager_url(string $branch): string {
+    return forkpress_cow_branch_url($branch, '/_forkpress/branches');
+}
+
 function forkpress_cow_request_can_write(): bool {
     $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     return !in_array($method, ['GET', 'HEAD', 'OPTIONS'], true);
 }
 
-function forkpress_cow_branch_names(string $current_branch): array {
+function forkpress_cow_branch_names(string $current_branch, array $extra_branches = []): array {
     $branch_list = getenv('FORKPRESS_BRANCH_LIST') ?: '';
     $branches = [];
     if (is_string($branch_list) && $branch_list !== '' && is_readable($branch_list)) {
@@ -246,6 +250,7 @@ function forkpress_cow_branch_names(string $current_branch): array {
             }
         }
     }
+    $branches = array_merge($branches, $extra_branches);
     if (!$branches) {
         $branches[] = $current_branch;
     }
@@ -261,14 +266,17 @@ function forkpress_cow_branch_names(string $current_branch): array {
     return $branches;
 }
 
-function forkpress_cow_branch_switcher_data(string $current_branch): array {
-    return array_map(static function (string $branch) use ($current_branch): array {
+function forkpress_cow_branch_switcher_data(string $current_branch, string $uri = '/wp-admin/', array $extra_branches = []): array {
+    return array_map(static function (string $branch) use ($current_branch, $uri): array {
         return [
             'name' => $branch,
-            'url' => forkpress_cow_branch_url($branch),
+            'url' => forkpress_cow_branch_url($branch, $uri),
+            'siteUrl' => forkpress_cow_branch_url($branch, '/'),
+            'adminUrl' => forkpress_cow_branch_url($branch, '/wp-admin/'),
+            'managerUrl' => forkpress_cow_branch_manager_url($branch),
             'current' => $branch === $current_branch,
         ];
-    }, forkpress_cow_branch_names($current_branch));
+    }, forkpress_cow_branch_names($current_branch, $extra_branches));
 }
 
 function forkpress_cow_branch_finish_json(int $status, string $url, bool $success, string $message, array $data = []): void {
@@ -516,6 +524,28 @@ function forkpress_cow_branch_crash_recovery_summary(array $report, int $run): a
     ];
 }
 
+function forkpress_cow_branch_history_summary(array $report, int $limit): array {
+    $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    return [
+        'records' => $records,
+        'recordCount' => count($records),
+        'limit' => $limit,
+        'historyCommand' => 'forkpress branch history --limit ' . $limit . ' --format json',
+        'audit' => $report,
+    ];
+}
+
+function forkpress_cow_branch_tree_summary(array $report, int $limit): array {
+    $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    return [
+        'records' => $records,
+        'recordCount' => count($records),
+        'limit' => $limit,
+        'treeCommand' => 'forkpress branch tree --limit ' . $limit . ' --format json',
+        'audit' => $report,
+    ];
+}
+
 function forkpress_cow_branch_conflict_audit_summary(array $report, int $run, array $filters = []): array {
     $records = is_array($report['conflicts'] ?? null) ? array_values($report['conflicts']) : [];
     $total = count($records);
@@ -528,11 +558,52 @@ function forkpress_cow_branch_conflict_audit_summary(array $report, int $run, ar
         break;
     }
 
+    $conflict_summary = is_array($report['conflict_summary'] ?? null) ? $report['conflict_summary'] : null;
+    if ($conflict_summary === null) {
+        $conflict_summary = [
+            'total' => count($records),
+            'resolved' => 0,
+            'unresolved' => 0,
+            'by_lifecycle' => [],
+            'by_next_action' => [],
+            'by_scope' => [],
+        ];
+        foreach ($records as $record) {
+            if (!is_array($record)) {
+                continue;
+            }
+            $lifecycle = trim((string)($record['lifecycle_state'] ?? $record['latest_event_lifecycle_state'] ?? 'unreviewed'));
+            if ($lifecycle === '') {
+                $lifecycle = 'unreviewed';
+            }
+            $next_action = trim((string)($record['next_action'] ?? 'review'));
+            if ($next_action === '') {
+                $next_action = 'review';
+            }
+            $scope = 'db';
+            $table = (string)($record['table_name'] ?? '');
+            if ($table === '__files__' || isset($record['path'])) {
+                $scope = 'files';
+            } elseif (isset($record['plugin']) || isset($record['plugin_object'])) {
+                $scope = 'plugin';
+            }
+            $conflict_summary['by_lifecycle'][$lifecycle] = (int)($conflict_summary['by_lifecycle'][$lifecycle] ?? 0) + 1;
+            $conflict_summary['by_next_action'][$next_action] = (int)($conflict_summary['by_next_action'][$next_action] ?? 0) + 1;
+            $conflict_summary['by_scope'][$scope] = (int)($conflict_summary['by_scope'][$scope] ?? 0) + 1;
+            if ($lifecycle === 'resolved') {
+                $conflict_summary['resolved']++;
+            } else {
+                $conflict_summary['unresolved']++;
+            }
+        }
+    }
+
     return [
         'run' => $run,
         'records' => $records,
         'recordCount' => count($records),
         'totalConflicts' => $total,
+        'conflictSummary' => $conflict_summary,
         'filters' => $filters,
         'audit' => $report,
         'auditCommand' => forkpress_cow_branch_merge_audit_command($run, $filters) . ' --format json',
@@ -592,7 +663,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             forkpress_cow_branch_url($branch, '/wp-admin/'),
             true,
             'Created branch ' . $branch . '.',
-            ['branches' => forkpress_cow_branch_switcher_data($current_branch)]
+            ['branches' => forkpress_cow_branch_switcher_data($branch, '/wp-admin/', [$branch, 'main'])]
         );
         return true;
     }
@@ -627,7 +698,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
                 $message,
                 [
                     'type' => 'warning',
-                    'branches' => forkpress_cow_branch_switcher_data($current_branch),
+                    'branches' => forkpress_cow_branch_switcher_data($target, '/wp-admin/'),
                     'mergeStatus' => $summary['status'],
                     'conflicts' => $conflicts,
                     'run' => $run,
@@ -641,7 +712,67 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             forkpress_cow_branch_url($target, '/wp-admin/'),
             true,
             'Merged ' . $source . ' into ' . $target . '.',
-            ['branches' => forkpress_cow_branch_switcher_data($current_branch)]
+            ['branches' => forkpress_cow_branch_switcher_data($target, '/wp-admin/')]
+        );
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_history') {
+        $limit = forkpress_cow_branch_post_int('limit') ?? 10;
+        if ($limit < 1 || $limit > 50) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge history limit from 1 to 50.');
+            return true;
+        }
+
+        [$code, $output] = forkpress_cow_branch_run_cli(['history', '--limit', (string)$limit, '--format', 'json']);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect merge history.');
+            return true;
+        }
+        $report = json_decode($output, true);
+        if (!is_array($report)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid merge history JSON.');
+            return true;
+        }
+
+        $summary = forkpress_cow_branch_history_summary($report, $limit);
+        $count = (int)($summary['recordCount'] ?? 0);
+        forkpress_cow_branch_finish_json(
+            200,
+            $current_url,
+            true,
+            $count > 0 ? 'Loaded ' . $count . ' merge history ' . ($count === 1 ? 'run.' : 'runs.') : 'No merge history found.',
+            $summary
+        );
+        return true;
+    }
+
+    if ($action === 'forkpress_branch_tree') {
+        $limit = forkpress_cow_branch_post_int('limit') ?? 20;
+        if ($limit < 1 || $limit > 50) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a branch tree limit from 1 to 50.');
+            return true;
+        }
+
+        [$code, $output] = forkpress_cow_branch_run_cli(['tree', '--limit', (string)$limit, '--format', 'json']);
+        if ($code !== 0) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect the branch tree.');
+            return true;
+        }
+        $report = json_decode($output, true);
+        if (!is_array($report)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid branch tree JSON.');
+            return true;
+        }
+
+        $summary = forkpress_cow_branch_tree_summary($report, $limit);
+        $count = (int)($summary['recordCount'] ?? 0);
+        forkpress_cow_branch_finish_json(
+            200,
+            $current_url,
+            true,
+            $count > 0 ? 'Loaded ' . $count . ' branch tree ' . ($count === 1 ? 'edge.' : 'edges.') : 'No branch tree edges found.',
+            $summary
         );
         return true;
     }
@@ -1028,6 +1159,613 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
     }
 
     return false;
+}
+
+function forkpress_cow_json_encode($value): string {
+    $json = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    return is_string($json) ? $json : 'null';
+}
+
+function forkpress_cow_branch_manager_html(string $current_branch): string {
+    return <<<HTML
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ForkPress Branches</title>
+<style>
+    :root {
+        color-scheme: light;
+        --bg: #f6f7f7;
+        --panel: #ffffff;
+        --ink: #1d2327;
+        --muted: #646970;
+        --line: #dcdcde;
+        --accent: #2271b1;
+        --accent-strong: #135e96;
+        --conflict: #b35c00;
+        --danger: #b32d2e;
+        --ok: #008a20;
+    }
+    * { box-sizing: border-box; }
+    body {
+        background: var(--bg);
+        color: var(--ink);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+    }
+    .fp-shell {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        min-height: 100vh;
+    }
+    .fp-topbar {
+        align-items: center;
+        background: #1d2327;
+        color: #fff;
+        display: flex;
+        gap: 18px;
+        min-height: 54px;
+        padding: 0 20px;
+    }
+    .fp-brand { font-size: 15px; font-weight: 700; }
+    .fp-current {
+        background: #2c3338;
+        border: 1px solid #50575e;
+        border-radius: 999px;
+        color: #f0f0f1;
+        font-size: 12px;
+        padding: 5px 10px;
+    }
+    .fp-open-admin {
+        color: #9ecbff;
+        font-size: 13px;
+        margin-left: auto;
+        text-decoration: none;
+    }
+    .fp-layout {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: minmax(0, 1fr) 360px;
+        padding: 18px;
+    }
+    .fp-panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        min-width: 0;
+    }
+    .fp-graph-head, .fp-detail-head {
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        padding: 14px 16px;
+    }
+    h1, h2 { font-size: 16px; line-height: 1.25; margin: 0; }
+    .fp-muted { color: var(--muted); font-size: 12px; }
+    .fp-graph-wrap {
+        min-height: 520px;
+        overflow: auto;
+        padding: 12px;
+    }
+    .fp-graph {
+        display: block;
+        min-height: 440px;
+        min-width: 760px;
+    }
+    .fp-lane-label { fill: #50575e; font-size: 12px; font-weight: 650; }
+    .fp-lane-line { stroke: #dcdcde; stroke-width: 2; }
+    .fp-edge { fill: none; stroke-width: 3; }
+    .fp-edge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
+    .fp-node { cursor: pointer; stroke: #fff; stroke-width: 3; }
+    .fp-node.is-current { stroke: #1d2327; stroke-width: 4; }
+    .fp-node.is-conflict { fill: var(--conflict); }
+    .fp-node-label { fill: #1d2327; font-size: 11px; font-weight: 700; pointer-events: none; }
+    .fp-conflict-badge { fill: var(--danger); }
+    .fp-badge-text { fill: #fff; font-size: 10px; font-weight: 700; pointer-events: none; }
+    .fp-side {
+        display: grid;
+        gap: 18px;
+        min-width: 0;
+    }
+    .fp-detail-body, .fp-actions-body {
+        display: grid;
+        gap: 12px;
+        padding: 14px 16px;
+    }
+    .fp-kv {
+        display: grid;
+        gap: 8px;
+    }
+    .fp-kv div {
+        border-bottom: 1px solid #f0f0f1;
+        display: grid;
+        gap: 4px;
+        padding-bottom: 8px;
+    }
+    .fp-kv span:first-child {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+    .fp-kv span:last-child {
+        font-size: 13px;
+        overflow-wrap: anywhere;
+    }
+    .fp-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    button, .fp-button {
+        align-items: center;
+        background: #fff;
+        border: 1px solid #8c8f94;
+        border-radius: 6px;
+        color: var(--ink);
+        cursor: pointer;
+        display: inline-flex;
+        font-size: 13px;
+        font-weight: 600;
+        min-height: 32px;
+        padding: 6px 10px;
+        text-decoration: none;
+    }
+    button:hover, .fp-button:hover { border-color: var(--accent); color: var(--accent-strong); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover { background: var(--accent-strong); color: #fff; }
+    button.danger { border-color: var(--danger); color: var(--danger); }
+    button:disabled { cursor: progress; opacity: .68; }
+    .fp-status {
+        border-radius: 6px;
+        display: none;
+        font-size: 13px;
+        padding: 10px 12px;
+    }
+    .fp-status.is-visible { display: block; }
+    .fp-status.ok { background: #edfaef; color: #005c12; }
+    .fp-status.warn { background: #fff4e5; color: #713f00; }
+    .fp-status.error { background: #fcf0f1; color: #8a2424; }
+    details.fp-actions summary {
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 700;
+        padding: 14px 16px;
+    }
+    .fp-form {
+        display: grid;
+        gap: 10px;
+    }
+    .fp-field {
+        display: grid;
+        gap: 4px;
+    }
+    .fp-field label {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+    input, select {
+        border: 1px solid #8c8f94;
+        border-radius: 6px;
+        font-size: 13px;
+        height: 34px;
+        padding: 5px 8px;
+        width: 100%;
+    }
+    .fp-conflicts {
+        display: grid;
+        gap: 10px;
+    }
+    .fp-conflict {
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--conflict);
+        border-radius: 6px;
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+    }
+    .fp-conflict-title { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+    .fp-conflict-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    pre {
+        background: #f6f7f7;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 12px;
+        max-height: 220px;
+        overflow: auto;
+        padding: 10px;
+        white-space: pre-wrap;
+    }
+    @media (max-width: 980px) {
+        .fp-layout { grid-template-columns: 1fr; padding: 12px; }
+        .fp-topbar { flex-wrap: wrap; padding: 10px 14px; }
+        .fp-open-admin { margin-left: 0; }
+    }
+</style>
+</head>
+<body>
+<div class="fp-shell">
+    <header class="fp-topbar">
+        <div class="fp-brand">ForkPress Branches</div>
+        <div class="fp-current" id="fp-current"></div>
+        <a class="fp-open-admin" id="fp-admin-link" href="#">Open WordPress admin</a>
+    </header>
+    <main class="fp-layout">
+        <section class="fp-panel">
+            <div class="fp-graph-head">
+                <div>
+                    <h1>Branch Graph</h1>
+                    <div class="fp-muted" id="fp-graph-summary"></div>
+                </div>
+                <div class="fp-buttons">
+                    <button type="button" id="fp-refresh">Refresh</button>
+                    <button type="button" id="fp-load-history">History</button>
+                </div>
+            </div>
+            <div class="fp-graph-wrap">
+                <svg class="fp-graph" id="fp-graph" role="img" aria-label="ForkPress branch graph"></svg>
+            </div>
+        </section>
+        <aside class="fp-side">
+            <section class="fp-panel">
+                <div class="fp-detail-head">
+                    <h2 id="fp-detail-title">Selection</h2>
+                </div>
+                <div class="fp-detail-body">
+                    <div class="fp-status" id="fp-status"></div>
+                    <div class="fp-kv" id="fp-detail"></div>
+                    <div class="fp-buttons" id="fp-detail-actions"></div>
+                    <div class="fp-conflicts" id="fp-conflicts"></div>
+                    <pre id="fp-raw"></pre>
+                </div>
+            </section>
+            <section class="fp-panel">
+                <details class="fp-actions">
+                    <summary>Branch actions</summary>
+                    <div class="fp-actions-body">
+                        <form class="fp-form" id="fp-create">
+                            <div class="fp-field"><label for="fp-create-name">New branch</label><input id="fp-create-name" name="branch" pattern="[A-Za-z0-9_-]{1,63}" autocomplete="off" required></div>
+                            <div class="fp-field"><label for="fp-create-from">From</label><select id="fp-create-from" name="from"></select></div>
+                            <button class="primary" type="submit">Create branch</button>
+                        </form>
+                        <form class="fp-form" id="fp-merge">
+                            <div class="fp-field"><label for="fp-merge-source">Source</label><select id="fp-merge-source" name="source"></select></div>
+                            <div class="fp-field"><label for="fp-merge-target">Target</label><select id="fp-merge-target" name="target"></select></div>
+                            <button type="submit">Merge branch</button>
+                        </form>
+                    </div>
+                </details>
+            </section>
+        </aside>
+    </main>
+</div>
+<script>
+(function () {
+    var state = __STATE__;
+    var colors = ['#2271b1', '#008a20', '#8a2be2', '#b35c00', '#d63638', '#007cba', '#7a5cff', '#3858e9'];
+    var graph = document.getElementById('fp-graph');
+    var summary = document.getElementById('fp-graph-summary');
+    var detail = document.getElementById('fp-detail');
+    var detailTitle = document.getElementById('fp-detail-title');
+    var detailActions = document.getElementById('fp-detail-actions');
+    var conflicts = document.getElementById('fp-conflicts');
+    var raw = document.getElementById('fp-raw');
+    var status = document.getElementById('fp-status');
+    var current = document.getElementById('fp-current');
+    var adminLink = document.getElementById('fp-admin-link');
+    var createForm = document.getElementById('fp-create');
+    var mergeForm = document.getElementById('fp-merge');
+    var createName = document.getElementById('fp-create-name');
+    var createFrom = document.getElementById('fp-create-from');
+    var mergeSource = document.getElementById('fp-merge-source');
+    var mergeTarget = document.getElementById('fp-merge-target');
+    var records = [];
+
+    function branch(name) {
+        return state.branches.find(function (item) { return item.name === name; }) || { name: name, url: '#', siteUrl: '#', adminUrl: '#', managerUrl: '#' };
+    }
+    function setStatus(kind, message) {
+        status.className = 'fp-status is-visible ' + kind;
+        status.textContent = message;
+    }
+    function clearStatus() {
+        status.className = 'fp-status';
+        status.textContent = '';
+    }
+    function post(action, fields) {
+        var body = new FormData();
+        body.append('action', action);
+        Object.keys(fields || {}).forEach(function (key) { body.append(key, fields[key]); });
+        return fetch(state.actionUrl, { method: 'POST', body: body, headers: { Accept: 'application/json', 'X-ForkPress-Async': '1' } })
+            .then(function (response) {
+                return response.text().then(function (text) {
+                    var payload = null;
+                    try { payload = text ? JSON.parse(text) : null; } catch (error) { payload = null; }
+                    if (!response.ok || !payload || payload.success === false) {
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress request failed.'));
+                    }
+                    return payload;
+                });
+            });
+    }
+    function optionList(select, selected) {
+        select.innerHTML = '';
+        state.branches.forEach(function (item) {
+            var option = document.createElement('option');
+            option.value = item.name;
+            option.textContent = item.name;
+            option.selected = item.name === selected;
+            select.appendChild(option);
+        });
+    }
+    function refreshForms() {
+        optionList(createFrom, state.currentBranch);
+        var firstNonMain = state.branches.find(function (item) { return item.name !== 'main'; });
+        optionList(mergeSource, state.currentBranch === 'main' && firstNonMain ? firstNonMain.name : state.currentBranch);
+        optionList(mergeTarget, 'main');
+    }
+    function svg(tag, attrs) {
+        var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        Object.keys(attrs || {}).forEach(function (key) { el.setAttribute(key, attrs[key]); });
+        return el;
+    }
+    function laneNames() {
+        var map = {};
+        state.branches.forEach(function (item) { map[item.name] = true; });
+        records.forEach(function (run) {
+            if (run.source_branch) map[String(run.source_branch)] = true;
+            if (run.target_branch) map[String(run.target_branch)] = true;
+        });
+        return Object.keys(map).sort(function (a, b) {
+            if (a === state.currentBranch) return -1;
+            if (b === state.currentBranch) return 1;
+            if (a === 'main') return -1;
+            if (b === 'main') return 1;
+            return a.localeCompare(b, undefined, { numeric: true });
+        });
+    }
+    function renderGraph() {
+        var lanes = laneNames();
+        var width = Math.max(820, 230 + Math.max(records.length, 1) * 150);
+        var height = Math.max(460, 88 + lanes.length * 72);
+        graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+        graph.setAttribute('width', width);
+        graph.setAttribute('height', height);
+        graph.innerHTML = '';
+        var y = {};
+        lanes.forEach(function (name, index) {
+            y[name] = 56 + index * 72;
+            var color = colors[index % colors.length];
+            graph.appendChild(svg('line', { x1: 118, x2: width - 34, y1: y[name], y2: y[name], class: 'fp-lane-line' }));
+            var label = svg('text', { x: 20, y: y[name] + 4, class: 'fp-lane-label' });
+            label.textContent = name;
+            graph.appendChild(label);
+            var node = svg('circle', { cx: 108, cy: y[name], r: 9, fill: color, class: 'fp-node' + (name === state.currentBranch ? ' is-current' : ''), 'data-kind': 'branch', 'data-name': name });
+            node.appendChild(svg('title', {})).textContent = 'Open ' + name;
+            graph.appendChild(node);
+        });
+        records.forEach(function (run, index) {
+            var source = String(run.source_branch || '?');
+            var target = String(run.target_branch || '?');
+            var x = 220 + index * 150;
+            var sy = y[source] || y[state.currentBranch] || 56;
+            var ty = y[target] || y.main || sy;
+            var color = colors[(lanes.indexOf(source) + colors.length) % colors.length];
+            var conflictCount = Number(run.conflict_count || 0);
+            var path = svg('path', {
+                d: 'M ' + (x - 70) + ' ' + sy + ' C ' + (x - 22) + ' ' + sy + ', ' + (x - 22) + ' ' + ty + ', ' + x + ' ' + ty,
+                class: 'fp-edge' + (conflictCount > 0 ? ' is-conflict' : ''),
+                stroke: conflictCount > 0 ? '#b35c00' : color
+            });
+            graph.appendChild(path);
+            var node = svg('circle', { cx: x, cy: ty, r: 11, fill: conflictCount > 0 ? '#b35c00' : color, class: 'fp-node' + (conflictCount > 0 ? ' is-conflict' : ''), 'data-kind': 'run', 'data-index': index });
+            node.appendChild(svg('title', {})).textContent = '#' + String(run.id || '') + ' ' + source + ' -> ' + target;
+            graph.appendChild(node);
+            var text = svg('text', { x: x + 16, y: ty + 4, class: 'fp-node-label' });
+            text.textContent = '#' + String(run.id || index + 1);
+            graph.appendChild(text);
+            if (conflictCount > 0) {
+                graph.appendChild(svg('circle', { cx: x + 9, cy: ty - 13, r: 9, class: 'fp-conflict-badge' }));
+                var badge = svg('text', { x: x + 9, y: ty - 9, class: 'fp-badge-text', 'text-anchor': 'middle' });
+                badge.textContent = String(conflictCount);
+                graph.appendChild(badge);
+            }
+        });
+        summary.textContent = lanes.length + ' branches / ' + records.length + ' merge revisions';
+    }
+    function setDetail(title, rows, actions, object) {
+        detailTitle.textContent = title;
+        detail.innerHTML = '';
+        detailActions.innerHTML = '';
+        conflicts.innerHTML = '';
+        Object.keys(rows).forEach(function (key) {
+            var row = document.createElement('div');
+            var label = document.createElement('span');
+            var value = document.createElement('span');
+            label.textContent = key;
+            value.textContent = rows[key] === undefined || rows[key] === null ? '' : String(rows[key]);
+            row.appendChild(label);
+            row.appendChild(value);
+            detail.appendChild(row);
+        });
+        (actions || []).forEach(function (action) { detailActions.appendChild(action); });
+        raw.textContent = object ? JSON.stringify(object, null, 2) : '';
+    }
+    function link(label, href) {
+        var a = document.createElement('a');
+        a.className = 'fp-button';
+        a.href = href;
+        a.textContent = label;
+        return a;
+    }
+    function button(label, fn, extraClass) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        if (extraClass) b.className = extraClass;
+        b.addEventListener('click', fn);
+        return b;
+    }
+    function selectBranch(name) {
+        var item = branch(name);
+        clearStatus();
+        setDetail('Branch ' + name, { branch: name, current: name === state.currentBranch ? 'yes' : 'no' }, [
+            link('Open site', item.siteUrl || item.url),
+            link('Open admin', item.adminUrl || item.url),
+            link('Focus manager', item.managerUrl || state.rootUrl)
+        ], item);
+    }
+    function selectRun(run) {
+        clearStatus();
+        var actions = [
+            link('Open source', branch(String(run.source_branch || '')).siteUrl),
+            link('Open target', branch(String(run.target_branch || '')).siteUrl)
+        ];
+        if (Number(run.conflict_count || 0) > 0 && run.id) {
+            actions.push(button('Review conflicts', function () { loadConflicts(run.id); }, 'danger'));
+        }
+        setDetail('Revision #' + String(run.id || ''), {
+            source: run.source_branch || '',
+            target: run.target_branch || '',
+            status: run.status || '',
+            conflicts: run.conflict_count || 0,
+            decisions: run.decision_count || 0,
+            finished: run.finished_at || run.started_at || ''
+        }, actions, run);
+    }
+    function renderConflicts(payload) {
+        var list = Array.isArray(payload.records) ? payload.records : [];
+        setStatus(list.length ? 'warn' : 'ok', payload.message || 'Loaded conflict details.');
+        conflicts.innerHTML = '';
+        list.forEach(function (record) {
+            var node = document.createElement('div');
+            node.className = 'fp-conflict';
+            var title = document.createElement('div');
+            title.className = 'fp-conflict-title';
+            title.textContent = record.conflict_key || record.path || record.table_name || ('Conflict #' + record.id);
+            var meta = document.createElement('div');
+            meta.className = 'fp-conflict-meta';
+            meta.textContent = [record.conflict_type, record.lifecycle_state, record.next_action, record.plugin].filter(Boolean).join(' / ');
+            var row = document.createElement('div');
+            row.className = 'fp-buttons';
+            if (record.id && record.lifecycle_state !== 'resolved') {
+                row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run); }));
+                if (Array.isArray(record.resolution_choices) && record.resolution_choices.indexOf('source') !== -1) {
+                    row.appendChild(button('Use source', function () { resolveConflict(record.id, 'source', payload.run); }));
+                }
+                if (Array.isArray(record.resolution_choices) && record.resolution_choices.indexOf('target') !== -1) {
+                    row.appendChild(button('Keep target', function () { resolveConflict(record.id, 'target', payload.run); }));
+                }
+            }
+            node.appendChild(title);
+            node.appendChild(meta);
+            node.appendChild(row);
+            conflicts.appendChild(node);
+        });
+        raw.textContent = JSON.stringify(payload, null, 2);
+    }
+    function loadTree() {
+        setStatus('warn', 'Loading branch graph...');
+        return post('forkpress_branch_tree', { limit: '50' }).then(function (payload) {
+            records = Array.isArray(payload.records) ? payload.records : [];
+            renderGraph();
+            clearStatus();
+            if (records.length) selectRun(records[0]); else selectBranch(state.currentBranch);
+        }).catch(function (error) {
+            records = [];
+            renderGraph();
+            setStatus('error', error.message || 'Could not load branch graph.');
+            selectBranch(state.currentBranch);
+        });
+    }
+    function loadHistory() {
+        setStatus('warn', 'Loading history...');
+        post('forkpress_branch_history', { limit: '50' }).then(function (payload) {
+            records = Array.isArray(payload.records) ? payload.records : [];
+            renderGraph();
+            setStatus('ok', payload.message || 'Loaded history.');
+        }).catch(function (error) { setStatus('error', error.message || 'Could not load history.'); });
+    }
+    function loadConflicts(run) {
+        setStatus('warn', 'Loading conflicts...');
+        post('forkpress_branch_conflicts', { run: String(run) }).then(renderConflicts).catch(function (error) {
+            setStatus('error', error.message || 'Could not load conflicts.');
+        });
+    }
+    function reviewConflict(id, value, run) {
+        post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || '') }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
+    }
+    function resolveConflict(id, choice, run) {
+        post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice, run: String(run || '') }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
+    }
+    graph.addEventListener('click', function (event) {
+        var target = event.target.closest ? event.target.closest('[data-kind]') : null;
+        if (!target) return;
+        if (target.getAttribute('data-kind') === 'branch') selectBranch(target.getAttribute('data-name'));
+        if (target.getAttribute('data-kind') === 'run') selectRun(records[Number(target.getAttribute('data-index'))]);
+    });
+    createForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var submit = createForm.querySelector('button[type=submit]');
+        submit.disabled = true;
+        post('forkpress_branch_create', { branch: createName.value, from: createFrom.value }).then(function (payload) {
+            if (Array.isArray(payload.branches)) state.branches = payload.branches;
+            state.currentBranch = createName.value;
+            current.textContent = 'Current: ' + state.currentBranch;
+            refreshForms();
+            renderGraph();
+            setStatus('ok', payload.message || 'Branch created.');
+            createForm.reset();
+        }).catch(function (error) { setStatus('error', error.message || 'Branch create failed.'); }).then(function () { submit.disabled = false; });
+    });
+    mergeForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var submit = mergeForm.querySelector('button[type=submit]');
+        submit.disabled = true;
+        post('forkpress_branch_merge', { source: mergeSource.value, target: mergeTarget.value }).then(function (payload) {
+            setStatus(payload.type === 'warning' ? 'warn' : 'ok', payload.message || 'Merge completed.');
+            if (payload.run && Number(payload.conflicts || 0) > 0) loadConflicts(payload.run);
+            loadTree();
+        }).catch(function (error) { setStatus('error', error.message || 'Merge failed.'); }).then(function () { submit.disabled = false; });
+    });
+    document.getElementById('fp-refresh').addEventListener('click', loadTree);
+    document.getElementById('fp-load-history').addEventListener('click', loadHistory);
+    current.textContent = 'Current: ' + state.currentBranch;
+    adminLink.href = branch(state.currentBranch).adminUrl || '#';
+    refreshForms();
+    renderGraph();
+    selectBranch(state.currentBranch);
+    loadTree();
+}());
+</script>
+</body>
+</html>
+HTML;
+}
+
+function forkpress_cow_handle_branch_manager(string $path, string $current_branch): bool {
+    if ($path !== '/_forkpress/branches') {
+        return false;
+    }
+    http_response_code(200);
+    header('Content-Type: text/html; charset=UTF-8');
+    echo str_replace('__STATE__', forkpress_cow_json_encode([
+        'currentBranch' => $current_branch,
+        'branches' => forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/'),
+        'actionUrl' => forkpress_cow_branch_url($current_branch, '/_forkpress/action'),
+        'rootUrl' => forkpress_cow_branch_url('main', '/_forkpress/branches'),
+    ]), forkpress_cow_branch_manager_html($current_branch));
+    return true;
+}
+
+if (forkpress_cow_handle_branch_manager($path, $branch)) {
+    return true;
 }
 
 if (forkpress_cow_handle_admin_branch_action($path, $branch, $branches_dir)) {

@@ -451,6 +451,10 @@ function forkpress_branch_url(string $branch, ?string $uri = null): string {
     return $scheme . '://' . $host . $port . $uri;
 }
 
+function forkpress_branch_manager_url(?string $branch = null): string {
+    return forkpress_branch_url($branch ?: (forkpress_current_branch() ?: 'main'), '/_forkpress/branches');
+}
+
 function forkpress_current_preview_origin(): ?string {
     $host = $_SERVER['HTTP_HOST'] ?? '';
     if (!is_string($host) || $host === '') {
@@ -924,15 +928,25 @@ function forkpress_branch_action_url(): string {
 }
 
 function forkpress_branch_admin_page_url(): string {
-    return function_exists('admin_url') ? admin_url('admin.php?page=forkpress-branches') : '/wp-admin/admin.php?page=forkpress-branches';
+    return forkpress_branch_manager_url();
 }
 
-function forkpress_branch_switcher_data(string $current): array {
-    $branches = array_values(array_unique(forkpress_local_branches($current)));
+function forkpress_branch_switcher_data(string $current, ?string $uri = null, array $extra_branches = []): array {
+    $branches = array_values(array_unique(array_merge(forkpress_local_branches($current), $extra_branches)));
+    usort($branches, function (string $a, string $b) use ($current): int {
+        if ($a === $current) return -1;
+        if ($b === $current) return 1;
+        if ($a === 'main') return -1;
+        if ($b === 'main') return 1;
+        return strnatcasecmp($a, $b);
+    });
     return array_map(function (string $branch) use ($current): array {
         return [
             'name'    => $branch,
-            'url'     => forkpress_branch_url($branch),
+            'url'     => forkpress_branch_url($branch, '/wp-admin/'),
+            'siteUrl' => forkpress_branch_url($branch, '/'),
+            'adminUrl'=> forkpress_branch_url($branch, '/wp-admin/'),
+            'managerUrl' => forkpress_branch_manager_url($branch),
             'current' => $branch === $current,
         ];
     }, $branches);
@@ -1360,7 +1374,7 @@ function forkpress_handle_branch_create(): void {
         forkpress_branch_url($branch, '/wp-admin/'),
         'notice',
         'Created branch ' . $branch . '.',
-        ['branches' => forkpress_branch_switcher_data($current)]
+        ['branches' => forkpress_branch_switcher_data($branch, '/wp-admin/', [$branch, 'main'])]
     );
 }
 add_action('admin_post_forkpress_branch_create', 'forkpress_handle_branch_create');
@@ -1400,7 +1414,7 @@ function forkpress_handle_branch_merge(): void {
             'warning',
             $message,
             [
-                'branches' => forkpress_branch_switcher_data($current),
+                'branches' => forkpress_branch_switcher_data($target, '/wp-admin/'),
                 'mergeStatus' => $summary['status'],
                 'conflicts' => $conflicts,
                 'run' => $run,
@@ -1413,7 +1427,7 @@ function forkpress_handle_branch_merge(): void {
         forkpress_branch_url($target, '/wp-admin/'),
         'notice',
         'Merged ' . $source . ' into ' . $target . '.',
-        ['branches' => forkpress_branch_switcher_data($current)]
+        ['branches' => forkpress_branch_switcher_data($target, '/wp-admin/')]
     );
 }
 add_action('admin_post_forkpress_branch_merge', 'forkpress_handle_branch_merge');
@@ -1948,6 +1962,18 @@ function forkpress_render_branch_admin_page(): void {
     }
 
     $current = forkpress_current_branch() ?: 'main';
+    $manager_url = forkpress_branch_manager_url($current);
+    if (function_exists('wp_redirect') && !headers_sent()) {
+        wp_redirect($manager_url);
+    }
+    ?>
+    <div class="wrap forkpress-branches-admin">
+        <h1>ForkPress Branches</h1>
+        <p><a class="button button-primary" href="<?php echo esc_attr($manager_url); ?>">Open ForkPress branch manager</a></p>
+    </div>
+    <?php
+    return;
+
     $branches = forkpress_local_branches($current);
     $can_manage = forkpress_branch_can_manage();
     $action_url = forkpress_branch_action_url();
@@ -3379,6 +3405,7 @@ function forkpress_render_branch_switcher(): void {
             form.addEventListener('submit', function (event) {
                 event.preventDefault();
                 var body = new FormData(form);
+                var actionName = String(body.get('action') || '');
                 setFormLoading(form, true);
                 showStatus('success', 'Working...');
                 clearConflictAudit();
@@ -3410,6 +3437,10 @@ function forkpress_render_branch_switcher(): void {
                     }
                     if (payload.branches) {
                         setBranches(payload.branches);
+                    }
+                    if (actionName === 'forkpress_branch_create' && payload.url) {
+                        window.location.assign(payload.url);
+                        return;
                     }
                     if (payload.type === 'warning' && payload.run) {
                         showStatus('warning', payload.message || 'ForkPress branch action completed.');

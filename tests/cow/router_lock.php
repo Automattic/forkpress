@@ -40,6 +40,7 @@ $main = $branches . '/main';
 $entered = $tmp . '/router-entered.txt';
 $started = $tmp . '/request-started.txt';
 $child = $tmp . '/request.php';
+$fake_bin = $tmp . '/forkpress';
 $router = realpath(__DIR__ . '/../../runtime/cow/router.php');
 assert_true($router !== false, 'router fixture exists');
 register_shutdown_function(static function() use ($tmp): void {
@@ -51,6 +52,10 @@ mkdir($cow, 0777, true);
 
 file_put_contents($main . '/index.php', "<?php\nfile_put_contents(" . var_export($started, true) . ", sprintf(\"%.6f\\n\", microtime(true)));\necho \"OK\";\n");
 file_put_contents($main . '/safe.txt', "SAFE\n");
+file_put_contents($fake_bin, "#!/usr/bin/env php\n<?php\nexit(0);\n");
+chmod($fake_bin, 0755);
+putenv('FORKPRESS_BIN=' . $fake_bin);
+putenv('FORKPRESS_WORK_DIR=' . $cow);
 file_put_contents($child, <<<'PHP'
 <?php
 $branches = $argv[1];
@@ -159,7 +164,7 @@ if (is_resource($lock)) {
     }
 }
 
-foreach (['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'] as $action) {
+foreach (['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch_history', 'forkpress_branch_tree', 'forkpress_branch_conflicts', 'forkpress_branch_restore_crash', 'forkpress_branch_revalidate_conflicts', 'forkpress_branch_review_conflict', 'forkpress_branch_resolve_conflict', 'forkpress_branch_apply_reviewed_conflicts', 'forkpress_branch_run_plugin_driver'] as $action) {
     @unlink($entered);
     @unlink($started);
     $lock = fopen($lock_path, 'c');
@@ -182,8 +187,12 @@ foreach (['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch
                 usleep(10000);
             }
             assert_true(file_exists($entered), "admin branch action reached pre-lock gate for $action");
-            usleep(150000);
-            $early_body = stream_get_contents($pipes[1]);
+            $early_body = '';
+            $deadline = microtime(true) + 2.0;
+            while ($early_body === '' && microtime(true) < $deadline) {
+                usleep(10000);
+                $early_body .= stream_get_contents($pipes[1]);
+            }
             $early_payload = json_decode($early_body, true);
             assert_true(is_array($early_payload), "admin branch action returns ForkPress JSON before lock release for $action");
             assert_same($early_payload['success'] ?? null, false, "admin branch action bypasses shared request lock for $action");
@@ -204,6 +213,81 @@ foreach (['forkpress_branch_create', 'forkpress_branch_merge', 'forkpress_branch
             assert_true(!file_exists($started), "admin branch action did not fall through to WordPress for $action");
         }
     }
+}
+
+@unlink($entered);
+@unlink($started);
+$lock = fopen($lock_path, 'c');
+assert_true(is_resource($lock), 'test reopened operation lock for out-of-band branch manager');
+if (is_resource($lock)) {
+    assert_true(flock($lock, LOCK_EX), 'test holds exclusive operation lock for out-of-band branch manager');
+
+    $descriptor = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+    $process = proc_open([PHP_BINARY, $child, $branches, $cow, $router, '/_forkpress/branches', $entered], $descriptor, $pipes);
+    assert_true(is_resource($process), 'spawned out-of-band branch manager request process');
+    if (is_resource($process)) {
+        fclose($pipes[0]);
+        stream_set_blocking($pipes[1], false);
+        $deadline = microtime(true) + 2.0;
+        while (!file_exists($entered) && microtime(true) < $deadline) {
+            usleep(10000);
+        }
+        assert_true(file_exists($entered), 'out-of-band branch manager reached pre-lock gate');
+        usleep(150000);
+        $early_body = stream_get_contents($pipes[1]);
+        assert_true(str_contains($early_body, 'ForkPress Branches'), 'out-of-band branch manager renders before lock release');
+        assert_true(str_contains($early_body, 'fp-graph'), 'out-of-band branch manager renders the branch graph surface');
+        assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
+        assert_true(str_contains($early_body, 'forkpress_branch_conflicts'), 'out-of-band branch manager can revisit conflicts');
+        assert_true(str_contains($early_body, 'Branch actions'), 'out-of-band branch manager keeps create and merge actions available');
+        assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
+
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        stream_set_blocking($pipes[1], true);
+
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $status = proc_close($process);
+
+        assert_same($status, 0, 'out-of-band branch manager exits cleanly');
+        assert_same($stdout, '', 'out-of-band branch manager output was already consumed');
+        assert_same($stderr, '', 'out-of-band branch manager produced no stderr');
+    }
+}
+
+@unlink($entered);
+@unlink($started);
+$descriptor = [
+    0 => ['pipe', 'r'],
+    1 => ['pipe', 'w'],
+    2 => ['pipe', 'w'],
+];
+$process = proc_open([PHP_BINARY, $child, $branches, $cow, $router, '/wp-admin/admin-post.php?action=forkpress_branch_create&branch=feature&from=main', $entered], $descriptor, $pipes);
+assert_true(is_resource($process), 'spawned router branch create action request process');
+if (is_resource($process)) {
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $status = proc_close($process);
+    $payload = json_decode($stdout, true);
+    assert_same($status, 0, 'router branch create action exits cleanly');
+    assert_same($stderr, '', 'router branch create action produced no stderr');
+    assert_true(is_array($payload), 'router branch create action returns JSON');
+    assert_same($payload['success'] ?? null, true, 'router branch create action reports success');
+    assert_same($payload['url'] ?? null, 'http://feature.wp.localhost/wp-admin/', 'router branch create action returns the new branch admin URL');
+    assert_same($payload['branches'][0]['name'] ?? null, 'feature', 'router branch create action marks new branch current');
+    assert_same($payload['branches'][0]['url'] ?? null, 'http://feature.wp.localhost/wp-admin/', 'router branch create action returns a branch-specific feature URL');
+    assert_same($payload['branches'][1]['url'] ?? null, 'http://wp.localhost/wp-admin/', 'router branch create action returns a distinct main URL');
+    assert_true(!file_exists($started), 'router branch create action did not fall through to WordPress');
 }
 
 rm_tree($tmp);
