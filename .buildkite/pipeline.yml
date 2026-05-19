@@ -15,7 +15,7 @@ steps:
       - github_commit_status:
           context: "Buildkite / COW changed preflight"
 
-  - label: ":crab: Linux tests (workspace, excl. CLI)"
+  - label: ":crab: Linux tests (workspace + CLI)"
     key: linux-tests
     command: .buildkite/commands/linux-tests.sh
     plugins:
