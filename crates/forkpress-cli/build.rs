@@ -73,6 +73,7 @@ fn main() -> Result<()> {
         "scripts/cow/merge.php",
         "scripts/cow/mysql_export.php",
         "scripts/cow/mysql_import_sqlite.php",
+        "scripts/cow/wp_boot_smoke.php",
         "scripts/git/autoload.php",
         "scripts/shared/sqlite_backup.php",
         "scripts/shared/sqlite_retry.php",
@@ -470,6 +471,7 @@ fn build_bundle(
         add_file(&mut tar, repo_root, "scripts/cow/merge.php")?;
         add_file(&mut tar, repo_root, "scripts/cow/mysql_export.php")?;
         add_file(&mut tar, repo_root, "scripts/cow/mysql_import_sqlite.php")?;
+        add_file(&mut tar, repo_root, "scripts/cow/wp_boot_smoke.php")?;
         add_file(&mut tar, repo_root, "scripts/git/autoload.php")?;
         add_file(&mut tar, repo_root, "scripts/shared/sqlite_backup.php")?;
         add_file(&mut tar, repo_root, "scripts/shared/sqlite_retry.php")?;
