@@ -7,33 +7,27 @@
 # this script.
 #
 # Usage:
+#   source .buildkite/commands/_lib/spc-doctor-prerun.sh
 #   spc_doctor_prerun aarch64-apple-darwin
 #   spc_doctor_prerun x86_64-unknown-linux-musl
-#   spc_doctor_prerun x86_64-unknown-linux-musl-dev   # for FORKPRESS_RUNTIME_PROFILE=dev
+#   spc_doctor_prerun x86_64-unknown-linux-musl-dev   # FORKPRESS_RUNTIME_PROFILE=dev
 #
-# Keep this in sync with `scripts/build-dist.sh` by honoring
-# `FORKPRESS_STATIC_PHP_CLI_REF` first, with legacy `SPC_REF` as a
-# compatibility fallback. Drift is non-fatal: build-dist.sh
-# fetches+checks-out the right ref afterward, but doctor would have
-# run against the older revision.
+# The ref pin, the clone/refresh, and the composer install all come
+# from `scripts/shared/static-php-cli.sh`, which `scripts/build-dist.sh`
+# uses too — so the pre-run can't drift on flags or revision.
 
-SPC_REF="${FORKPRESS_STATIC_PHP_CLI_REF:-${SPC_REF:-8d038f435da7845926ba425dfbae0278cd0e0746}}"
+# shellcheck source=../../../../scripts/shared/static-php-cli.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/shared/static-php-cli.sh"
 
 spc_doctor_prerun() {
   local dist_name="$1"
-  local build_dir=".build/$dist_name"
-  local spc_dir="$build_dir/static-php-cli"
+  local spc_dir=".build/$dist_name/static-php-cli"
 
   echo "  → $spc_dir"
-  mkdir -p "$build_dir"
-  if [ ! -d "$spc_dir/.git" ]; then
-    git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$spc_dir"
-  fi
-  git -C "$spc_dir" fetch --depth 1 origin "$SPC_REF"
-  git -C "$spc_dir" checkout --detach FETCH_HEAD
+  ensure_static_php_cli_checkout "$spc_dir"
+  install_static_php_cli_composer_deps "$spc_dir"
   (
     cd "$spc_dir"
-    composer install --no-dev --no-interaction --quiet
     ./bin/spc doctor --auto-fix
   )
 }
