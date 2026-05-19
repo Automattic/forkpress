@@ -16,14 +16,8 @@ set -euo pipefail
 # in GHA. The built site is uploaded via YAML `artifact_paths` in
 # pipeline.yml so reviewers can preview before merge.
 
-# We're root inside the docker container; the BK agent on the host runs
-# as the unprivileged `buildkite-agent` user. Without this chown, npm's
-# extraction into `node_modules/` (gitignored) would leave root-owned
-# files that the agent can't clean up on the next checkout. Chown back
-# on exit so the next build's git-clean works.
-host_uid="$(stat -c %u .)"
-host_gid="$(stat -c %g .)"
-trap 'chown -R "$host_uid:$host_gid" . 2>/dev/null || true' EXIT
+# shellcheck source=_lib/docker-chown-trap.sh
+source "$(dirname "$0")/_lib/docker-chown-trap.sh"
 
 echo "--- :information_source: Toolchain"
 node --version

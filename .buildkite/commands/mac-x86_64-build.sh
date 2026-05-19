@@ -30,14 +30,9 @@ uname -a
 sw_vers || true
 
 echo "--- :crab: Installing Rust via rustup"
-if ! command -v cargo >/dev/null 2>&1; then
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-fi
-# shellcheck disable=SC1091
-source "$HOME/.cargo/env"
+# shellcheck source=_lib/install-rust.sh
+source "$(dirname "$0")/_lib/install-rust.sh"
 rustup target add "$TARGET"
-rustc --version
-cargo --version
 
 echo "--- :crab: cargo build --release forkpress ($TARGET, empty runtime)"
 # Empty runtime bundle: build.rs of forkpress-cli sees FORKPRESS_RUNTIME_BUNDLE

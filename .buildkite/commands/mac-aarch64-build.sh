@@ -20,11 +20,8 @@ uname -a
 sw_vers || true
 
 echo "--- :crab: Installing Rust via rustup"
-if ! command -v cargo >/dev/null 2>&1; then
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-fi
-# shellcheck disable=SC1091
-source "$HOME/.cargo/env"
+# shellcheck source=_lib/install-rust.sh
+source "$(dirname "$0")/_lib/install-rust.sh"
 rustup target add "$TARGET" || true
 
 echo "--- :beer: Installing macOS runtime build tools"
@@ -34,24 +31,9 @@ bash scripts/dev/install-macos-runtime-tools.sh
 brew list node >/dev/null 2>&1 || brew install node
 
 echo "--- :hammer: Pre-running spc doctor --auto-fix"
-# `tests/release/build-dist-preflight.sh` forbids `--auto-fix` inside
-# `scripts/build-dist.sh`, so we run doctor here from a matching spc
-# checkout to install spc's local prereqs (pkg-config in
-# `PKG_ROOT_PATH/bin/`) before build-dist.sh's own doctor runs.
-SPC_REF="8d038f435da7845926ba425dfbae0278cd0e0746"
-build_dir=".build/$TARGET"
-spc_dir="$build_dir/static-php-cli"
-mkdir -p "$build_dir"
-if [ ! -d "$spc_dir/.git" ]; then
-  git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$spc_dir"
-fi
-git -C "$spc_dir" fetch --depth 1 origin "$SPC_REF"
-git -C "$spc_dir" checkout --detach FETCH_HEAD
-(
-  cd "$spc_dir"
-  composer install --no-dev --no-interaction --quiet
-  ./bin/spc doctor --auto-fix
-)
+# shellcheck source=_lib/spc-doctor-prerun.sh
+source "$(dirname "$0")/_lib/spc-doctor-prerun.sh"
+spc_doctor_prerun "$TARGET"
 
 echo "--- :package: Building static PHP runtime bundle ($TARGET)"
 FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh

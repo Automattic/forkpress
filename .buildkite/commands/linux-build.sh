@@ -2,14 +2,8 @@
 
 set -euo pipefail
 
-# We run as root inside the docker container; the BK agent on the host runs
-# as the unprivileged `buildkite-agent` user and later tries to clean up our
-# mounted workspace. Without this chown the agent's cleanup fails ("permission
-# denied" on every static-PHP-cli artifact) and the next checkout on the same
-# agent loops forever. Chown back to the host owner on exit.
-host_uid="$(stat -c %u .)"
-host_gid="$(stat -c %g .)"
-trap 'chown -R "$host_uid:$host_gid" . 2>/dev/null || true' EXIT
+# shellcheck source=_lib/docker-chown-trap.sh
+source "$(dirname "$0")/_lib/docker-chown-trap.sh"
 
 # Mirrors the heavy chunk of GHA `linux-cow-e2e`:
 #   - install full build toolchain (Rust target, musl, static-PHP deps)
@@ -36,40 +30,16 @@ php --version | head -1
 echo "--- :crab: rustup target add $TARGET"
 rustup target add "$TARGET"
 
-# `scripts/build-dist.sh` (correctly) refuses to pass `--auto-fix` to
-# static-php-cli's `doctor` — `tests/release/build-dist-preflight.sh`
-# enforces that policy so the operator stays in charge of the tooling
-# baked into the release artifact. The "operator" on BK is this CI script,
-# so we pre-clone the same spc revision into the same `BUILD_DIR` the
-# release script will use and run `doctor --auto-fix` here. By the time
-# `build-dist.sh` runs its own `doctor` invocation, every prereq it would
-# ask about (musl-wrapper, musl-cross-make, pkg-config, ...) is already
-# installed, so no interactive prompt is reached.
 echo "--- :hammer: Pre-running spc doctor --auto-fix"
-# Keep this in sync with `SPC_REF` in `scripts/build-dist.sh`. If it drifts,
-# build-dist.sh will fetch+checkout the right ref afterward, but the doctor
-# we run here might be from an older spc revision. Loose coupling, not strict.
-SPC_REF="8d038f435da7845926ba425dfbae0278cd0e0746"
-# The production and dev runtime builds use separate `BUILD_DIR`s, each with
-# its own `static-php-cli` checkout and `pkgroot/`. spc's doctor only finds
-# pkg-config inside the local `PKG_ROOT_PATH/bin/`, never on `$PATH`, so we
-# need a doctor --auto-fix run inside each so build-dist.sh's later doctor
-# invocations don't drop to an interactive prompt.
+# Production and dev runtime builds use separate BUILD_DIRs each with
+# their own spc checkout. spc's doctor only finds pkg-config inside the
+# local `PKG_ROOT_PATH/bin/`, never on `$PATH`, so doctor has to run
+# inside each before build-dist.sh's own doctor invocation can complete
+# non-interactively.
+# shellcheck source=_lib/spc-doctor-prerun.sh
+source "$(dirname "$0")/_lib/spc-doctor-prerun.sh"
 for dist_name in "$TARGET" "$TARGET-dev"; do
-  build_dir=".build/$dist_name"
-  spc_dir="$build_dir/static-php-cli"
-  echo "  → $spc_dir"
-  mkdir -p "$build_dir"
-  if [ ! -d "$spc_dir/.git" ]; then
-    git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$spc_dir"
-  fi
-  git -C "$spc_dir" fetch --depth 1 origin "$SPC_REF"
-  git -C "$spc_dir" checkout --detach FETCH_HEAD
-  (
-    cd "$spc_dir"
-    composer install --no-dev --no-interaction --quiet
-    ./bin/spc doctor --auto-fix
-  )
+  spc_doctor_prerun "$dist_name"
 done
 
 echo "--- :package: Building static PHP runtime bundle ($TARGET)"
