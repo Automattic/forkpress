@@ -4,7 +4,7 @@ Signs Windows artifacts with Azure Trusted Signing.
 
 .DESCRIPTION
 SHA256-only Authenticode signing via `signtool.exe /dlib /dmdf`. No PFX
-fallback — forkpress is a new app with a single signing identity, so the
+fallback -- forkpress is a new app with a single signing identity, so the
 script throws loudly when Azure Trusted Signing is not configured rather
 than silently producing unsigned binaries.
 
@@ -40,7 +40,7 @@ $missing = $REQUIRED_AZURE_ENV_VARS | Where-Object {
     [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
 }
 if ($missing) {
-    throw "Azure Trusted Signing env vars missing: $($missing -join ', '). forkpress signs Windows artifacts via Azure only — there is no PFX fallback."
+    throw "Azure Trusted Signing env vars missing: $($missing -join ', '). forkpress signs Windows artifacts via Azure only -- there is no PFX fallback."
 }
 
 if (-not $env:SIGNTOOL_PATH -or -not $env:AZURE_CODE_SIGNING_DLIB -or -not $env:AZURE_METADATA_JSON) {
