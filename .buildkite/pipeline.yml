@@ -41,7 +41,7 @@ steps:
       - github_commit_status:
           context: "Buildkite / Linux tests"
 
-  - label: ":crab: Linux build (workspace, excl. CLI)"
+  - label: ":crab: Linux build (workspace + CLI)"
     key: linux-build
     depends_on: linux-tests
     command: .buildkite/commands/linux-build.sh
