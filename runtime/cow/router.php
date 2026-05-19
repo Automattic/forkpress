@@ -1258,13 +1258,24 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-lane-label { fill: #50575e; font-size: 12px; font-weight: 650; }
     .fp-lane-line { stroke: #dcdcde; stroke-width: 2; }
+    .fp-lane-stem { stroke: #c3c4c7; stroke-width: 3; }
+    .fp-lane-head { cursor: pointer; fill: #fff; stroke: #8c8f94; stroke-width: 2; }
+    .fp-row-line { stroke: #f0f0f1; stroke-width: 1; }
+    .fp-row-label { fill: #1d2327; font-size: 11px; font-weight: 700; }
+    .fp-row-status { fill: #646970; font-size: 10px; }
     .fp-edge { fill: none; stroke-width: 3; }
     .fp-edge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
+    .fp-edge.is-resolved { stroke: var(--ok); }
     .fp-node { cursor: pointer; stroke: #fff; stroke-width: 3; }
     .fp-node.is-current { stroke: #1d2327; stroke-width: 4; }
     .fp-node.is-conflict { fill: var(--conflict); }
+    .fp-node.is-resolved { fill: var(--ok); }
+    .fp-node.is-setup { fill: #f6f7f7; stroke: #8c8f94; }
+    .fp-node.is-failed { fill: var(--danger); }
+    .fp-merge-dot { fill: #fff; stroke-width: 3; }
     .fp-node-label { fill: #1d2327; font-size: 11px; font-weight: 700; pointer-events: none; }
     .fp-conflict-badge { fill: var(--danger); }
+    .fp-conflict-badge.is-resolved { fill: var(--ok); }
     .fp-badge-text { fill: #fff; font-size: 10px; font-weight: 700; pointer-events: none; }
     .fp-side {
         display: grid;
@@ -1515,69 +1526,147 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         Object.keys(attrs || {}).forEach(function (key) { el.setAttribute(key, attrs[key]); });
         return el;
     }
-    function laneNames() {
-        var map = {};
-        state.branches.forEach(function (item) { map[item.name] = true; });
-        records.forEach(function (run) {
-            if (run.source_branch) map[String(run.source_branch)] = true;
-            if (run.target_branch) map[String(run.target_branch)] = true;
-        });
-        return Object.keys(map).sort(function (a, b) {
-            if (a === state.currentBranch) return -1;
-            if (b === state.currentBranch) return 1;
-            if (a === 'main') return -1;
-            if (b === 'main') return 1;
-            return a.localeCompare(b, undefined, { numeric: true });
+    function runNumber(run) {
+        var id = Number(run && run.id ? run.id : 0);
+        return Number.isFinite(id) ? id : 0;
+    }
+    function sortedRunEntries() {
+        return records.map(function (run, index) {
+            return { run: run, index: index };
+        }).sort(function (a, b) {
+            var byId = runNumber(b.run) - runNumber(a.run);
+            if (byId !== 0) return byId;
+            return String(b.run.finished_at || b.run.started_at || '').localeCompare(String(a.run.finished_at || a.run.started_at || ''));
         });
     }
+    function conflictSummary(run) {
+        var summary = run && (run.conflictSummary || run.conflict_summary || run._conflictSummary);
+        var total = Number(run && run.conflict_count || 0);
+        var resolved = Number(summary && summary.resolved || 0);
+        var unresolved = Number(summary && summary.unresolved || 0);
+        if (!summary && total > 0) unresolved = total;
+        return { total: total, resolved: resolved, unresolved: unresolved };
+    }
+    function runVisualClass(run) {
+        var summary = conflictSummary(run);
+        var status = String(run.status || '');
+        if (summary.total > 0 && summary.unresolved === 0 && (run._conflictSummary || run.conflictSummary || run.conflict_summary)) return ' is-resolved';
+        if (summary.total > 0) return ' is-conflict';
+        if (status === 'id_bands_allocated' || status === 'identity_captured') return ' is-setup';
+        if (status.indexOf('failed') !== -1 || status.indexOf('rolled_back') !== -1) return ' is-failed';
+        return ' is-clean';
+    }
+    function laneNames(entries) {
+        var map = {};
+        var ordered = [];
+        function add(name) {
+            name = String(name || '');
+            if (!name || map[name]) return;
+            map[name] = true;
+            ordered.push(name);
+        }
+        add('main');
+        if (state.currentBranch !== 'main') add(state.currentBranch);
+        (entries || sortedRunEntries()).forEach(function (entry) {
+            var run = entry.run;
+            add(run.target_branch);
+            add(run.source_branch);
+        });
+        state.branches.forEach(function (item) { add(item.name); });
+        return ordered.sort(function (a, b) {
+            if (a === 'main') return -1;
+            if (b === 'main') return 1;
+            if (a === state.currentBranch) return -1;
+            if (b === state.currentBranch) return 1;
+            return 0;
+        });
+    }
+    function annotateConflictRuns() {
+        var conflictRuns = records.filter(function (run) {
+            return Number(run.conflict_count || 0) > 0 && run.id && !run._conflictSummary;
+        });
+        if (!conflictRuns.length) return Promise.resolve();
+        return Promise.all(conflictRuns.map(function (run) {
+            return post('forkpress_branch_conflicts', { run: String(run.id) }).then(function (payload) {
+                run._conflictSummary = payload.conflictSummary || payload.conflict_summary || null;
+                run._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
+            }).catch(function () {
+                run._conflictSummary = { total: Number(run.conflict_count || 0), resolved: 0, unresolved: Number(run.conflict_count || 0) };
+            });
+        })).then(function () {});
+    }
     function renderGraph() {
-        var lanes = laneNames();
-        var width = Math.max(820, 230 + Math.max(records.length, 1) * 150);
-        var height = Math.max(460, 88 + lanes.length * 72);
+        var entries = sortedRunEntries();
+        var lanes = laneNames(entries);
+        var left = 150;
+        var top = 82;
+        var laneGap = 132;
+        var rowGap = 58;
+        var width = Math.max(900, left + Math.max(lanes.length, 1) * laneGap + 72);
+        var height = Math.max(520, top + Math.max(entries.length, 1) * rowGap + 56);
         graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
         graph.setAttribute('width', width);
         graph.setAttribute('height', height);
         graph.innerHTML = '';
-        var y = {};
+        var x = {};
         lanes.forEach(function (name, index) {
-            y[name] = 56 + index * 72;
+            x[name] = left + index * laneGap;
             var color = colors[index % colors.length];
-            graph.appendChild(svg('line', { x1: 118, x2: width - 34, y1: y[name], y2: y[name], class: 'fp-lane-line' }));
-            var label = svg('text', { x: 20, y: y[name] + 4, class: 'fp-lane-label' });
+            graph.appendChild(svg('line', { x1: x[name], x2: x[name], y1: 46, y2: height - 34, class: 'fp-lane-stem' }));
+            var label = svg('text', { x: x[name], y: 26, class: 'fp-lane-label', 'text-anchor': 'middle' });
             label.textContent = name;
             graph.appendChild(label);
-            var node = svg('circle', { cx: 108, cy: y[name], r: 9, fill: color, class: 'fp-node' + (name === state.currentBranch ? ' is-current' : ''), 'data-kind': 'branch', 'data-name': name });
-            node.appendChild(svg('title', {})).textContent = 'Open ' + name;
-            graph.appendChild(node);
+            var head = svg('circle', { cx: x[name], cy: 46, r: 8, class: 'fp-lane-head', stroke: color, 'data-kind': 'branch', 'data-name': name });
+            head.appendChild(svg('title', {})).textContent = 'Branch ' + name;
+            graph.appendChild(head);
         });
-        records.forEach(function (run, index) {
+        entries.forEach(function (entry, rowIndex) {
+            var run = entry.run;
             var source = String(run.source_branch || '?');
-            var target = String(run.target_branch || '?');
-            var x = 220 + index * 150;
-            var sy = y[source] || y[state.currentBranch] || 56;
-            var ty = y[target] || y.main || sy;
-            var color = colors[(lanes.indexOf(source) + colors.length) % colors.length];
-            var conflictCount = Number(run.conflict_count || 0);
-            var path = svg('path', {
-                d: 'M ' + (x - 70) + ' ' + sy + ' C ' + (x - 22) + ' ' + sy + ', ' + (x - 22) + ' ' + ty + ', ' + x + ' ' + ty,
-                class: 'fp-edge' + (conflictCount > 0 ? ' is-conflict' : ''),
-                stroke: conflictCount > 0 ? '#b35c00' : color
+            var target = String(run.target_branch || source || '?');
+            var sx = x[source] !== undefined ? x[source] : (x[target] || left);
+            var tx = x[target] !== undefined ? x[target] : sx;
+            var y = top + rowIndex * rowGap;
+            var laneIndex = Math.max(0, lanes.indexOf(source));
+            var color = colors[laneIndex % colors.length];
+            var conflict = conflictSummary(run);
+            var visual = runVisualClass(run);
+            var isMerge = source !== target;
+            graph.appendChild(svg('line', { x1: 8, x2: width - 28, y1: y, y2: y, class: 'fp-row-line' }));
+            if (isMerge) {
+                var edge = svg('path', {
+                    d: 'M ' + sx + ' ' + y + ' C ' + (sx + ((tx - sx) * 0.45)) + ' ' + y + ', ' + (sx + ((tx - sx) * 0.55)) + ' ' + y + ', ' + tx + ' ' + y,
+                    class: 'fp-edge' + (visual.indexOf('is-conflict') !== -1 ? ' is-conflict' : '') + (visual.indexOf('is-resolved') !== -1 ? ' is-resolved' : ''),
+                    stroke: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : color)
+                });
+                graph.appendChild(edge);
+                graph.appendChild(svg('circle', { cx: sx, cy: y, r: 5, class: 'fp-merge-dot', stroke: color }));
+            }
+            var node = svg('circle', {
+                cx: tx,
+                cy: y,
+                r: visual.indexOf('is-setup') !== -1 ? 8 : 11,
+                fill: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : color),
+                class: 'fp-node' + visual,
+                'data-kind': 'run',
+                'data-index': entry.index
             });
-            graph.appendChild(path);
-            var node = svg('circle', { cx: x, cy: ty, r: 11, fill: conflictCount > 0 ? '#b35c00' : color, class: 'fp-node' + (conflictCount > 0 ? ' is-conflict' : ''), 'data-kind': 'run', 'data-index': index });
-            node.appendChild(svg('title', {})).textContent = '#' + String(run.id || '') + ' ' + source + ' -> ' + target;
+            node.appendChild(svg('title', {})).textContent = '#' + String(run.id || '') + ' ' + source + ' -> ' + target + ' / ' + String(run.status || '');
             graph.appendChild(node);
-            var text = svg('text', { x: x + 16, y: ty + 4, class: 'fp-node-label' });
-            text.textContent = '#' + String(run.id || index + 1);
-            graph.appendChild(text);
-            if (conflictCount > 0) {
-                graph.appendChild(svg('circle', { cx: x + 9, cy: ty - 13, r: 9, class: 'fp-conflict-badge' }));
-                var badge = svg('text', { x: x + 9, y: ty - 9, class: 'fp-badge-text', 'text-anchor': 'middle' });
-                badge.textContent = String(conflictCount);
+            var rowLabel = svg('text', { x: 14, y: y - 5, class: 'fp-row-label' });
+            rowLabel.textContent = '#' + String(run.id || rowIndex + 1) + ' ' + source + ' -> ' + target;
+            graph.appendChild(rowLabel);
+            var rowStatus = svg('text', { x: 14, y: y + 12, class: 'fp-row-status' });
+            rowStatus.textContent = String(run.status || '') + (conflict.total > 0 ? ' / conflicts ' + conflict.unresolved + ' unresolved of ' + conflict.total : '');
+            graph.appendChild(rowStatus);
+            if (conflict.total > 0) {
+                graph.appendChild(svg('circle', { cx: tx + 10, cy: y - 14, r: 9, class: 'fp-conflict-badge' + (conflict.unresolved === 0 && run._conflictSummary ? ' is-resolved' : '') }));
+                var badge = svg('text', { x: tx + 10, y: y - 10, class: 'fp-badge-text', 'text-anchor': 'middle' });
+                badge.textContent = String(conflict.unresolved === 0 && run._conflictSummary ? conflict.total : conflict.unresolved);
                 graph.appendChild(badge);
             }
         });
-        summary.textContent = lanes.length + ' branches / ' + records.length + ' merge revisions';
+        summary.textContent = lanes.length + ' branches / ' + entries.length + ' revision records / newest first';
     }
     function setDetail(title, rows, actions, object) {
         detailTitle.textContent = title;
@@ -1635,6 +1724,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             target: run.target_branch || '',
             status: run.status || '',
             conflicts: run.conflict_count || 0,
+            'conflict state': (function () {
+                var summary = conflictSummary(run);
+                if (!summary.total) return 'none';
+                return summary.unresolved + ' unresolved / ' + summary.resolved + ' resolved / ' + summary.total + ' total';
+            }()),
             decisions: run.decision_count || 0,
             finished: run.finished_at || run.started_at || ''
         }, actions, run);
@@ -1677,6 +1771,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             renderGraph();
             clearStatus();
             if (records.length) selectRun(records[0]); else selectBranch(state.currentBranch);
+            annotateConflictRuns().then(function () {
+                renderGraph();
+                if (records.length) selectRun(records[0]);
+            });
         }).catch(function (error) {
             records = [];
             renderGraph();
@@ -1690,6 +1788,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             records = Array.isArray(payload.records) ? payload.records : [];
             renderGraph();
             setStatus('ok', payload.message || 'Loaded history.');
+            annotateConflictRuns().then(renderGraph);
         }).catch(function (error) { setStatus('error', error.message || 'Could not load history.'); });
     }
     function loadConflicts(run) {
