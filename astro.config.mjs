@@ -8,6 +8,8 @@ import removePageTitleHeading from './src/remark-remove-page-title-heading.mjs';
 
 const site = process.env.DOCS_SITE ?? 'https://automattic.github.io';
 const base = process.env.DOCS_BASE ?? '/forkpress';
+const normalizedBase = base.replace(/\/$/, '');
+const socialPreviewImage = new URL(`${normalizedBase}/social-preview.png`, site).href;
 
 export default defineConfig({
 	site,
@@ -25,10 +27,33 @@ export default defineConfig({
 		}),
 		starlight({
 			title: 'ForkPress',
-			description: 'Static binary WordPress branch previews with copy-on-write storage.',
+			description:
+				'Branch, preview, and merge WordPress file and database changes with local copy-on-write worktrees.',
 			editLink: {
 				baseUrl: 'https://github.com/Automattic/forkpress/edit/trunk/',
 			},
+			head: [
+				{ tag: 'meta', attrs: { property: 'og:image', content: socialPreviewImage } },
+				{ tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+				{ tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+				{
+					tag: 'meta',
+					attrs: {
+						property: 'og:image:alt',
+						content:
+							'ForkPress: Branch WordPress like code. Preview isolated changes and merge files and databases with audit trails.',
+					},
+				},
+				{ tag: 'meta', attrs: { name: 'twitter:image', content: socialPreviewImage } },
+				{
+					tag: 'meta',
+					attrs: {
+						name: 'twitter:image:alt',
+						content:
+							'ForkPress: Branch WordPress like code. Preview isolated changes and merge files and databases with audit trails.',
+					},
+				},
+			],
 			pagefind: true,
 			social: [
 				{
