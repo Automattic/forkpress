@@ -282,6 +282,8 @@ function forkpress_cow_branch_switcher_data(string $current_branch, string $uri 
 function forkpress_cow_branch_finish_json(int $status, string $url, bool $success, string $message, array $data = []): void {
     http_response_code($status);
     header('Content-Type: application/json; charset=UTF-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
     echo json_encode(array_merge([
         'success' => $success,
         'type' => $success ? 'notice' : 'error',
@@ -1860,6 +1862,8 @@ function forkpress_cow_handle_branch_manager(string $path, string $current_branc
     }
     http_response_code(200);
     header('Content-Type: text/html; charset=UTF-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
     echo str_replace('__STATE__', forkpress_cow_json_encode([
         'currentBranch' => $current_branch,
         'branches' => forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/'),
