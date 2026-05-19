@@ -53,8 +53,15 @@ steps:
       - $DOCKER_PLUGIN:
           image: "$DOCKER_RUST_IMAGE"
           propagate-environment: true
+          # static-php-cli queries `api.github.com/repos/.../releases` for
+          # every dependency to discover the latest source URL. Unauth
+          # requests share the agent's NAT IP rate limit (60/hr); after a
+          # few builds the API returns 403 and spc gives up. Pass through
+          # the agent's GITHUB_TOKEN (loaded from a8c secrets in the
+          # environment hook) so spc hits the 5000/hr authenticated quota.
           environment:
             - "CARGO_TERM_COLOR=always"
+            - "GITHUB_TOKEN"
     agents:
       queue: default
     notify:
