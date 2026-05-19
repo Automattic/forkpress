@@ -1,4 +1,4 @@
-# Mirrors GHA `windows-cow-check`:
+# Windows tests chunk of GHA `windows-cow-check`:
 #   - Install Rust + the MSVC target
 #   - cargo test --workspace --exclude forkpress-cli
 #   - cargo test -p forkpress-cli --bin forkpress (with empty runtime bundle)
@@ -6,7 +6,9 @@
 #   - tests/windows/installer-error-surface.ps1
 #
 # Runs on the BK `windows` queue. No Docker — native PowerShell on the
-# Windows VM. Caching is out of scope per the migration plan.
+# Windows VM. The cargo build --release + artifact upload lives in
+# `windows-build.ps1`, gated on this step passing. Caching is out of
+# scope per the migration plan.
 
 $ErrorActionPreference = 'Stop'
 
@@ -57,24 +59,3 @@ foreach ($script in @(
 Write-Output "--- :test_tube: Windows installer error-surface checks"
 tests/windows/installer-error-surface.ps1
 if ($LASTEXITCODE -ne 0) { throw "installer-error-surface failed: $LASTEXITCODE" }
-
-# GHA `windows-cow-check` stops here; the Windows release binary is only
-# produced inside `release-publish`. We build it on every CI run too so the
-# binary is visible as a BK artifact — cheap sanity check that the Windows
-# build path still works end-to-end without waiting for a release cut.
-Write-Output "--- :crab: cargo build --release forkpress.exe ($TARGET)"
-# Reuse the same empty-runtime trick from the cargo test step: build.rs of
-# `forkpress-cli` consults `FORKPRESS_RUNTIME_BUNDLE` and skips the static
-# PHP dist embed when it's empty. The Windows runner can't build static PHP
-# anyway; release-publish embeds a prebuilt bundle. For a CI smoke artifact
-# the binary without the embedded runtime is enough.
-$bundle = Join-Path $pwd 'empty-runtime.tar.gz'
-Set-Content -Path $bundle -Value '' -NoNewline
-$env:FORKPRESS_RUNTIME_BUNDLE = $bundle
-cargo build --release --target $TARGET -p forkpress-cli --bin forkpress --locked
-if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed: $LASTEXITCODE" }
-Remove-Item -LiteralPath $bundle -Force -ErrorAction SilentlyContinue
-
-Write-Output "--- :outbox_tray: Uploading forkpress.exe"
-buildkite-agent artifact upload "target/$TARGET/release/forkpress.exe"
-if ($LASTEXITCODE -ne 0) { throw "artifact upload failed: $LASTEXITCODE" }

@@ -113,15 +113,28 @@ steps:
       - github_commit_status:
           context: "Buildkite / Mac x86_64 cross-build"
 
-  - label: ":windows: Windows cow-check"
-    key: windows-cow-check
-    command: ".buildkite\\commands\\windows-cow-check.ps1"
+  - label: ":windows: Windows tests"
+    key: windows-tests
+    command: ".buildkite\\commands\\windows-tests.ps1"
     plugins: [$CI_TOOLKIT_PLUGIN]
     agents:
       queue: windows
     notify:
       - github_commit_status:
-          context: "Buildkite / Windows cow-check"
+          context: "Buildkite / Windows tests"
+
+  - label: ":windows: Windows build"
+    key: windows-build
+    depends_on: windows-tests
+    command: ".buildkite\\commands\\windows-build.ps1"
+    artifact_paths:
+      - "target/x86_64-pc-windows-msvc/release/forkpress.exe"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: windows
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Windows build"
 
   # Mirrors GHA `docs / build`: npm ci + npm run validate (astro check +
   # node --test + astro build). The GHA `deploy` job is GitHub-Pages-
@@ -129,6 +142,8 @@ steps:
   - label: ":books: Docs validate"
     key: docs-validate
     command: .buildkite/commands/docs-validate.sh
+    artifact_paths:
+      - "docs-dist/**/*"
     # Same rationale as the Linux Rust steps: drop `-x` so polluted
     # `node_modules/` left root-owned by a previous docker run doesn't
     # break the agent's checkout phase.
@@ -139,10 +154,6 @@ steps:
       - $DOCKER_PLUGIN:
           image: "$DOCKER_NODE_IMAGE"
           propagate-environment: true
-          # `buildkite-agent` binary lives on the host. Mount it in so
-          # the artifact-upload step at the end of docs-validate.sh can
-          # find it on PATH inside the container.
-          mount-buildkite-agent: true
     agents:
       queue: default
     notify:

@@ -13,8 +13,8 @@ set -euo pipefail
 #
 # `npm run validate` writes the built site into `docs-dist/`. We don't
 # publish here — the GHA `deploy` job is GitHub-Pages-specific and stays
-# in GHA. Drop a BK artifact upload of the built site so reviewers can
-# preview before merge.
+# in GHA. The built site is uploaded via YAML `artifact_paths` in
+# pipeline.yml so reviewers can preview before merge.
 
 # We're root inside the docker container; the BK agent on the host runs
 # as the unprivileged `buildkite-agent` user. Without this chown, npm's
@@ -34,6 +34,3 @@ npm ci --no-audit --no-fund
 
 echo "--- :books: npm run validate"
 ASTRO_TELEMETRY_DISABLED=1 npm run validate
-
-echo "--- :outbox_tray: Uploading built docs site"
-buildkite-agent artifact upload "docs-dist/**/*"
