@@ -19,14 +19,7 @@ $PSVersionTable.PSVersion
 [System.Environment]::OSVersion
 
 Write-Output "--- :crab: Installing Rust via rustup"
-$rustupExe = Join-Path $env:TEMP 'rustup-init.exe'
-Invoke-WebRequest -Uri 'https://win.rustup.rs/x86_64' -OutFile $rustupExe
-& $rustupExe -y --default-toolchain stable --profile minimal --default-host $TARGET
-if ($LASTEXITCODE -ne 0) { throw "rustup-init failed: $LASTEXITCODE" }
-$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-rustup target add $TARGET
-rustc --version
-cargo --version
+. "$PSScriptRoot\_lib\install-rust.ps1" -Target $TARGET
 
 Write-Output "--- :crab: cargo build --release forkpress.exe ($TARGET)"
 # Empty runtime bundle: build.rs of forkpress-cli sees FORKPRESS_RUNTIME_BUNDLE
