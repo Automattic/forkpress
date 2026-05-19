@@ -1,15 +1,16 @@
 use anyhow::{Context, Result, anyhow, bail};
 use forkpress_core::{Layout, SharedPaths, validate_branch_name};
-use forkpress_runtime::PortableRuntime;
+use forkpress_runtime::{PortableRuntime, run_php_script};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    cleanup_cow_branch_recreate_metadata, cow_branch_exists, create_cow_branch_from_external_tree,
-    delete_cow_branch,
+    cleanup_cow_branch_recreate_metadata, cow_branch_exists, cow_branch_root,
+    create_cow_branch_from_external_tree, delete_cow_branch,
 };
 
 const REMOTE_SITE_MANIFEST_VERSION: u32 = 1;
@@ -243,6 +244,8 @@ pub fn branch_remote_site(
     validate_branch_name(&options.branch)?;
     let manifest = read_remote_site_manifest(layout, &options.remote)?;
     let cache = remote_site_cache_stats(&manifest)?;
+    let branch = options.branch.clone();
+    let url_hint = options.url_hint.clone();
     if !cache.has_wp_load {
         bail!(
             "remote cache for '{}' is not a materialized WordPress root: {}",
@@ -250,40 +253,91 @@ pub fn branch_remote_site(
             cache.cache_root.display()
         );
     }
-    let replaced_existing = cow_branch_exists(layout, &options.branch)?;
+    let replaced_existing = cow_branch_exists(layout, &branch)?;
     if replaced_existing {
         if !options.replace_existing {
             bail!(
                 "branch already exists: {}. Open the existing branch preview or pass --force to replace it from remote cache '{}'.",
-                options.branch,
+                branch,
                 manifest.name
             );
         }
-        delete_cow_branch(layout, &options.branch)?;
-        cleanup_cow_branch_recreate_metadata(layout, runtime, shared, &options.branch)
-            .with_context(|| {
+        delete_cow_branch(layout, &branch)?;
+        cleanup_cow_branch_recreate_metadata(layout, runtime, shared, &branch).with_context(
+            || {
                 format!(
                     "failed to clean merge metadata before recreating branch '{}'",
-                    options.branch
+                    branch
                 )
-            })?;
+            },
+        )?;
     }
     create_cow_branch_from_external_tree(
         layout,
         runtime,
         shared,
-        &options.branch,
+        &branch,
         &manifest.cache_root,
         &format!("remote site '{}'", manifest.name),
         None,
-        options.url_hint,
+        url_hint.clone(),
     )?;
+    smoke_test_remote_branch_preview(layout, runtime, shared, &branch, url_hint.as_ref())
+        .with_context(|| {
+            format!(
+                "remote cache '{}' was branched to '{}', but the branch homepage did not boot. The branch was left in place for inspection; retry with --force after fixing the reported error.",
+                manifest.name, branch
+            )
+        })?;
     Ok(RemoteBranchReport {
         remote: manifest,
-        branch: options.branch,
+        branch,
         cache,
         replaced_existing,
     })
+}
+
+fn smoke_test_remote_branch_preview(
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    shared: &SharedPaths,
+    branch: &str,
+    url_hint: Option<&(String, String)>,
+) -> Result<()> {
+    let branch_root = cow_branch_root(layout, branch);
+    let host = remote_branch_preview_host(branch, url_hint);
+    let args = vec![
+        branch_root.as_os_str().to_os_string(),
+        OsString::from(host),
+        layout.debug_log.as_os_str().to_os_string(),
+        OsString::from(branch),
+    ];
+    run_php_script(
+        layout,
+        runtime,
+        shared,
+        "scripts/cow/wp_boot_smoke.php",
+        args,
+    )
+}
+
+fn remote_branch_preview_host(branch: &str, url_hint: Option<&(String, String)>) -> String {
+    if let Some((root_host, port)) = url_hint {
+        let host = if branch == "main" {
+            root_host.clone()
+        } else {
+            format!("{branch}.{root_host}")
+        };
+        if port.is_empty() {
+            host
+        } else {
+            format!("{host}:{port}")
+        }
+    } else if branch == "main" {
+        "wp.localhost:18080".to_string()
+    } else {
+        format!("{branch}.wp.localhost:18080")
+    }
 }
 
 fn remote_sites_dir(layout: &Layout) -> PathBuf {
@@ -383,6 +437,24 @@ mod tests {
             "example-site-1"
         );
         assert_eq!(sanitize_remote_site_name("...Cow!!!"), "cow");
+    }
+
+    #[test]
+    fn remote_branch_preview_host_uses_branch_subdomain() {
+        assert_eq!(
+            remote_branch_preview_host(
+                "production-main",
+                Some(&("wp.localhost".to_string(), "18080".to_string()))
+            ),
+            "production-main.wp.localhost:18080"
+        );
+        assert_eq!(
+            remote_branch_preview_host(
+                "main",
+                Some(&("wp.localhost".to_string(), "18080".to_string()))
+            ),
+            "wp.localhost:18080"
+        );
     }
 
     #[test]

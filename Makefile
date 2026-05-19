@@ -76,7 +76,7 @@ else ifeq ($(UNAME_S)-$(UNAME_M),Linux-aarch64)
 FORKPRESS_TARGET ?= aarch64-unknown-linux-musl
 endif
 
-.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-changed test-cow-e2e-git-existing-update-crash test-cow-e2e-remote-cache test-cow-e2e-semantic test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-mysql-import test-cow-plugin-validator test-cow-schema-review test-cow-semantic-fast test-cow-stale-audit test-cow-wp-semantic-validator test-branch-cli-fast test-release init-db test-all forkpress forkpress-dev dist dist-dev
+.PHONY: all clean test test-compat test-branchfs test-cow test-cow-branch-birth test-cow-branch-ui test-cow-branch-boot-smoke test-cow-changed test-cow-e2e-git-existing-update-crash test-cow-e2e-remote-cache test-cow-e2e-semantic test-cow-explicit-ids test-cow-fast test-cow-filesystem test-cow-git-server test-cow-id-bands test-cow-media-validator test-cow-merge test-cow-merge-smoke test-cow-mysql-import test-cow-plugin-validator test-cow-schema-review test-cow-semantic-fast test-cow-stale-audit test-cow-wp-semantic-validator test-branch-cli-fast test-release init-db test-all forkpress forkpress-dev dist dist-dev
 
 all: $(BRANCHFS_EXT_SO)
 
@@ -131,6 +131,9 @@ test-cow-branch-ui:
 	php $(COW_TEST_DIR)/router_branch_actions.php
 	php $(COW_TEST_DIR)/router_branch_birth_guard.php
 	php $(COW_TEST_DIR)/router_lock.php
+
+test-cow-branch-boot-smoke:
+	php $(COW_TEST_DIR)/wp_boot_smoke.php
 
 test-cow-e2e-remote-cache:
 	FORKPRESS_E2E_ONLY=remote-cache $(COW_TEST_DIR)/e2e.sh $(FORKPRESS_E2E_BIN)
@@ -188,6 +191,7 @@ test-cow-fast: test-cow-git-server test-cow-merge-smoke test-cow-mysql-import
 	php $(COW_TEST_DIR)/router_branch_birth_guard.php
 	php $(COW_TEST_DIR)/router_paths.php
 	php $(COW_TEST_DIR)/router_lock.php
+	php $(COW_TEST_DIR)/wp_boot_smoke.php
 
 test-cow: test-cow-fast
 	php $(COW_TEST_DIR)/merge.php
