@@ -44,6 +44,9 @@ steps:
     key: linux-build
     depends_on: linux-tests
     command: .buildkite/commands/linux-build.sh
+    artifact_paths:
+      - "target/x86_64-unknown-linux-musl/release/forkpress"
+      - "target/x86_64-unknown-linux-musl/release/forkpress-dev"
     # Same rationale as `linux-tests`: keep `git clean` away from `.build/`
     # so a still-polluted agent doesn't fail before our chown trap can run.
     env:
