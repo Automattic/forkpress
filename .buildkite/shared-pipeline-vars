@@ -6,9 +6,11 @@
 CI_TOOLKIT_PLUGIN_VERSION='6.1.0'
 DOCKER_PLUGIN_VERSION='v5.13.0'
 RUST_IMAGE_TAG='1.95-trixie'
+NODE_IMAGE_TAG='24-bookworm'
 XCODE_VERSION=$(sed -E 's/^~> ?//' .xcode-version)
 
 export IMAGE_ID="xcode-$XCODE_VERSION"
 export CI_TOOLKIT_PLUGIN="automattic/a8c-ci-toolkit#$CI_TOOLKIT_PLUGIN_VERSION"
 export DOCKER_PLUGIN="docker#$DOCKER_PLUGIN_VERSION"
 export DOCKER_RUST_IMAGE="public.ecr.aws/docker/library/rust:$RUST_IMAGE_TAG"
+export DOCKER_NODE_IMAGE="public.ecr.aws/docker/library/node:$NODE_IMAGE_TAG"

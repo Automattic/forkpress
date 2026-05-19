@@ -83,3 +83,25 @@ steps:
     notify:
       - github_commit_status:
           context: "Buildkite / Windows cow-check"
+
+  # Mirrors GHA `docs / build`: npm ci + npm run validate (astro check +
+  # node --test + astro build). The GHA `deploy` job is GitHub-Pages-
+  # specific and stays in GHA — not migrated.
+  - label: ":books: Docs validate"
+    key: docs-validate
+    command: .buildkite/commands/docs-validate.sh
+    # Same rationale as the Linux Rust steps: drop `-x` so polluted
+    # `node_modules/` left root-owned by a previous docker run doesn't
+    # break the agent's checkout phase.
+    env:
+      BUILDKITE_GIT_CLEAN_FLAGS: "-fdq"
+    plugins:
+      - $CI_TOOLKIT_PLUGIN
+      - $DOCKER_PLUGIN:
+          image: "$DOCKER_NODE_IMAGE"
+          propagate-environment: true
+    agents:
+      queue: default
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Docs validate"
