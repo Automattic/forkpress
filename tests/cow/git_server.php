@@ -1757,12 +1757,14 @@ assert_true(str_contains($rewritten_config, $main_db), 'existing branch push rew
 assert_true(!str_contains($rewritten_config, $feature_db), 'existing branch push does not keep source branch database path');
 assert_true(str_contains($rewritten_config, $main_debug), 'existing branch push rewrites wp-config.php to target debug log');
 assert_true(!str_contains($rewritten_config, $feature_debug), 'existing branch push does not keep source branch debug log');
+assert_true(str_contains($rewritten_config, "define('WP_DISABLE_FATAL_ERROR_HANDLER', true);"), 'existing branch push keeps WordPress fatal errors visible to ForkPress logs');
 $rewritten_tip = $repo->get_branch_tip('refs/heads/main');
 $git_config = $repo->read_object_by_path('wordpress/wp-config.php', $rewritten_tip)->consume_all();
 assert_true(str_contains($git_config, $main_db), 'push resync exports rewritten target wp-config.php');
 assert_true(!str_contains($git_config, $feature_db), 'push resync removes source wp-config.php database path from Git ref');
 assert_true(str_contains($git_config, $main_debug), 'push resync exports rewritten target debug log');
 assert_true(!str_contains($git_config, $feature_debug), 'push resync removes source debug log from Git ref');
+assert_true(str_contains($git_config, "define('WP_DISABLE_FATAL_ERROR_HANDLER', true);"), 'push resync exports disabled WordPress fatal handler');
 cow_git_remove_tree($tmp);
 
 $tmp = sys_get_temp_dir() . '/forkpress-cow-git-config-shapes-' . getmypid() . '-' . bin2hex(random_bytes(4));
@@ -1779,6 +1781,17 @@ file_put_contents($config_root . '/wp-config.php', $double_quote_config);
 cow_git_rewrite_wp_config_for_root($config_root, $runtime_root, $runtime_root . '/wp-content/database/debug.log');
 $rewritten = file_get_contents($config_root . '/wp-config.php');
 assert_true(str_contains($rewritten, $runtime_root . '/wp-content/database/.ht.sqlite'), 'wp-config rewrite normalizes double-quoted managed constants');
+assert_true(str_contains($rewritten, "define('WP_DISABLE_FATAL_ERROR_HANDLER', true);"), 'wp-config rewrite inserts disabled WordPress fatal handler when absent');
+
+file_put_contents($config_root . '/wp-config.php', "<?php\n"
+    . "define('FQDB', '/old/db.sqlite');\n"
+    . "define('DB_DIR', '/old');\n"
+    . "define('DB_FILE', '.old.sqlite');\n"
+    . "define('WP_DEBUG_LOG', '/old/debug.log');\n"
+    . "define('WP_DISABLE_FATAL_ERROR_HANDLER', false);\n");
+cow_git_rewrite_wp_config_for_root($config_root, $runtime_root, $runtime_root . '/wp-content/database/debug.log');
+$rewritten = file_get_contents($config_root . '/wp-config.php');
+assert_true(str_contains($rewritten, "define('WP_DISABLE_FATAL_ERROR_HANDLER', true);"), 'wp-config rewrite normalizes enabled WordPress fatal handler');
 
 file_put_contents($config_root . '/wp-config.php', "<?php\ndefine('FQDB', '/old/db.sqlite');\n");
 $failed = false;

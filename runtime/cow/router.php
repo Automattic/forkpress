@@ -1159,12 +1159,49 @@ function forkpress_cow_send_file(string $path): void {
     readfile($path);
 }
 
-function forkpress_cow_prepare_php_request(string $path, string $branch_root): void {
+function forkpress_cow_register_php_fatal_logger(string $branch, string $script_path): void {
+    static $registered = false;
+    if ($registered) {
+        return;
+    }
+    $registered = true;
+    $debug_log = getenv('FORKPRESS_DEBUG_LOG') ?: '';
+    $request_uri = $_SERVER['REQUEST_URI'] ?? $script_path;
+    register_shutdown_function(static function() use ($branch, $script_path, $debug_log, $request_uri): void {
+        $error = error_get_last();
+        if (!is_array($error)) {
+            return;
+        }
+        $type = (int)($error['type'] ?? 0);
+        if (!in_array($type, [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR], true)) {
+            return;
+        }
+        $message = (string)($error['message'] ?? 'unknown fatal error');
+        $file = (string)($error['file'] ?? $script_path);
+        $line = (string)($error['line'] ?? '0');
+        $entry = sprintf(
+            "[%s] ForkPress branch '%s' PHP fatal while serving %s: %s in %s:%s\n",
+            date('c'),
+            $branch,
+            $request_uri,
+            $message,
+            $file,
+            $line
+        );
+        error_log(rtrim($entry));
+        if ($debug_log !== '') {
+            @file_put_contents($debug_log, $entry, FILE_APPEND | LOCK_EX);
+        }
+    });
+}
+
+function forkpress_cow_prepare_php_request(string $path, string $branch_root, string $branch): void {
     chdir($branch_root);
     $_SERVER['DOCUMENT_ROOT'] = $branch_root;
     $_SERVER['SCRIPT_FILENAME'] = $path;
     $_SERVER['SCRIPT_NAME'] = substr($path, strlen($branch_root));
     $_SERVER['PHP_SELF'] = $_SERVER['SCRIPT_NAME'];
+    forkpress_cow_register_php_fatal_logger($branch, $path);
 }
 
 if (file_exists($full_path) && !is_dir($full_path)) {
@@ -1174,7 +1211,7 @@ if (file_exists($full_path) && !is_dir($full_path)) {
         return true;
     }
     if (strtolower(pathinfo($full_path, PATHINFO_EXTENSION)) === 'php') {
-        forkpress_cow_prepare_php_request($full_path, $branch_root);
+        forkpress_cow_prepare_php_request($full_path, $branch_root, $branch);
         require $full_path;
         return true;
     }
@@ -1190,7 +1227,7 @@ if (is_dir($full_path)) {
             echo "Not found\n";
             return true;
         }
-        forkpress_cow_prepare_php_request($index, $branch_root);
+        forkpress_cow_prepare_php_request($index, $branch_root, $branch);
         require $index;
         return true;
     }
@@ -1208,6 +1245,6 @@ if (!forkpress_cow_path_is_inside_branch($branch_root, $branch_root . '/index.ph
     echo "Not found\n";
     return true;
 }
-forkpress_cow_prepare_php_request($branch_root . '/index.php', $branch_root);
+forkpress_cow_prepare_php_request($branch_root . '/index.php', $branch_root, $branch);
 require $branch_root . '/index.php';
 return true;
