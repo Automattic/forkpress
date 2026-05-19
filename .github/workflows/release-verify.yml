@@ -138,7 +138,7 @@ jobs:
             -o Acquire::http::Timeout=30 \
             -o Acquire::https::Timeout=30 \
             install -y --no-install-recommends \
-            automake build-essential clang curl git pkg-config unzip \
+            automake autopoint build-essential clang curl git pkg-config unzip \
             musl-tools php-cli composer re2c bison
 
       - name: Install toolchain (windows)
