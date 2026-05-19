@@ -1263,6 +1263,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-row-line { stroke: #f0f0f1; stroke-width: 1; }
     .fp-row-label { fill: #1d2327; font-size: 11px; font-weight: 700; }
     .fp-row-status { fill: #646970; font-size: 10px; }
+    .fp-cross-point { fill: #fff; stroke: #c3c4c7; stroke-width: 1.5; }
     .fp-edge { fill: none; stroke-width: 3; }
     .fp-edge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
     .fp-edge.is-resolved { stroke: var(--ok); }
@@ -1633,6 +1634,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var visual = runVisualClass(run);
             var isMerge = source !== target;
             graph.appendChild(svg('line', { x1: 8, x2: width - 28, y1: y, y2: y, class: 'fp-row-line' }));
+            lanes.forEach(function (lane) {
+                var point = svg('circle', { cx: x[lane], cy: y, r: 3.5, class: 'fp-cross-point' });
+                point.appendChild(svg('title', {})).textContent = lane + ' at revision #' + String(run.id || rowIndex + 1);
+                graph.appendChild(point);
+            });
             if (isMerge) {
                 var edge = svg('path', {
                     d: 'M ' + sx + ' ' + y + ' C ' + (sx + ((tx - sx) * 0.45)) + ' ' + y + ', ' + (sx + ((tx - sx) * 0.55)) + ' ' + y + ', ' + tx + ' ' + y,
