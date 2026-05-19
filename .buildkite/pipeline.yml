@@ -94,6 +94,25 @@ steps:
       - github_commit_status:
           context: "Buildkite / Mac aarch64 build"
 
+  # Cross-build the x86_64 mac binary from the same aarch64 queue. GHA
+  # uses a real `macos-15-intel` runner here; a8c BK has no Intel mac
+  # queue, so this step trades end-to-end coverage for compile-only
+  # coverage. The resulting binary is a smoke artifact only —
+  # release-publish stays the source of truth for shippable Intel
+  # binaries.
+  - label: ":apple: Mac x86_64 cross-build"
+    key: mac-x86_64-build
+    depends_on: mac-aarch64-tests
+    command: .buildkite/commands/mac-x86_64-build.sh
+    artifact_paths:
+      - "target/x86_64-apple-darwin/release/forkpress"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: mac
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Mac x86_64 cross-build"
+
   - label: ":windows: Windows cow-check"
     key: windows-cow-check
     command: ".buildkite\\commands\\windows-cow-check.ps1"
