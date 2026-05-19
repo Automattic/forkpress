@@ -1544,6 +1544,28 @@ function cow_git_rewrite_wp_config_for_root(string $config_root, string $runtime
         }
         $config = $rewritten;
     }
+    $fatal_handler_define = "define('WP_DISABLE_FATAL_ERROR_HANDLER', true);";
+    if (preg_match(cow_git_wp_config_define_pattern('WP_DISABLE_FATAL_ERROR_HANDLER'), $config)) {
+        $rewritten = preg_replace(
+            cow_git_wp_config_define_pattern('WP_DISABLE_FATAL_ERROR_HANDLER'),
+            $fatal_handler_define,
+            $config,
+            1
+        );
+        if ($rewritten === null) {
+            throw new \RuntimeException("failed to normalize managed wp-config.php constant WP_DISABLE_FATAL_ERROR_HANDLER in $config_path");
+        }
+        $config = $rewritten;
+    } else {
+        $anchor = cow_git_wp_config_define_pattern('WP_DEBUG_DISPLAY');
+        $count = 0;
+        $rewritten = preg_replace($anchor, '$0' . "\n" . $fatal_handler_define, $config, 1, $count);
+        if ($rewritten === null || $count !== 1) {
+            $config .= "\n" . $fatal_handler_define . "\n";
+        } else {
+            $config = $rewritten;
+        }
+    }
     if (file_put_contents($config_path, $config) === false) {
         throw new \RuntimeException("failed to write $config_path");
     }

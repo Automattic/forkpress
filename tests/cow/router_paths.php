@@ -30,13 +30,13 @@ function rm_tree(string $path): void {
     }
     @rmdir($path);
 }
-function router_request(string $child, string $branches, string $cow, string $router, string $uri): array {
+function router_request(string $child, string $branches, string $cow, string $router, string $uri, string $debug_log = ''): array {
     $descriptor = [
         0 => ['pipe', 'r'],
         1 => ['pipe', 'w'],
         2 => ['pipe', 'w'],
     ];
-    $process = proc_open([PHP_BINARY, $child, $branches, $cow, $router, $uri], $descriptor, $pipes);
+    $process = proc_open([PHP_BINARY, $child, $branches, $cow, $router, $uri, $debug_log], $descriptor, $pipes);
     if (!is_resource($process)) {
         return ['status' => 0, 'body' => '', 'stderr' => 'proc_open failed'];
     }
@@ -63,6 +63,7 @@ $branches = $site;
 $cow = $site . '/.forkpress/cow';
 $main = $site . '/main';
 $secret = $site . '/.forkpress/site.toml';
+$debug_log = $site . '/.forkpress/logs/wp-debug.log';
 $child = $tmp . '/request.php';
 $router = realpath(__DIR__ . '/../../runtime/cow/router.php');
 assert_true($router !== false, 'router fixture exists');
@@ -72,8 +73,10 @@ register_shutdown_function(static function() use ($tmp): void {
 
 mkdir($main, 0777, true);
 mkdir(dirname($secret), 0777, true);
+mkdir(dirname($debug_log), 0777, true);
 mkdir($cow, 0777, true);
 file_put_contents($main . '/index.php', "<?php echo \"INDEX\";\n");
+file_put_contents($main . '/fatal.php', "<?php forkpress_missing_function_for_router_test();\n");
 file_put_contents($main . '/safe.txt', "safe\n");
 mkdir($main . '/wp-admin', 0777, true);
 file_put_contents($main . '/wp-admin/plugin-install.php', "<?php echo \"PLUGIN INSTALL ADMIN\";\n");
@@ -85,9 +88,13 @@ $branches = $argv[1];
 $cow = $argv[2];
 $router = $argv[3];
 $uri = $argv[4];
+$debug_log = $argv[5] ?? '';
 putenv('FORKPRESS_BRANCHES_DIR=' . $branches);
 putenv('FORKPRESS_COW_DIR=' . $cow);
 putenv('FORKPRESS_ROOT_HOST=wp.localhost');
+if ($debug_log !== '') {
+    putenv('FORKPRESS_DEBUG_LOG=' . $debug_log);
+}
 $_SERVER = [
     'HTTP_HOST'       => 'wp.localhost',
     'REQUEST_URI'     => $uri,
@@ -108,6 +115,12 @@ assert_same($response['exit'], 0, 'safe static request exits cleanly');
 assert_same($response['status'], 200, 'safe static request returns 200');
 assert_same($response['body'], "safe\n", 'safe static request serves branch file');
 assert_same($response['stderr'], '', 'safe static request produces no stderr');
+
+$response = router_request($child, $branches, $cow, $router, '/fatal.php', $debug_log);
+assert_true(($response['exit'] ?? 0) !== 0, 'fatal PHP request exits with failure');
+$logged = file_exists($debug_log) ? (string)file_get_contents($debug_log) : '';
+assert_true(str_contains($logged, "ForkPress branch 'main' PHP fatal while serving /fatal.php"), 'fatal PHP request is logged with branch and URI');
+assert_true(str_contains($logged, 'forkpress_missing_function_for_router_test'), 'fatal PHP request log includes the PHP fatal message');
 
 $response = router_request($child, $branches, $cow, $router, '/wp-admin/plugin-install.php');
 assert_same($response['exit'], 0, 'wp-admin plugin install request exits cleanly');

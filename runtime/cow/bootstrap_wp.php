@@ -157,6 +157,7 @@ define('NONCE_SALT',       'forkpress-cow-s4-xxxxxxxxxxxxxxxx');
 define('WP_DEBUG', true);
 define('WP_DEBUG_LOG', '__DEBUG_LOG__');
 define('WP_DEBUG_DISPLAY', false);
+define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
 define('FS_METHOD', 'direct');
 define('DISALLOW_FILE_MODS', false);
 define('DISALLOW_FILE_EDIT', true);
