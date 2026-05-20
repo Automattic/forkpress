@@ -644,8 +644,336 @@ function forkpress_cow_branch_tree_summary(array $report, int $limit): array {
     ];
 }
 
+function forkpress_cow_decode_typed_payload($value) {
+    if (!is_string($value) || $value === '') {
+        return null;
+    }
+    $decoded = json_decode($value, true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+    $plain = static function ($item) use (&$plain) {
+        if (!is_array($item)) {
+            return $item;
+        }
+        if (array_key_exists('type', $item)) {
+            $type = (string)($item['type'] ?? '');
+            if ($type === 'bytes' && is_string($item['base64'] ?? null)) {
+                $bytes = base64_decode((string)$item['base64'], true);
+                return $bytes === false ? '' : $bytes;
+            }
+            if (array_key_exists('value', $item)) {
+                return $item['value'];
+            }
+            if ($type === 'null') {
+                return null;
+            }
+        }
+        $out = [];
+        foreach ($item as $key => $child) {
+            $out[$key] = $plain($child);
+        }
+        return $out;
+    };
+    return $plain($decoded);
+}
+
+function forkpress_cow_sqlite_identifier(string $name): string {
+    return '"' . str_replace('"', '""', $name) . '"';
+}
+
+function forkpress_cow_sqlite_columns(SQLite3 $db, string $table): array {
+    $columns = [];
+    $res = @$db->query('PRAGMA table_info(' . forkpress_cow_sqlite_identifier($table) . ')');
+    if (!$res instanceof SQLite3Result) {
+        return [];
+    }
+    while ($row = $res->fetchArray(SQLITE3_ASSOC)) {
+        if (is_string($row['name'] ?? null)) {
+            $columns[(string)$row['name']] = true;
+        }
+    }
+    $res->finalize();
+    return $columns;
+}
+
+function forkpress_cow_first_conflict_context_row(array $record, string $table, string $where_column, $where_value, array $select_columns): ?array {
+    if (!class_exists('SQLite3')) {
+        return null;
+    }
+    foreach (['target_db', 'source_db'] as $db_key) {
+        $path = (string)($record[$db_key] ?? '');
+        if ($path === '' || !is_file($path)) {
+            continue;
+        }
+        try {
+            $db = new SQLite3($path, SQLITE3_OPEN_READONLY);
+            $columns = forkpress_cow_sqlite_columns($db, $table);
+            if (!isset($columns[$where_column])) {
+                $db->close();
+                continue;
+            }
+            $usable = [];
+            foreach ($select_columns as $column) {
+                if (isset($columns[$column])) {
+                    $usable[] = $column;
+                }
+            }
+            if ($usable === []) {
+                $usable[] = $where_column;
+            }
+            $select = implode(', ', array_map('forkpress_cow_sqlite_identifier', array_unique($usable)));
+            $sql = 'SELECT ' . $select . ' FROM ' . forkpress_cow_sqlite_identifier($table) . ' WHERE ' . forkpress_cow_sqlite_identifier($where_column) . ' = :value LIMIT 1';
+            $stmt = $db->prepare($sql);
+            if (!$stmt instanceof SQLite3Stmt) {
+                $db->close();
+                continue;
+            }
+            $stmt->bindValue(':value', $where_value, is_int($where_value) ? SQLITE3_INTEGER : SQLITE3_TEXT);
+            $res = $stmt->execute();
+            if (!$res instanceof SQLite3Result) {
+                $db->close();
+                continue;
+            }
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+            $res->finalize();
+            $db->close();
+            if (is_array($row)) {
+                $row['_db_source'] = $db_key === 'target_db' ? 'target' : 'source';
+                return $row;
+            }
+        } catch (Throwable) {
+            continue;
+        }
+    }
+    return null;
+}
+
+function forkpress_cow_conflict_row_payload(array $record): array {
+    foreach (['target_row_payload', 'source_row_payload'] as $key) {
+        $row = forkpress_cow_decode_typed_payload((string)($record[$key] ?? ''));
+        if (!is_array($row) || $row === []) {
+            continue;
+        }
+        $row['_db_source'] = $key === 'target_row_payload' ? 'target row payload' : 'source row payload';
+        return $row;
+    }
+    return [];
+}
+
+function forkpress_cow_conflict_metadata_payloads(string $metadata_db, int $conflict_id): array {
+    if ($metadata_db === '' || $conflict_id <= 0 || !class_exists('SQLite3') || !is_file($metadata_db)) {
+        return [];
+    }
+    try {
+        $db = new SQLite3($metadata_db, SQLITE3_OPEN_READONLY);
+        $stmt = $db->prepare('SELECT source_row_payload, target_row_payload FROM merge_conflicts WHERE id = :id LIMIT 1');
+        if (!$stmt instanceof SQLite3Stmt) {
+            $db->close();
+            return [];
+        }
+        $stmt->bindValue(':id', $conflict_id, SQLITE3_INTEGER);
+        $res = $stmt->execute();
+        if (!$res instanceof SQLite3Result) {
+            $db->close();
+            return [];
+        }
+        $row = $res->fetchArray(SQLITE3_ASSOC);
+        $res->finalize();
+        $db->close();
+        return is_array($row) ? $row : [];
+    } catch (Throwable) {
+        return [];
+    }
+}
+
+function forkpress_cow_post_context_from_id(array $record, int $post_id): ?array {
+    $row = forkpress_cow_first_conflict_context_row($record, 'wp_posts', 'ID', $post_id, ['ID', 'post_type', 'post_title', 'post_name', 'post_status']);
+    if (!is_array($row)) {
+        $payload_row = forkpress_cow_conflict_row_payload($record);
+        $payload_post_id = isset($payload_row['ID']) ? (int)$payload_row['ID'] : 0;
+        if ($payload_post_id === $post_id) {
+            $row = $payload_row;
+        }
+    }
+    if (!is_array($row)) {
+        return null;
+    }
+    $title = trim((string)($row['post_title'] ?? ''));
+    $type = trim((string)($row['post_type'] ?? 'post'));
+    $slug = trim((string)($row['post_name'] ?? ''));
+    return [
+        'entityType' => 'post',
+        'entityLabel' => ucfirst($type) . ' #' . $post_id,
+        'identifier' => 'ID ' . $post_id,
+        'context' => trim(($title !== '' ? $title : '(untitled)') . ($slug !== '' ? ' / ' . $slug : '')),
+        'details' => array_filter([
+            'post_id' => $post_id,
+            'post_type' => $type,
+            'post_title' => $title,
+            'post_name' => $slug,
+            'post_status' => $row['post_status'] ?? null,
+            'database' => $row['_db_source'] ?? null,
+        ], static fn($value) => $value !== null && $value !== ''),
+    ];
+}
+
+function forkpress_cow_conflict_entity_context(array $record): array {
+    $table = (string)($record['table_name'] ?? '');
+    $column = (string)($record['column_name'] ?? '');
+    $identity = forkpress_cow_decode_typed_payload((string)($record['row_identity'] ?? ''));
+    $identity = is_array($identity) ? $identity : [];
+    $field = $column !== '' ? $column : (string)($record['conflict_type'] ?? '');
+
+    if ($table === '__plugins__' || isset($record['plugin'])) {
+        $object = (string)($record['plugin_object'] ?? '');
+        $plugin = (string)($record['plugin'] ?? '');
+        $type = str_contains((string)($record['conflict_type'] ?? ''), 'theme') || str_starts_with($object, 'theme:')
+            ? 'theme'
+            : 'plugin';
+        return [
+            'entityType' => $type,
+            'entityLabel' => $type === 'theme' ? 'Theme conflict' : 'Plugin conflict',
+            'identifier' => $object !== '' ? $object : ($plugin !== '' ? $plugin : (string)($record['conflict_key'] ?? '')),
+            'field' => (string)($record['conflict_type'] ?? 'plugin-validator-conflict'),
+            'context' => (string)($record['plugin_reason'] ?? $record['plugin_suggested_action'] ?? ''),
+            'details' => array_filter([
+                'plugin' => $plugin,
+                'object' => $object,
+                'severity' => $record['plugin_severity'] ?? null,
+                'validator' => $record['plugin_validator'] ?? null,
+                'semantic_scope' => $record['semantic_scope'] ?? null,
+                'files' => $record['plugin_files'] ?? null,
+                'tables' => $record['plugin_tables'] ?? null,
+            ], static fn($value) => $value !== null && $value !== '' && $value !== []),
+        ];
+    }
+
+    if ($table === '__files__') {
+        $path = (string)($identity['path'] ?? $record['path'] ?? $record['file_path'] ?? '');
+        return [
+            'entityType' => 'file',
+            'entityLabel' => 'File',
+            'identifier' => $path,
+            'field' => 'path',
+            'context' => (string)($record['conflict_type'] ?? ''),
+            'details' => ['path' => $path],
+        ];
+    }
+
+    if ($table === 'wp_options') {
+        $option_id = isset($identity['option_id']) ? (int)$identity['option_id'] : null;
+        $row = $option_id !== null ? forkpress_cow_first_conflict_context_row($record, 'wp_options', 'option_id', $option_id, ['option_id', 'option_name', 'autoload']) : null;
+        $payload_row = is_array($row) ? [] : forkpress_cow_conflict_row_payload($record);
+        $context_row = is_array($row) ? $row : $payload_row;
+        $option_name = (string)($context_row['option_name'] ?? $identity['option_name'] ?? '');
+        return [
+            'entityType' => 'option',
+            'entityLabel' => 'Option',
+            'identifier' => $option_name !== '' ? $option_name : ($option_id !== null ? 'option_id ' . $option_id : ''),
+            'field' => $field,
+            'context' => $option_id !== null ? 'option_id ' . $option_id : '',
+            'details' => array_filter([
+                'option_id' => $option_id,
+                'option_name' => $option_name,
+                'autoload' => $context_row['autoload'] ?? null,
+                'database' => $context_row['_db_source'] ?? null,
+                'row_lookup' => $context_row === [] ? 'not found in source or target database' : null,
+            ], static fn($value) => $value !== null && $value !== ''),
+        ];
+    }
+
+    if ($table === 'wp_posts' && isset($identity['ID'])) {
+        $context = forkpress_cow_post_context_from_id($record, (int)$identity['ID']);
+        if ($context !== null) {
+            $context['field'] = $field;
+            return $context;
+        }
+    }
+
+    if ($table === 'wp_postmeta') {
+        $meta_id = isset($identity['meta_id']) ? (int)$identity['meta_id'] : null;
+        $row = $meta_id !== null ? forkpress_cow_first_conflict_context_row($record, 'wp_postmeta', 'meta_id', $meta_id, ['meta_id', 'post_id', 'meta_key']) : null;
+        $payload_row = is_array($row) ? [] : forkpress_cow_conflict_row_payload($record);
+        $context_row = is_array($row) ? $row : $payload_row;
+        $post_id = (int)($context_row['post_id'] ?? $identity['post_id'] ?? 0);
+        $post_context = $post_id > 0 ? forkpress_cow_post_context_from_id($record, $post_id) : null;
+        $meta_key = (string)($context_row['meta_key'] ?? $identity['meta_key'] ?? '');
+        return [
+            'entityType' => 'postmeta',
+            'entityLabel' => 'Post meta',
+            'identifier' => $meta_key !== '' ? $meta_key : ($meta_id !== null ? 'meta_id ' . $meta_id : ''),
+            'field' => $field,
+            'context' => trim(($post_id > 0 ? 'post_id ' . $post_id : '') . ($post_context ? ' / ' . $post_context['context'] : '')),
+            'details' => array_filter([
+                'meta_id' => $meta_id,
+                'post_id' => $post_id > 0 ? $post_id : null,
+                'meta_key' => $meta_key,
+                'post' => $post_context['context'] ?? null,
+                'database' => $context_row['_db_source'] ?? null,
+                'row_lookup' => $context_row === [] ? 'not found in source or target database' : null,
+            ], static fn($value) => $value !== null && $value !== ''),
+        ];
+    }
+
+    if ($table === 'wp_terms') {
+        $term_id = isset($identity['term_id']) ? (int)$identity['term_id'] : null;
+        $row = $term_id !== null ? forkpress_cow_first_conflict_context_row($record, 'wp_terms', 'term_id', $term_id, ['term_id', 'name', 'slug']) : null;
+        $payload_row = is_array($row) ? [] : forkpress_cow_conflict_row_payload($record);
+        $context_row = is_array($row) ? $row : $payload_row;
+        return [
+            'entityType' => 'term',
+            'entityLabel' => 'Term',
+            'identifier' => (string)($context_row['name'] ?? '') !== '' ? (string)$context_row['name'] : ($term_id !== null ? 'term_id ' . $term_id : ''),
+            'field' => $field,
+            'context' => (string)($context_row['slug'] ?? ''),
+            'details' => array_filter([
+                'term_id' => $term_id,
+                'name' => $context_row['name'] ?? null,
+                'slug' => $context_row['slug'] ?? null,
+                'database' => $context_row['_db_source'] ?? null,
+                'row_lookup' => $context_row === [] ? 'not found in source or target database' : null,
+            ], static fn($value) => $value !== null && $value !== ''),
+        ];
+    }
+
+    $identifier_parts = [];
+    foreach ($identity as $key => $value) {
+        if (is_scalar($value)) {
+            $identifier_parts[] = $key . '=' . (string)$value;
+        }
+    }
+    return [
+        'entityType' => $table !== '' ? $table : 'record',
+        'entityLabel' => $table !== '' ? $table : 'Record',
+        'identifier' => implode(', ', $identifier_parts),
+        'field' => $field,
+        'context' => (string)($record['conflict_key'] ?? ''),
+        'details' => $identity,
+    ];
+}
+
+function forkpress_cow_enrich_conflict_records(array $records, string $metadata_db = ''): array {
+    foreach ($records as &$record) {
+        if (is_array($record) && (!isset($record['source_row_payload']) || !isset($record['target_row_payload']))) {
+            $payloads = forkpress_cow_conflict_metadata_payloads($metadata_db, (int)($record['id'] ?? 0));
+            foreach (['source_row_payload', 'target_row_payload'] as $key) {
+                if (!isset($record[$key]) && isset($payloads[$key])) {
+                    $record[$key] = $payloads[$key];
+                }
+            }
+        }
+        if (is_array($record) && !isset($record['entityContext']) && !isset($record['entity_context'])) {
+            $record['entityContext'] = forkpress_cow_conflict_entity_context($record);
+        }
+    }
+    unset($record);
+    return $records;
+}
+
 function forkpress_cow_branch_conflict_audit_summary(array $report, int $run, array $filters = []): array {
     $records = is_array($report['conflicts'] ?? null) ? array_values($report['conflicts']) : [];
+    $records = forkpress_cow_enrich_conflict_records($records, (string)($report['metadata_db'] ?? ''));
     $total = count($records);
     $runs = is_array($report['runs'] ?? null) ? $report['runs'] : [];
     foreach ($runs as $run_record) {
@@ -1498,6 +1826,60 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         display: grid;
         gap: 10px;
     }
+    .fp-conflict-workbench {
+        display: none;
+        grid-column: 1 / -1;
+    }
+    .fp-conflict-workbench.is-visible { display: block; }
+    .fp-conflict-workbench-body {
+        display: grid;
+        gap: 14px;
+        padding: 14px 16px 16px;
+    }
+    .fp-conflict-table-wrap {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        overflow: auto;
+    }
+    .fp-conflict-table {
+        border-collapse: collapse;
+        min-width: 1160px;
+        width: 100%;
+    }
+    .fp-conflict-table th {
+        background: #f6f7f7;
+        border-bottom: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        padding: 8px;
+        position: sticky;
+        text-align: left;
+        text-transform: uppercase;
+        top: 0;
+        vertical-align: top;
+        z-index: 1;
+    }
+    .fp-conflict-table td {
+        border-top: 1px solid #f0f0f1;
+        font-size: 12px;
+        line-height: 1.35;
+        max-width: 260px;
+        overflow-wrap: anywhere;
+        padding: 9px 8px;
+        vertical-align: top;
+    }
+    .fp-conflict-table tbody tr:hover { background: #f6fbff; }
+    .fp-table-primary { font-weight: 700; }
+    .fp-table-muted {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 3px;
+    }
+    .fp-conflict-details {
+        display: grid;
+        gap: 10px;
+    }
     .fp-conflict {
         border: 1px solid var(--line);
         border-left: 4px solid var(--conflict);
@@ -1621,7 +2003,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     <div class="fp-status" id="fp-status"></div>
                     <div class="fp-kv" id="fp-detail"></div>
                     <div class="fp-buttons" id="fp-detail-actions"></div>
-                    <div class="fp-conflicts" id="fp-conflicts"></div>
                     <pre id="fp-raw"></pre>
                 </div>
             </section>
@@ -1643,6 +2024,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 </details>
             </section>
         </aside>
+        <section class="fp-panel fp-conflict-workbench" id="fp-conflict-workbench">
+            <div class="fp-detail-head">
+                <div>
+                    <h2 id="fp-conflict-title">Conflict Review</h2>
+                    <div class="fp-muted" id="fp-conflict-summary">Select a conflicting revision to inspect entity-level details.</div>
+                </div>
+            </div>
+            <div class="fp-conflict-workbench-body">
+                <div class="fp-conflicts" id="fp-conflicts"></div>
+            </div>
+        </section>
     </main>
 </div>
 <script>
@@ -1654,6 +2046,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var detail = document.getElementById('fp-detail');
     var detailTitle = document.getElementById('fp-detail-title');
     var detailActions = document.getElementById('fp-detail-actions');
+    var conflictWorkbench = document.getElementById('fp-conflict-workbench');
+    var conflictTitle = document.getElementById('fp-conflict-title');
+    var conflictSummaryText = document.getElementById('fp-conflict-summary');
     var conflicts = document.getElementById('fp-conflicts');
     var raw = document.getElementById('fp-raw');
     var status = document.getElementById('fp-status');
@@ -1678,6 +2073,16 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function clearStatus() {
         status.className = 'fp-status';
         status.textContent = '';
+    }
+    function showConflictWorkbench(title, message) {
+        conflictWorkbench.className = 'fp-panel fp-conflict-workbench is-visible';
+        conflictTitle.textContent = title || 'Conflict Review';
+        conflictSummaryText.textContent = message || '';
+    }
+    function hideConflictWorkbench() {
+        conflictWorkbench.className = 'fp-panel fp-conflict-workbench';
+        conflicts.innerHTML = '';
+        conflictSummaryText.textContent = 'Select a conflicting revision to inspect entity-level details.';
     }
     function post(action, fields) {
         var body = new FormData();
@@ -2043,7 +2448,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         detailTitle.textContent = title;
         detail.innerHTML = '';
         detailActions.innerHTML = '';
-        conflicts.innerHTML = '';
+        hideConflictWorkbench();
         Object.keys(rows).forEach(function (key) {
             var row = document.createElement('div');
             var label = document.createElement('span');
@@ -2100,6 +2505,49 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         } catch (error) {}
         return text;
     }
+    function parsePreviewObject(value) {
+        if (value === undefined || value === null || value === '') return {};
+        if (typeof value === 'object') return value || {};
+        try {
+            var parsed = JSON.parse(String(value));
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (error) {
+            return {};
+        }
+    }
+    function typedPayloadToPlain(value) {
+        if (!value || typeof value !== 'object') return value;
+        if (Object.prototype.hasOwnProperty.call(value, 'type')) {
+            if (Object.prototype.hasOwnProperty.call(value, 'value')) return value.value;
+            if (value.type === 'null') return null;
+            if (value.type === 'bytes' && typeof value.base64 === 'string') return '[binary]';
+        }
+        var out = {};
+        Object.keys(value).forEach(function (key) { out[key] = typedPayloadToPlain(value[key]); });
+        return out;
+    }
+    function conflictIdentity(record) {
+        var preview = parsePreviewObject(record.row_identity_preview);
+        if (Object.keys(preview).length) return preview;
+        var raw = parsePreviewObject(record.row_identity);
+        return typedPayloadToPlain(raw) || {};
+    }
+    function detailsText(details) {
+        if (!details || typeof details !== 'object') return '';
+        return Object.keys(details).map(function (key) {
+            var value = details[key];
+            if (value === undefined || value === null || value === '') return '';
+            if (Array.isArray(value)) value = value.join(', ');
+            if (typeof value === 'object') value = JSON.stringify(value);
+            return key + ': ' + String(value);
+        }).filter(Boolean).join(' / ');
+    }
+    function shortPreview(value) {
+        var text = cleanPreview(value);
+        text = String(text || '').replace(/\s+/g, ' ').trim();
+        if (text.length > 140) return text.slice(0, 137) + '...';
+        return text;
+    }
     function decodeAuditPayload(value) {
         if (value === undefined || value === null || value === '') return '';
         if (typeof value !== 'string') return JSON.stringify(value, null, 2);
@@ -2132,6 +2580,61 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (record.file_path) return record.file_path;
         if (record.plugin_object) return record.plugin_object;
         return record.conflict_key || ('Conflict #' + record.id);
+    }
+    function conflictEntityContext(record) {
+        var context = record.entityContext || record.entity_context || {};
+        var details = context.details && typeof context.details === 'object' ? context.details : {};
+        var identity = conflictIdentity(record);
+        var table = String(record.table_name || '');
+        var column = String(record.column_name || '');
+        var type = String(context.entityType || context.entity_type || '');
+        var label = String(context.entityLabel || context.entity_label || '');
+        var identifier = String(context.identifier || '');
+        var field = String(context.field || column || record.conflict_type || '');
+        var contextText = String(context.context || '');
+
+        if (!type && (table === '__plugins__' || record.plugin)) type = String(record.conflict_type || '').indexOf('theme') !== -1 ? 'theme' : 'plugin';
+        if (!label && type) label = type.charAt(0).toUpperCase() + type.slice(1);
+        if (!type && table) type = table;
+        if (!label && table) label = table;
+
+        if (table === 'wp_options') {
+            type = 'option';
+            label = 'Option';
+            identifier = identifier || String(details.option_name || identity.option_name || (identity.option_id ? 'option_id ' + identity.option_id : ''));
+            contextText = contextText || (identity.option_id ? 'option_id ' + identity.option_id : '');
+        } else if (table === 'wp_posts') {
+            type = 'post';
+            label = label || 'Post';
+            identifier = identifier || (identity.ID ? 'ID ' + identity.ID : '');
+        } else if (table === 'wp_postmeta') {
+            type = 'postmeta';
+            label = 'Post meta';
+            identifier = identifier || String(details.meta_key || identity.meta_key || (identity.meta_id ? 'meta_id ' + identity.meta_id : ''));
+            contextText = contextText || [
+                details.post_id || identity.post_id ? 'post_id ' + String(details.post_id || identity.post_id) : '',
+                details.post || ''
+            ].filter(Boolean).join(' / ');
+        } else if (table === '__files__') {
+            type = 'file';
+            label = 'File';
+            identifier = identifier || String(identity.path || record.path || record.file_path || '');
+        } else if (table === '__plugins__' || record.plugin) {
+            label = type === 'theme' ? 'Theme conflict' : 'Plugin conflict';
+            identifier = identifier || String(record.plugin_object || record.plugin || record.conflict_key || '');
+            contextText = contextText || String(record.plugin_reason || record.plugin_suggested_action || '');
+        }
+
+        return {
+            entityType: type || 'record',
+            entityLabel: label || 'Record',
+            identifier: identifier,
+            field: field,
+            context: contextText,
+            details: details,
+            table: table,
+            column: column
+        };
     }
     function conflictPluginMeta(record) {
         if (!record || (record.table_name !== '__plugins__' && !record.plugin)) return '';
@@ -2200,6 +2703,90 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!record || !record.latest_resolution_id) return 'Current applied resolution can be changed by selecting source or target.';
         return 'Current applied resolution #' + String(record.latest_resolution_id) + ' used ' + String(record.latest_resolution_choice || 'a reviewed') + ' choice.';
     }
+    function appendTableCell(row, parts) {
+        var cell = document.createElement('td');
+        (parts || []).forEach(function (part) {
+            if (!part || part.text === undefined || part.text === null || part.text === '') return;
+            cell.appendChild(textNode('div', part.className || '', part.text));
+        });
+        row.appendChild(cell);
+        return cell;
+    }
+    function conflictStateText(record) {
+        return [
+            record.lifecycle_state || 'unreviewed',
+            record.next_action ? 'next: ' + record.next_action : '',
+            record.review_status ? 'review: ' + record.review_status : '',
+            record.latest_resolution_status ? 'resolution: ' + record.latest_resolution_status : '',
+            record.stale_status ? 'stale: ' + record.stale_status : ''
+        ].filter(Boolean).join(' / ');
+    }
+    function conflictValueSummary(record) {
+        if (conflictIsPluginRecord(record)) {
+            return [
+                record.plugin_reason || '',
+                record.plugin_suggested_action ? 'suggested: ' + record.plugin_suggested_action : ''
+            ].filter(Boolean).join(' / ');
+        }
+        return [
+            conflictValue(record, 'source_payload', 'source_preview') ? 'source: ' + shortPreview(conflictValue(record, 'source_payload', 'source_preview')) : '',
+            conflictValue(record, 'target_payload', 'target_preview') ? 'target: ' + shortPreview(conflictValue(record, 'target_payload', 'target_preview')) : ''
+        ].filter(Boolean).join(' / ');
+    }
+    function renderConflictTable(payload, list) {
+        var wrap = document.createElement('div');
+        wrap.className = 'fp-conflict-table-wrap';
+        var table = document.createElement('table');
+        table.className = 'fp-conflict-table';
+        var thead = document.createElement('thead');
+        var header = document.createElement('tr');
+        ['Conflict', 'Entity', 'Identifier', 'Field', 'Context', 'Values', 'Action'].forEach(function (label) {
+            header.appendChild(textNode('th', '', label));
+        });
+        thead.appendChild(header);
+        table.appendChild(thead);
+        var tbody = document.createElement('tbody');
+        list.forEach(function (record) {
+            var context = conflictEntityContext(record);
+            var row = document.createElement('tr');
+            var details = detailsText(context.details);
+            appendTableCell(row, [
+                { className: 'fp-table-primary', text: '#' + String(record.id || '') },
+                { className: 'fp-table-muted', text: conflictStateText(record) }
+            ]);
+            appendTableCell(row, [
+                { className: 'fp-table-primary', text: context.entityLabel },
+                { className: 'fp-table-muted', text: context.table && context.column ? context.table + '.' + context.column : context.table }
+            ]);
+            appendTableCell(row, [
+                { className: 'fp-table-primary', text: context.identifier || '(unknown)' },
+                { className: 'fp-table-muted', text: context.entityType }
+            ]);
+            appendTableCell(row, [
+                { className: 'fp-table-primary', text: context.field || record.conflict_type || '' },
+                { className: 'fp-table-muted', text: record.conflict_type || '' }
+            ]);
+            appendTableCell(row, [
+                { className: 'fp-table-primary', text: context.context || details || '(no context)' },
+                { className: 'fp-table-muted', text: context.context && details ? details : '' }
+            ]);
+            appendTableCell(row, [
+                { className: 'fp-table-primary', text: conflictValueSummary(record) || '(review details below)' },
+                { className: 'fp-table-muted', text: conflictPluginMeta(record) }
+            ]);
+            var actionCell = document.createElement('td');
+            var jump = button('Details', function () {
+                var card = document.getElementById('fp-conflict-card-' + String(record.id || ''));
+                if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            actionCell.appendChild(jump);
+            tbody.appendChild(row);
+            row.appendChild(actionCell);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        return wrap;
+    }
     function selectBranch(name) {
         var item = branch(name);
         selectedRunId = null;
@@ -2240,12 +2827,30 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             renderGraph();
         }
         setStatus(list.length ? 'warn' : 'ok', payload.message || 'Loaded conflict details.');
+        var summary = payload.conflictSummary || payload.conflict_summary || {};
+        var summaryParts = [];
+        if (summary.total !== undefined) {
+            summaryParts.push(String(summary.unresolved || 0) + ' unresolved');
+            summaryParts.push(String(summary.resolved || 0) + ' resolved');
+            summaryParts.push(String(summary.total || list.length) + ' total');
+        } else {
+            summaryParts.push(String(list.length) + ' listed');
+        }
+        showConflictWorkbench('Conflict Review: revision #' + String(payload.run || ''), summaryParts.join(' / '));
         conflicts.innerHTML = '';
         raw.textContent = '';
         raw.style.display = 'none';
+        if (!list.length) {
+            conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflicts found for this revision.'));
+            return;
+        }
+        conflicts.appendChild(renderConflictTable(payload, list));
+        var detailList = document.createElement('div');
+        detailList.className = 'fp-conflict-details';
         list.forEach(function (record) {
             var node = document.createElement('div');
             node.className = 'fp-conflict';
+            node.id = 'fp-conflict-card-' + String(record.id || '');
             var title = textNode('div', 'fp-conflict-title', '#' + String(record.id || '') + ' ' + conflictObjectLabel(record));
             var metaParts = [
                 record.conflict_type,
@@ -2333,8 +2938,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 node.appendChild(choiceWrap);
                 node.appendChild(row);
             }
-            conflicts.appendChild(node);
+            detailList.appendChild(node);
         });
+        conflicts.appendChild(detailList);
     }
     function loadTree() {
         setStatus('warn', 'Loading branch graph...');
@@ -2367,6 +2973,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         }).catch(function (error) { setStatus('error', error.message || 'Could not load history.'); });
     }
     function renderConflictLoading(run) {
+        showConflictWorkbench('Conflict Review: revision #' + String(run || ''), 'Loading entity-level conflict context...');
         conflicts.innerHTML = '';
         raw.textContent = '';
         raw.style.display = 'none';

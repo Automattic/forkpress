@@ -261,6 +261,16 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'renderConflictLoading'), 'out-of-band branch manager renders an immediate conflict loader');
         assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
         assert_true(str_contains($early_body, 'forkpress_branch_conflicts'), 'out-of-band branch manager can revisit conflicts');
+        assert_true(str_contains($early_body, 'fp-conflict-workbench'), 'out-of-band branch manager renders conflicts in a full-page workbench');
+        assert_true(str_contains($early_body, 'function renderConflictTable'), 'out-of-band branch manager renders conflict summaries as an entity table');
+        assert_true(str_contains($early_body, 'function conflictEntityContext'), 'out-of-band branch manager normalizes conflict entity context for review');
+        assert_true(str_contains($early_body, 'entityContext'), 'out-of-band branch manager receives enriched conflict entity context from audits');
+        assert_true(str_contains(file_get_contents($router), 'forkpress_cow_conflict_row_payload'), 'out-of-band branch manager can enrich stale conflict context from captured row payloads');
+        assert_true(str_contains($early_body, 'wp_options'), 'out-of-band branch manager explains option conflicts by option row context');
+        assert_true(str_contains($early_body, 'option_name'), 'out-of-band branch manager exposes option names in conflict context');
+        assert_true(str_contains($early_body, 'wp_posts'), 'out-of-band branch manager explains post conflicts by post ID context');
+        assert_true(str_contains($early_body, 'post_id'), 'out-of-band branch manager exposes post IDs in conflict context');
+        assert_true(str_contains($early_body, 'meta_key'), 'out-of-band branch manager exposes post meta keys in conflict context');
         assert_true(str_contains($early_body, 'fp-conflict-grid'), 'out-of-band branch manager renders conflict values as review fields');
         assert_true(str_contains($early_body, 'decodeAuditPayload'), 'out-of-band branch manager decodes audit payloads for review');
         assert_true(str_contains($early_body, 'Review note'), 'out-of-band branch manager exposes editable review notes');

@@ -19684,7 +19684,7 @@ function cow_merge_audit_report(string $metadata_db, ?int $run_id = null, int $l
                 $db,
                 'merge_conflicts',
                 "SELECT merge_conflicts.id AS id, run_id, $conflict_key_select, table_name, row_identity, column_name, conflict_type, resolver, resolved_at, created_at, " .
-                "base_payload, source_payload, target_payload, chosen_payload, r.source_db, r.target_db, r.source_branch, r.target_branch, " .
+                "base_payload, source_payload, target_payload, chosen_payload, source_row_payload, target_row_payload, r.source_db, r.target_db, r.source_branch, r.target_branch, " .
                 cow_merge_audit_conflict_target_constraint_reason_sql('merge_conflicts') . " AS target_constraint_reason$conflict_review_select$conflict_resolution_select$conflict_event_select " .
                 "FROM merge_conflicts JOIN merge_runs r ON r.id = merge_conflicts.run_id $conflict_filter ORDER BY merge_conflicts.id DESC LIMIT :limit",
                 $conflict_params
