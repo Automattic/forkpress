@@ -2363,11 +2363,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             <div class="fp-detail-head">
                 <div class="fp-workbench-title">
                     <h2>Branch Workbench</h2>
-                    <div class="fp-muted" id="fp-workbench-mode">Select a branch, revision, or merge event.</div>
+                    <div class="fp-muted" id="fp-workbench-mode" aria-live="polite">Select a branch, revision, or merge event.</div>
                 </div>
                 <section class="fp-bottom-actions">
-                <details class="fp-actions">
-                    <summary>Branch actions</summary>
+                <details class="fp-actions" aria-label="Branch creation and merge actions">
+                    <summary>Create / merge</summary>
                     <div class="fp-actions-body">
                         <form class="fp-form" id="fp-create">
                             <div class="fp-field"><label for="fp-create-name">New branch</label><input id="fp-create-name" name="branch" pattern="[A-Za-z0-9_-]{1,63}" autocomplete="off" required></div>
@@ -2389,7 +2389,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     <h2 id="fp-detail-title">Selection</h2>
                 </div>
                 <div class="fp-detail-body">
-                    <div class="fp-status" id="fp-status"></div>
+                    <div class="fp-status" id="fp-status" role="status" aria-live="polite"></div>
                     <div class="fp-kv" id="fp-detail"></div>
                     <div class="fp-buttons" id="fp-detail-actions"></div>
                     <pre id="fp-raw"></pre>
@@ -2978,6 +2978,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         a.className = 'fp-button';
         a.href = href;
         a.textContent = label;
+        a.title = label;
         return a;
     }
     function appendBranchPreviewLinks(container, source, target) {
@@ -3002,6 +3003,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var b = document.createElement('button');
         b.type = 'button';
         b.textContent = label;
+        b.title = label;
         if (extraClass) b.className = extraClass;
         b.addEventListener('click', fn);
         return b;
@@ -3179,6 +3181,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function conflictIsPluginRecord(record) {
         return !!(record && (record.table_name === '__plugins__' || record.plugin));
     }
+    function pluginDriverFor(record) {
+        var drivers = Array.isArray(state.pluginDrivers) ? state.pluginDrivers : [];
+        var plugin = String(record && record.plugin || '');
+        if (!plugin) return null;
+        return drivers.find(function (driver) { return String(driver.plugin || '') === plugin; }) || null;
+    }
     function conflictScope(record) {
         if (!record) return 'unknown';
         var table = String(record.table_name || '');
@@ -3311,7 +3319,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             tooltip.push(String(part.text));
             cell.appendChild(textNode('div', part.className || '', part.text));
         });
-        if (tooltip.length) cell.title = tooltip.join('\n');
+        if (tooltip.length) cell.title = tooltip.join('\\n');
         row.appendChild(cell);
         return cell;
     }
@@ -3448,10 +3456,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         row.className = 'fp-buttons fp-conflict-action-row';
         var prioritizeResolutionChange = conflictResolutionChangeAvailable(record);
         var isPluginConflict = conflictIsPluginRecord(record);
+        var pluginDriver = pluginDriverFor(record);
         if (isPluginConflict && record.id && record.lifecycle_state !== 'resolved') {
+            if (pluginDriver) {
+                row.appendChild(button('Run plugin driver', function () { runPluginDriver(record.id, payload.run, pluginDriver.key); }, 'primary'));
+            }
             row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
             row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
-            row.appendChild(textNode('span', 'fp-conflict-meta', conflictPluginGuidance(record) || 'Plugin and theme validator conflicts are review-only here; use the suggested action or a plugin merge driver.'));
+            row.appendChild(textNode('span', 'fp-conflict-meta', (pluginDriver ? '' : ('No approved driver found for ' + String(record.plugin || 'this plugin') + '. ')) + (conflictPluginGuidance(record) || 'Use the suggested action or configure a plugin merge driver.')));
         } else if (record.id && record.lifecycle_state !== 'resolved') {
             row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
             row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
@@ -3589,6 +3601,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         next.disabled = selectedIndex >= filteredList.length - 1;
         conflictActions.appendChild(previous);
         conflictActions.appendChild(next);
+        if (Number(summary.resolved || 0) > 0) {
+            conflictActions.appendChild(button('Apply reviewed choices', function () { applyReviewedConflicts(payload.run); }, 'primary'));
+        }
         appendBranchPreviewLinks(conflictActions, source, target);
         appendReviewLinkAction(conflictActions);
         var reviewGrid = document.createElement('div');
@@ -3678,7 +3693,24 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
     }
     function resolveConflict(id, choice, run, note, applyReviewed, replaceApplied) {
+        if (replaceApplied && !window.confirm('Change the already-applied resolution for conflict #' + String(id || '') + '?')) return;
         post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function () { loadConflicts(run); loadTree(); }).catch(function (error) { setStatus('error', error.message); });
+    }
+    function applyReviewedConflicts(run) {
+        if (!window.confirm('Apply all reviewed conflict choices for merge run #' + String(run || '') + '?')) return;
+        post('forkpress_branch_apply_reviewed_conflicts', { run: String(run || '') }).then(function (payload) {
+            setStatus(Number(payload.applied || 0) > 0 ? 'ok' : 'warn', payload.message || 'Reviewed resolutions checked.');
+            loadConflicts(run, { refresh: true });
+            loadTree();
+        }).catch(function (error) { setStatus('error', error.message || 'Could not apply reviewed choices.'); });
+    }
+    function runPluginDriver(conflict, run, driverKey) {
+        if (!window.confirm('Run the approved plugin driver for conflict #' + String(conflict || '') + '?')) return;
+        post('forkpress_branch_run_plugin_driver', { conflict: String(conflict || ''), run: String(run || ''), driverKey: String(driverKey || '') }).then(function (payload) {
+            setStatus('ok', payload.message || 'Plugin driver finished.');
+            loadConflicts(run, { refresh: true });
+            loadTree();
+        }).catch(function (error) { setStatus('error', error.message || 'Could not run plugin driver.'); });
     }
     graph.addEventListener('click', function (event) {
         var target = event.target.closest ? event.target.closest('[data-kind]') : null;
@@ -3734,7 +3766,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
 HTML;
 }
 
-function forkpress_cow_handle_branch_manager(string $path, string $current_branch): bool {
+function forkpress_cow_handle_branch_manager(string $path, string $current_branch, string $branches_dir): bool {
     if ($path !== '/_forkpress/branches') {
         return false;
     }
@@ -3745,13 +3777,14 @@ function forkpress_cow_handle_branch_manager(string $path, string $current_branc
     echo str_replace('__STATE__', forkpress_cow_json_encode([
         'currentBranch' => $current_branch,
         'branches' => forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/'),
+        'pluginDrivers' => array_values(forkpress_cow_branch_plugin_driver_map($branches_dir, $current_branch)),
         'actionUrl' => '/_forkpress/action',
         'rootUrl' => '/_forkpress/branches',
     ]), forkpress_cow_branch_manager_html($current_branch));
     return true;
 }
 
-if (forkpress_cow_handle_branch_manager($path, $branch)) {
+if (forkpress_cow_handle_branch_manager($path, $branch, $branches_dir)) {
     return true;
 }
 

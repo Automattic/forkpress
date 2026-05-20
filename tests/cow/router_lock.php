@@ -262,9 +262,11 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-bottom'), 'out-of-band branch manager renders one persistent bottom workbench');
         assert_true(str_contains($early_body, 'fp-bottom-actions'), 'out-of-band branch manager keeps branch actions in the bottom workbench');
         assert_true(str_contains($early_body, 'fp-workbench-mode'), 'out-of-band branch manager labels the current workbench mode');
+        assert_true(str_contains($early_body, 'role="status" aria-live="polite"'), 'out-of-band branch manager announces async status changes');
         assert_true(!str_contains($early_body, 'fp-side'), 'out-of-band branch manager no longer alternates through a right sidebar');
         assert_true(str_contains($early_body, '"actionUrl":"/_forkpress/action"'), 'out-of-band branch manager uses same-origin action endpoint');
         assert_true(!str_contains($early_body, 'http://wp.localhost/_forkpress/action'), 'out-of-band branch manager does not hard-code an HTTP action endpoint');
+        assert_true(str_contains($early_body, '"pluginDrivers"'), 'out-of-band branch manager receives approved plugin merge drivers');
         assert_true(str_contains($early_body, 'fp-timeline-lane'), 'out-of-band branch manager renders compact git-style graph lanes');
         assert_true(str_contains($early_body, 'fp-timeline-fork'), 'out-of-band branch manager renders branch fork curves');
         assert_true(str_contains($early_body, 'laneActivity'), 'out-of-band branch manager computes finite branch lifetimes from revision rows');
@@ -314,7 +316,7 @@ if (is_resource($lock)) {
         assert_true(!str_contains($early_body, 'Review conflicts'), 'out-of-band branch manager auto-loads conflicts instead of requiring a separate review button');
         assert_true(str_contains($early_body, 'function renderConflictTable'), 'out-of-band branch manager renders conflict summaries as an entity table');
         assert_true(str_contains($early_body, 'data-label'), 'out-of-band branch manager can render mobile conflict rows as labeled cards');
-        assert_true(str_contains($early_body, "cell.title = tooltip.join"), 'out-of-band branch manager exposes full conflict table cell text on hover');
+        assert_true(str_contains($early_body, 'cell.title = tooltip.join(\'\\n\')'), 'out-of-band branch manager exposes full conflict table cell text on hover without breaking generated JavaScript');
         assert_true(str_contains($early_body, "row.setAttribute('role', 'button')"), 'out-of-band branch manager makes conflict rows keyboard-operable review targets');
         assert_true(str_contains($early_body, "row.addEventListener('keydown'"), 'out-of-band branch manager supports keyboard selection in the conflict table');
         assert_true(str_contains($early_body, 'fp-summary-chips'), 'out-of-band branch manager renders compact conflict summary chips');
@@ -326,6 +328,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Previous conflict'), 'out-of-band branch manager can move backward through the filtered conflict queue');
         assert_true(str_contains($early_body, 'Next conflict'), 'out-of-band branch manager can move forward through the filtered conflict queue');
         assert_true(str_contains($early_body, 'overflow-x: auto'), 'out-of-band branch manager keeps mobile conflict actions compact');
+        assert_true(str_contains($early_body, 'b.title = label'), 'out-of-band branch manager gives compact buttons full action titles');
         assert_true(str_contains($early_body, 'function appendBranchPreviewLinks'), 'out-of-band branch manager keeps source and target preview links available in filtered states');
         assert_true(str_contains($early_body, 'Copy review link'), 'out-of-band branch manager exposes a copyable deep link for conflict review state');
         assert_true(str_contains($early_body, 'navigator.clipboard.writeText'), 'out-of-band branch manager copies the current review URL when supported');
@@ -347,11 +350,21 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Change applied resolution'), 'out-of-band branch manager exposes applied-resolution changes');
         assert_true(str_contains($early_body, 'prioritizeResolutionChange'), 'out-of-band branch manager surfaces applied-resolution changes before large value previews');
         assert_true(str_contains($early_body, 'replaceApplied'), 'out-of-band branch manager sends replace-applied resolution payloads');
+        assert_true(str_contains($early_body, 'Change the already-applied resolution'), 'out-of-band branch manager confirms before replacing an applied resolution');
+        assert_true(str_contains($early_body, 'Apply reviewed choices'), 'out-of-band branch manager exposes run-level reviewed-resolution application');
+        assert_true(str_contains($early_body, 'function applyReviewedConflicts'), 'out-of-band branch manager can call the reviewed-resolution apply action');
+        assert_true(str_contains($early_body, 'Apply all reviewed conflict choices'), 'out-of-band branch manager confirms before bulk-applying reviewed choices');
         assert_true(str_contains($early_body, 'function conflictPluginMeta'), 'out-of-band branch manager renders plugin and theme conflict metadata');
         assert_true(str_contains($early_body, 'function conflictPluginGuidance'), 'out-of-band branch manager renders plugin and theme conflict guidance');
         assert_true(str_contains($early_body, 'record.plugin_suggested_action'), 'out-of-band branch manager exposes validator suggested actions');
         assert_true(str_contains($early_body, 'record.semantic_scope'), 'out-of-band branch manager exposes validator semantic scope');
-        assert_true(str_contains($early_body, 'Branch actions'), 'out-of-band branch manager keeps create and merge actions available');
+        assert_true(str_contains($early_body, 'function pluginDriverFor'), 'out-of-band branch manager matches plugin conflicts to approved drivers');
+        assert_true(str_contains($early_body, 'Run plugin driver'), 'out-of-band branch manager exposes approved plugin driver actions');
+        assert_true(str_contains($early_body, 'No approved driver found'), 'out-of-band branch manager explains plugin conflicts without configured drivers');
+        assert_true(str_contains($early_body, 'function runPluginDriver'), 'out-of-band branch manager can run approved plugin drivers from conflict review');
+        assert_true(str_contains($early_body, 'Run the approved plugin driver'), 'out-of-band branch manager confirms before running plugin driver automation');
+        assert_true(str_contains($early_body, 'Create / merge'), 'out-of-band branch manager keeps create and merge actions available without over-promoting them');
+        assert_true(str_contains($early_body, 'Branch creation and merge actions'), 'out-of-band branch manager labels collapsed branch actions accessibly');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
 
         flock($lock, LOCK_UN);
