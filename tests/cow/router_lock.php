@@ -290,8 +290,8 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Merge event #'), 'out-of-band branch manager distinguishes merge events from ordinary revisions');
         assert_true(str_contains($early_body, 'fp-legend'), 'out-of-band branch manager explains graph symbols with an inline legend');
         assert_true(str_contains($early_body, 'unreviewed'), 'out-of-band branch manager labels graph conflicts as unreviewed work');
-        assert_true(str_contains($early_body, 'merge outcome exists'), 'out-of-band branch manager makes clear conflicted merges still have target values');
-        assert_true(str_contains($early_body, 'merged; unreviewed checks'), 'out-of-band branch manager avoids implying conflicted merges are value-less');
+        assert_true(str_contains($early_body, 'merge result exists'), 'out-of-band branch manager makes clear conflicted merges already have target branch results');
+        assert_true(str_contains($early_body, 'merged; has unreviewed checks'), 'out-of-band branch manager avoids implying conflicted merges are value-less');
         assert_true(str_contains($early_body, 'fp-row-selected'), 'out-of-band branch manager highlights the selected timeline event');
         assert_true(str_contains($early_body, 'function scrollSelectedRunIntoView'), 'out-of-band branch manager scrolls the graph to deep-linked selected events');
         assert_true(str_contains($early_body, 'Focus selected'), 'out-of-band branch manager offers a clearly labeled graph control to re-center the selected event');
@@ -331,7 +331,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, "row.setAttribute('role', 'button')"), 'out-of-band branch manager makes conflict rows keyboard-operable review targets');
         assert_true(str_contains($early_body, "row.addEventListener('keydown'"), 'out-of-band branch manager supports keyboard selection in the conflict table');
         assert_true(str_contains($early_body, 'fp-summary-chips'), 'out-of-band branch manager renders compact conflict summary chips');
-        assert_true(str_contains($early_body, 'target has values'), 'out-of-band branch manager separates material merge outcome from review acceptance');
+        assert_true(str_contains($early_body, 'merge result exists'), 'out-of-band branch manager separates material merge outcome from review acceptance');
         assert_true(str_contains($early_body, 'unreviewed'), 'out-of-band branch manager describes pending conflict checks as unreviewed work');
         assert_true(str_contains($early_body, 'accepted'), 'out-of-band branch manager describes closed conflict checks as accepted');
         assert_true(str_contains($early_body, 'function conflictReviewStateText'), 'out-of-band branch manager centralizes review-state terminology');
@@ -345,11 +345,11 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'aria-pressed'), 'out-of-band branch manager exposes active conflict filters accessibly');
         assert_true(str_contains($early_body, 'Unreviewed'), 'out-of-band branch manager labels the pending filter by review state');
         assert_true(str_contains($early_body, 'Accepted'), 'out-of-band branch manager labels the accepted filter by review state');
-        assert_true(str_contains($early_body, 'Review item'), 'out-of-band branch manager labels table rows as review items');
-        assert_true(str_contains($early_body, 'Previous item'), 'out-of-band branch manager can move backward through the filtered review queue');
-        assert_true(str_contains($early_body, 'Next item'), 'out-of-band branch manager can move forward through the filtered review queue');
-        assert_true(str_contains($early_body, 'Review item \' + String(selectedIndex + 1) + \' of'), 'out-of-band branch manager labels the selected review item position');
-        assert_true(str_contains($early_body, 'Revalidate checks'), 'out-of-band branch manager exposes a revalidation action near the review queue');
+        assert_true(str_contains($early_body, 'Conflict check'), 'out-of-band branch manager labels table rows as conflict checks');
+        assert_true(str_contains($early_body, 'Previous check'), 'out-of-band branch manager can move backward through the filtered review queue');
+        assert_true(str_contains($early_body, 'Next check'), 'out-of-band branch manager can move forward through the filtered review queue');
+        assert_true(str_contains($early_body, 'Conflict check \' + String(selectedIndex + 1) + \' of'), 'out-of-band branch manager labels the selected conflict check position');
+        assert_true(str_contains($early_body, 'Revalidate conflict checks'), 'out-of-band branch manager exposes a revalidation action near the review queue');
         assert_true(str_contains($early_body, '.fp-buttons .fp-conflict-meta'), 'out-of-band branch manager keeps inline action labels from stretching mobile controls');
         assert_true(str_contains($early_body, 'overflow-x: auto'), 'out-of-band branch manager keeps mobile conflict actions compact');
         assert_true(str_contains($early_body, 'b.title = label'), 'out-of-band branch manager gives compact buttons full action titles');
@@ -371,7 +371,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-conflict-grid'), 'out-of-band branch manager renders conflict values as review fields');
         assert_true(str_contains($early_body, 'decodeAuditPayload'), 'out-of-band branch manager decodes audit payloads for review');
         assert_true(str_contains($early_body, 'Review note'), 'out-of-band branch manager exposes editable review notes');
-        assert_true(str_contains($early_body, 'Apply selected'), 'out-of-band branch manager exposes a selected conflict resolution action');
+        assert_true(str_contains($early_body, 'Apply selected choice'), 'out-of-band branch manager exposes a selected conflict resolution action');
         assert_true(str_contains($early_body, 'fp-conflict-action-row'), 'out-of-band branch manager keeps conflict resolution actions visible in the inspector');
         assert_true(strpos($early_body, 'node.appendChild(row);') < strpos($early_body, 'node.appendChild(noteWrap);'), 'out-of-band branch manager places conflict action buttons before review notes');
         assert_true(strpos($early_body, 'node.appendChild(row);') < strpos($early_body, 'if (pluginPanel) node.appendChild(pluginPanel);'), 'out-of-band branch manager places review actions before plugin/theme metadata');
