@@ -5,14 +5,9 @@ set -euo pipefail
 # shellcheck source=_lib/docker-chown-trap.sh
 source "$(dirname "$0")/_lib/docker-chown-trap.sh"
 
-# Mirrors the heavy chunk of GHA `linux-cow-e2e`:
-#   - install full build toolchain (Rust target, musl, static-PHP deps)
-#   - scripts/build-dist.sh   (static PHP runtime bundle, 3-5 min)
-#   - cargo build --release   (forkpress for x86_64-unknown-linux-musl)
-#   - tests/cow/e2e.sh        (COW strategy end-to-end against the binary)
-# We're root inside the rust:1.95-trixie container so apt works without
-# sudo. Caching is intentionally absent for now; the static PHP compile pays
-# the full 3-5 min cost on every build.
+# Root inside the rust:1.95-trixie container so apt works without sudo.
+# Caching is intentionally absent for now; static PHP rebuilds (3-5 min)
+# each run.
 
 TARGET=x86_64-unknown-linux-musl
 
@@ -51,9 +46,8 @@ cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --lock
 echo "--- :cow: COW strategy e2e"
 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
 
-# Dev variant: builds a second runtime bundle (with experimental BranchFS/CAS
-# support), `forkpress-dev` binary, then exercises the content-addressable
-# storage e2e suite.
+# Dev variant: second runtime bundle with experimental BranchFS/CAS
+# support, plus the forkpress-dev binary and CAS e2e suite.
 echo "--- :package: Building dev PHP runtime bundle ($TARGET)"
 FORKPRESS_RUNTIME_PROFILE=dev FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
 

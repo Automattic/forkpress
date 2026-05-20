@@ -5,23 +5,12 @@ set -euo pipefail
 # shellcheck source=_lib/docker-chown-trap.sh
 source "$(dirname "$0")/_lib/docker-chown-trap.sh"
 
-# Mirrors the cargo-test invocations from `linux-cow-e2e` in
-# `.github/workflows/ci.yml` that don't require the static PHP runtime bundle.
-# `make test-cow-fast` (PHP test suite) and the heavier production-build /
-# COW-e2e chunks land in follow-up steps with their own image / cache setup.
-
-# We're root inside the `rust:1.95-trixie` container, so apt-get works
-# without sudo. The image doesn't ship PHP; install it so `make test-cow-fast`
-# can run its sqlite-backed PHP test suite. ~15s overhead per build.
+# rust:1.95-trixie runs as root (so no sudo) but doesn't ship PHP; install
+# it for `make test-cow-fast`'s sqlite-backed suite. ~15s per build.
 echo "--- :package: Installing PHP"
 apt-get update -qq
 apt-get install -y --no-install-recommends php-cli php-sqlite3 >/dev/null
 php --version | head -1
-
-echo "--- :information_source: Toolchain"
-rustc --version
-cargo --version
-make --version | head -1
 
 echo "--- :crab: cargo test (workspace, excluding forkpress-cli)"
 cargo test --workspace --exclude forkpress-cli --locked

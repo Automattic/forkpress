@@ -2,25 +2,7 @@
 
 set -euo pipefail
 
-# Mac aarch64 tests chunk of GHA `mac-cow-e2e` (aarch64-apple-darwin
-# matrix entry):
-#   - cargo unit tests (workspace excl. CLI; forkpress-core dev; CLI with
-#     FORKPRESS_RUNTIME_BUNDLE=/dev/null; forkpress-dev with same)
-#   - make test-release
-#   - brew-install runtime build tools via scripts/dev/install-macos-runtime-tools.sh
-#   - make test-cow-fast
-#
-# The heavier static-PHP build + cow-e2e lives in `mac-aarch64-build.sh`,
-# gated on this step passing.
-#
-# Runs on the BK `mac` queue (Apple Silicon VM). No Docker — native
-# execution inside the xcode-{IMAGE_ID} image. Caching is out of scope.
-
 TARGET=aarch64-apple-darwin
-
-echo "--- :information_source: Host"
-uname -a
-sw_vers || true
 
 echo "--- :crab: Installing Rust via rustup"
 # shellcheck source=_lib/install-rust.sh

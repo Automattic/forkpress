@@ -1,22 +1,6 @@
-# Windows tests chunk of GHA `windows-cow-check`:
-#   - Install Rust + the MSVC target
-#   - cargo test --workspace --exclude forkpress-cli
-#   - cargo test -p forkpress-cli --bin forkpress (with empty runtime bundle)
-#   - PowerShell syntax check of the 5 installer/build scripts
-#   - tests/windows/installer-error-surface.ps1
-#
-# Runs on the BK `windows` queue. No Docker — native PowerShell on the
-# Windows VM. The cargo build --release + artifact upload lives in
-# `windows-build.ps1`, gated on this step passing. Caching is out of
-# scope per the migration plan.
-
 $ErrorActionPreference = 'Stop'
 
 $TARGET = 'x86_64-pc-windows-msvc'
-
-Write-Output "--- :information_source: Host"
-$PSVersionTable.PSVersion
-[System.Environment]::OSVersion
 
 Write-Output "--- :crab: Installing Rust via rustup"
 . "$PSScriptRoot\_lib\install-rust.ps1" -Target $TARGET

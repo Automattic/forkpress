@@ -2,22 +2,7 @@
 
 set -euo pipefail
 
-# Mac aarch64 build chunk of GHA `mac-cow-e2e` (aarch64-apple-darwin):
-#   - scripts/build-dist.sh  (static PHP runtime bundle, ~5-10 min)
-#   - cargo build --release forkpress for aarch64-apple-darwin
-#   - tests/cow/e2e.sh through an APFS sparsebundle volume
-#
-# Gated on `mac-aarch64-tests` passing. The built binary is uploaded by
-# `artifact_paths` in pipeline.yml (runs regardless of step status).
-#
-# Runs on the BK `mac` queue. Native execution; no Docker. Caching is out
-# of scope; static PHP rebuilds from scratch each run.
-
 TARGET=aarch64-apple-darwin
-
-echo "--- :information_source: Host"
-uname -a
-sw_vers || true
 
 echo "--- :crab: Installing Rust via rustup"
 # shellcheck source=_lib/install-rust.sh
