@@ -1,7 +1,6 @@
-# GHA only builds the Windows release binary inside release-publish; we
-# surface it on every CI run too as a downloadable smoke artifact (no
-# embedded PHP runtime, no signing) so the Windows build path stays
-# verified without waiting for a release cut.
+# Surfaces a downloadable Windows binary on every CI run as a smoke
+# artifact (no embedded PHP runtime, no signing) so the Windows build
+# path stays verified without waiting for a release cut.
 
 $ErrorActionPreference = 'Stop'
 

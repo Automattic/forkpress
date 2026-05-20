@@ -11,7 +11,7 @@
 # points `FORKPRESS_RUNTIME_BUNDLE` at it for the duration of the
 # scriptblock. forkpress-cli's `build.rs` reads that env var, sees the
 # empty file, and skips embedding a static PHP runtime — Windows
-# runners can't build static PHP, and release-publish embeds the
+# runners can't build static PHP, and the release pipeline embeds the
 # prebuilt bundle separately, so this lets cargo test/build with
 # "external runtime" semantics in CI.
 

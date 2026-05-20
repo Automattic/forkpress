@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-# GHA filters this job on docs/asset paths; BK has no native path filter
-# so we run on every build (~60s, cheap enough to skip filtering for
-# now). Deploy stays in GHA — it's GitHub-Pages-specific.
+# Runs on every build (~60s). BK has no native path filter and the cost
+# is low enough not to bother with one for now. Publishing the built
+# site is handled outside this pipeline.
 
 # shellcheck source=_lib/docker-chown-trap.sh
 source "$(dirname "$0")/_lib/docker-chown-trap.sh"

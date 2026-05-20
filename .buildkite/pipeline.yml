@@ -93,12 +93,10 @@ steps:
       - github_commit_status:
           context: "Buildkite / Mac aarch64 build"
 
-  # Cross-build the x86_64 mac binary from the same aarch64 queue. GHA
-  # uses a real `macos-15-intel` runner here; a8c BK has no Intel mac
-  # queue, so this step trades end-to-end coverage for compile-only
-  # coverage. The resulting binary is a smoke artifact only —
-  # release-publish stays the source of truth for shippable Intel
-  # binaries.
+  # Cross-build the x86_64 mac binary from the aarch64 queue. a8c BK
+  # has no Intel mac queue, so this step trades end-to-end coverage for
+  # compile-only coverage. The resulting binary is a smoke artifact —
+  # the release pipeline owns shippable Intel binaries.
   - label: ":apple: Mac x86_64 cross-build"
     key: mac-x86_64-build
     depends_on: mac-aarch64-tests
@@ -135,9 +133,6 @@ steps:
       - github_commit_status:
           context: "Buildkite / Windows build"
 
-  # Mirrors GHA `docs / build`: npm ci + npm run validate (astro check +
-  # node --test + astro build). The GHA `deploy` job is GitHub-Pages-
-  # specific and stays in GHA — not migrated.
   - label: ":books: Docs validate"
     key: docs-validate
     command: .buildkite/commands/docs-validate.sh

@@ -4,8 +4,8 @@ set -euo pipefail
 
 # a8c BK has no Intel mac queue, so we cross-compile from Apple Silicon.
 # The output isn't end-to-end testable here (no Rosetta) — it's a build-
-# path smoke check, not a shippable binary; release-publish owns the
-# real Intel binary with embedded runtime. FORKPRESS_RUNTIME_BUNDLE=
+# path smoke check, not a shippable binary; the release pipeline owns
+# the real Intel binary with embedded runtime. FORKPRESS_RUNTIME_BUNDLE=
 # /dev/null is needed because spc can't cleanly cross-build PHP from
 # aarch64.
 

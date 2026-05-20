@@ -2,9 +2,6 @@
 
 set -euo pipefail
 
-# Same script + env vars as the GHA `cow-changed-preflight` job; only the
-# PR base discovery differs (BUILDKITE_PULL_REQUEST_BASE_BRANCH).
-
 echo "--- :information_source: PHP availability"
 # The a8c BK Linux agent runs as `buildkite-agent` without passwordless sudo,
 # so `apt-get install` is not an option here. The preflight script only invokes
