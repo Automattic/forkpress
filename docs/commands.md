@@ -1,8 +1,9 @@
 # Commands
 
-This page summarizes the main production commands. Run
-`forkpress <command> --help` or `forkpress branch <command> --help` for the
-full CLI help. For the conflict review workflow around history, branch tree,
+This page summarizes the main production commands. For detailed command pages,
+options, examples, and behavior notes, see the new [CLI reference](./cli/index.md).
+Run `forkpress <command> --help` or `forkpress branch <command> --help` for the
+raw CLI help. For the conflict review workflow around history, branch tree,
 audit queues, stale reviews, and source/target/apply-reviewed choices, see
 [`conflict-review.md`](conflict-review.md).
 

@@ -65,6 +65,29 @@ export default defineConfig({
 			sidebar: [
 				{ label: 'Overview', slug: 'index' },
 				{
+					label: 'CLI',
+					items: [
+						{ label: 'Overview', slug: 'docs/cli/index' },
+						{ label: 'init', slug: 'docs/cli/init' },
+						{ label: 'serve', slug: 'docs/cli/serve' },
+						{ label: 'start', slug: 'docs/cli/start' },
+						{ label: 'stop', slug: 'docs/cli/stop' },
+						{ label: 'server', slug: 'docs/cli/server' },
+						{ label: 'branch', slug: 'docs/cli/branch' },
+						{ label: 'branchctl', slug: 'docs/cli/branchctl' },
+						{ label: 'remote', slug: 'docs/cli/remote' },
+						{ label: 'clone', slug: 'docs/cli/clone' },
+						{ label: 'pull', slug: 'docs/cli/pull' },
+						{ label: 'commit', slug: 'docs/cli/commit' },
+						{ label: 'push', slug: 'docs/cli/push' },
+						{ label: 'agents', slug: 'docs/cli/agents' },
+						{ label: 'git', slug: 'docs/cli/git' },
+						{ label: 'logs', slug: 'docs/cli/logs' },
+						{ label: 'doctor', slug: 'docs/cli/doctor' },
+						{ label: 'storage', slug: 'docs/cli/storage' },
+					],
+				},
+				{
 					label: 'Core workflows',
 					items: [
 						{ label: 'Branching', slug: 'docs/branching' },
