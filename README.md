@@ -69,6 +69,8 @@ Windows feature setup.
 
 Commands below assume `forkpress` is on your `PATH`. If you unpacked a release
 archive in the current directory, use `./forkpress` instead.
+For detailed options and command behavior, see the
+[CLI command reference](docs/cli/index.md).
 
 ```bash
 mkdir my-site
@@ -459,6 +461,10 @@ Useful log files:
 
 ## Commands
 
+This table is a quick reference for common commands. The docs site has the full
+per-command [CLI reference](docs/cli/index.md), including options, examples,
+aliases, and grouped subcommands.
+
 | Command | Purpose |
 | --- | --- |
 | `forkpress init` | Create a site and seed the local admin user. |
@@ -490,8 +496,8 @@ Useful log files:
 | `forkpress storage compact` | Compact macOS sparsebundle storage. |
 | `forkpress doctor storage` | Probe local filesystem clone support. |
 
-Run `forkpress <command> --help` or `forkpress branch <command> --help` for
-command-specific options.
+Run `forkpress <command> --help` or `forkpress branch <command> --help` for the
+raw CLI help.
 
 ## Development
 

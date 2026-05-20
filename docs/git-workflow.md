@@ -9,6 +9,10 @@ http://wp.localhost:18080/site.git
 Git is an editing and transport interface. The source of truth remains the
 materialized branch directory.
 
+For command options, see [`forkpress clone`](./cli/clone.md),
+[`forkpress commit`](./cli/commit.md), [`forkpress push`](./cli/push.md), and
+[`forkpress pull`](./cli/pull.md).
+
 ```mermaid
 sequenceDiagram
     participant Agent as Agent checkout

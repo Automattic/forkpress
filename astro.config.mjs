@@ -65,6 +65,30 @@ export default defineConfig({
 			sidebar: [
 				{ label: 'Overview', slug: 'index' },
 				{
+					label: 'CLI commands',
+					collapsed: true,
+					items: [
+						{ label: 'Overview', slug: 'docs/cli/index' },
+						{ label: 'forkpress init', slug: 'docs/cli/init' },
+						{ label: 'forkpress serve', slug: 'docs/cli/serve' },
+						{ label: 'forkpress start', slug: 'docs/cli/start' },
+						{ label: 'forkpress stop', slug: 'docs/cli/stop' },
+						{ label: 'forkpress server', slug: 'docs/cli/server' },
+						{ label: 'forkpress branch', slug: 'docs/cli/branch' },
+						{ label: 'forkpress branchctl', slug: 'docs/cli/branchctl' },
+						{ label: 'forkpress remote', slug: 'docs/cli/remote' },
+						{ label: 'forkpress clone', slug: 'docs/cli/clone' },
+						{ label: 'forkpress pull', slug: 'docs/cli/pull' },
+						{ label: 'forkpress commit', slug: 'docs/cli/commit' },
+						{ label: 'forkpress push', slug: 'docs/cli/push' },
+						{ label: 'forkpress agents', slug: 'docs/cli/agents' },
+						{ label: 'forkpress git', slug: 'docs/cli/git' },
+						{ label: 'forkpress logs', slug: 'docs/cli/logs' },
+						{ label: 'forkpress doctor', slug: 'docs/cli/doctor' },
+						{ label: 'forkpress storage', slug: 'docs/cli/storage' },
+					],
+				},
+				{
 					label: 'Core workflows',
 					items: [
 						{ label: 'Branching', slug: 'docs/branching' },

@@ -3,6 +3,9 @@
 `forkpress agents` creates a small pool of branches and matching Git worktrees
 for parallel agent work.
 
+For command options, see [`forkpress agents`](./cli/agents.md) and
+[`forkpress commit`](./cli/commit.md).
+
 ## Create agent worktrees
 
 With the site server running:
