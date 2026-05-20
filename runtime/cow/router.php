@@ -2379,7 +2379,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     <div class="fp-legend" aria-label="Graph legend">
                         <span><i class="revision"></i>revision</span>
                         <span><i class="merge"></i>merge event</span>
-                        <span><i class="conflicts"></i>needs review</span>
+                        <span><i class="conflicts"></i>unreviewed</span>
                         <span><i class="arrow"></i>into target</span>
                     </div>
                 </div>
@@ -2605,10 +2605,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function humanStatus(value) {
         value = String(value || '');
-        if (value === 'completed_with_conflicts') return 'merged; review needed';
+        if (value === 'completed_with_conflicts') return 'merged; unreviewed checks';
         return value.replace(/_/g, ' ');
     }
-    function conflictNeedsReviewCount(summary) {
+    function conflictUnreviewedCount(summary) {
         return Number(summary && summary.unresolved || 0);
     }
     function conflictAcceptedCount(summary) {
@@ -2616,7 +2616,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function conflictReviewStateText(summary) {
         if (!summary || !Number(summary.total || 0)) return 'none';
-        return String(conflictNeedsReviewCount(summary)) + ' need review / ' + String(conflictAcceptedCount(summary)) + ' accepted / ' + String(summary.total || 0) + ' total checks';
+        return String(conflictUnreviewedCount(summary)) + ' unreviewed / ' + String(conflictAcceptedCount(summary)) + ' accepted / ' + String(summary.total || 0) + ' total checks';
     }
     function isSetupRun(run) {
         var status = String(run && run.status || '');
@@ -2706,7 +2706,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var conflict = conflictSummary(run);
         if (conflict.total > 0) {
             parts.push('merge outcome exists');
-            parts.push(conflictNeedsReviewCount(conflict) + ' need review / ' + conflict.total + ' checks');
+            parts.push(conflictUnreviewedCount(conflict) + ' unreviewed / ' + conflict.total + ' checks');
         } else if (Number(run.decision_count || 0) > 0) {
             parts.push(String(run.decision_count) + ' decisions');
         }
@@ -2956,13 +2956,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             meta.textContent = runMeta(run);
             textLayer.appendChild(meta);
             if (conflict.total > 0) {
-                var needsReview = conflictNeedsReviewCount(conflict);
-                var allAccepted = needsReview === 0 && hasConflictSummary(run);
-                var badgeText = String(allAccepted ? conflict.total : needsReview);
+                var unreviewed = conflictUnreviewedCount(conflict);
+                var allAccepted = unreviewed === 0 && hasConflictSummary(run);
+                var badgeText = String(allAccepted ? conflict.total : unreviewed);
                 var badgeWidth = Math.max(28, 14 + badgeText.length * 7);
                 var badgeX = tx + 10;
                 var badgeY = y - 27;
-                var badgeTitle = allAccepted ? (badgeText + ' accepted conflict check' + (badgeText === '1' ? '' : 's')) : (badgeText + ' conflict check' + (badgeText === '1' ? '' : 's') + ' need review');
+                var badgeTitle = allAccepted ? (badgeText + ' accepted conflict check' + (badgeText === '1' ? '' : 's')) : (badgeText + ' unreviewed conflict check' + (badgeText === '1' ? '' : 's'));
                 var badgeRect = svg('rect', { x: badgeX, y: badgeY, width: badgeWidth, height: 16, rx: 5, class: 'fp-conflict-badge' + (allAccepted ? ' is-resolved' : '') });
                 badgeRect.appendChild(svg('title', {})).textContent = badgeTitle;
                 nodeLayer.appendChild(badgeRect);
@@ -3106,7 +3106,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (flow) wrap.appendChild(textNode('span', 'fp-chip strong', flow));
         if (summary && summary.total !== undefined) {
             wrap.appendChild(textNode('span', 'fp-chip', 'target has values'));
-            wrap.appendChild(textNode('span', 'fp-chip warn', String(conflictNeedsReviewCount(summary)) + ' need review'));
+            wrap.appendChild(textNode('span', 'fp-chip warn', String(conflictUnreviewedCount(summary)) + ' unreviewed'));
             wrap.appendChild(textNode('span', 'fp-chip', String(conflictAcceptedCount(summary)) + ' accepted'));
             wrap.appendChild(textNode('span', 'fp-chip', String(summary.total || 0) + ' checks'));
         }
@@ -3294,22 +3294,22 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         return false;
     }
     function normalizeConflictFilter(filter) {
-        if (filter === 'open') return 'needsReview';
+        if (filter === 'open' || filter === 'needsReview') return 'unreviewed';
         if (filter === 'resolved') return 'accepted';
         return filter || 'all';
     }
     function conflictMatchesFilter(record, filter) {
         filter = normalizeConflictFilter(filter);
         if (filter === 'all') return true;
-        if (filter === 'needsReview') return !conflictReviewAccepted(record);
+        if (filter === 'unreviewed') return !conflictReviewAccepted(record);
         if (filter === 'accepted') return conflictReviewAccepted(record);
         return conflictScope(record) === filter;
     }
     function conflictFilterCounts(list) {
-        var counts = { all: list.length, needsReview: 0, accepted: 0, plugin: 0, theme: 0, database: 0, file: 0 };
+        var counts = { all: list.length, unreviewed: 0, accepted: 0, plugin: 0, theme: 0, database: 0, file: 0 };
         list.forEach(function (record) {
             if (conflictReviewAccepted(record)) counts.accepted++;
-            else counts.needsReview++;
+            else counts.unreviewed++;
             var scope = conflictScope(record);
             if (Object.prototype.hasOwnProperty.call(counts, scope)) counts[scope]++;
         });
@@ -3318,7 +3318,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function conflictFilterLabel(filter) {
         return {
             all: 'all',
-            needsReview: 'items needing review',
+            unreviewed: 'unreviewed items',
             accepted: 'accepted items',
             plugin: 'plugin',
             theme: 'theme',
@@ -3337,7 +3337,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         bar.setAttribute('aria-label', 'Filter conflicts');
         [
             ['all', 'All'],
-            ['needsReview', 'Needs review'],
+            ['unreviewed', 'Unreviewed'],
             ['accepted', 'Accepted'],
             ['plugin', 'Plugins'],
             ['theme', 'Themes'],
