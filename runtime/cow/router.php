@@ -2650,8 +2650,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var mergeTarget = document.getElementById('fp-merge-target');
     var initialParams = new URLSearchParams(window.location.search);
     var initialRunId = initialParams.get('run') || '';
+    var initialBranchName = initialParams.get('branch') || '';
     var records = [];
     var selectedRunId = null;
+    var selectedBranchName = '';
     var selectedConflictId = initialParams.get('conflict') || null;
     var selectedConflictFilter = normalizeConflictFilter(initialParams.get('filter') || 'all');
     var didRestoreInitialSelection = false;
@@ -2680,6 +2682,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function syncReviewUrl() {
         if (!window.history || !window.history.replaceState) return;
         var params = new URLSearchParams(window.location.search);
+        if (selectedBranchName && !selectedRunId) params.set('branch', selectedBranchName);
+        else params.delete('branch');
         if (selectedRunId) params.set('run', selectedRunId);
         else params.delete('run');
         if (selectedConflictId) params.set('conflict', selectedConflictId);
@@ -3270,9 +3274,22 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         a.title = label;
         return a;
     }
+    function branchManagerHref(name) {
+        var url = new URL(state.rootUrl || '/_forkpress/branches', window.location.href);
+        url.searchParams.set('branch', String(name || ''));
+        return url.href;
+    }
+    function branchManagerLink(label, name) {
+        var a = link(label, branchManagerHref(name));
+        a.addEventListener('click', function (event) {
+            event.preventDefault();
+            selectBranch(name);
+        });
+        return a;
+    }
     function appendBranchPreviewLinks(container, source, target) {
-        if (source) container.appendChild(link('Open source: ' + source, branch(source).siteUrl));
-        if (target) container.appendChild(link('Open target: ' + target, branch(target).siteUrl));
+        if (source) container.appendChild(branchManagerLink('Show source: ' + source, source));
+        if (target) container.appendChild(branchManagerLink('Show target: ' + target, target));
     }
     function appendReviewLinkAction(container) {
         container.appendChild(button('Copy conflict link', function () {
@@ -3929,6 +3946,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function selectBranch(name) {
         var item = branch(name);
+        selectedBranchName = String(name || '');
         selectedRunId = null;
         selectedConflictId = null;
         clearStatus();
@@ -3945,12 +3963,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var nextRunId = String(run && run.id || '');
         var preserveInitialConflict = initialRunId && nextRunId === String(initialRunId) && selectedConflictId;
         selectedRunId = nextRunId;
+        selectedBranchName = '';
         if (!preserveInitialConflict) selectedConflictId = null;
         clearStatus();
         var isMerge = isMergeRun(run);
         var actions = [
-            link(isMerge ? 'Open source: ' + String(run.source_branch || '') : 'Open branch', branch(String(run.source_branch || '')).siteUrl),
-            link(isMerge ? 'Open target: ' + String(run.target_branch || '') : 'Open target', branch(String(run.target_branch || '')).siteUrl)
+            branchManagerLink(isMerge ? 'Show source: ' + String(run.source_branch || '') : 'Show branch', String(run.source_branch || '')),
+            branchManagerLink(isMerge ? 'Show target: ' + String(run.target_branch || '') : 'Show target', String(run.target_branch || ''))
         ];
         setDetail(runDetailTitle(run), {
             kind: isMerge ? 'merge' : (isBranchForkRun(run) ? 'branch birth' : 'revision'),
@@ -4051,6 +4070,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (!initialRun && initialRunId && !didRestoreInitialSelection) {
                 initialRun = runById(initialRunId);
                 didRestoreInitialSelection = true;
+            }
+            if (!initialRun && initialBranchName && !didRestoreInitialSelection) {
+                didRestoreInitialSelection = true;
+                selectBranch(initialBranchName);
+                return;
             }
             initialRun = initialRun || firstConflictRun() || records[0] || null;
             if (initialRun) {

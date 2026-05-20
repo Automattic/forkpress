@@ -362,7 +362,15 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'function runButtonAction'), 'out-of-band branch manager prevents double-clicked async actions');
         assert_true(str_contains($early_body, "buttonNode.setAttribute('aria-busy'"), 'out-of-band branch manager exposes busy state accessibly');
         assert_true(str_contains($early_body, 'button.is-busy::after'), 'out-of-band branch manager shows busy action feedback without layout changes');
-        assert_true(str_contains($early_body, 'function appendBranchPreviewLinks'), 'out-of-band branch manager keeps source and target preview links available in filtered states');
+        assert_true(str_contains($early_body, 'function appendBranchPreviewLinks'), 'out-of-band branch manager keeps source and target branch actions available in filtered states');
+        assert_true(str_contains($early_body, 'function branchManagerHref'), 'out-of-band branch manager gives source and target actions same-origin manager URLs');
+        assert_true(str_contains($early_body, 'function branchManagerLink'), 'out-of-band branch manager focuses source and target branches without leaving the manager');
+        assert_true(str_contains($early_body, 'initialBranchName'), 'out-of-band branch manager can restore a directly linked branch detail view');
+        assert_true(str_contains($early_body, "params.set('branch'"), 'out-of-band branch manager deep-links selected branch detail views');
+        assert_true(str_contains($early_body, 'Show source:'), 'out-of-band branch manager labels source branch focus actions clearly');
+        assert_true(str_contains($early_body, 'Show target:'), 'out-of-band branch manager labels target branch focus actions clearly');
+        assert_true(!str_contains($early_body, "link('Open source:"), 'out-of-band branch manager does not link source actions to branch WordPress hosts');
+        assert_true(!str_contains($early_body, "link('Open target:"), 'out-of-band branch manager does not link target actions to branch WordPress hosts');
         assert_true(str_contains($early_body, 'Copy conflict link'), 'out-of-band branch manager exposes a copyable deep link for conflict state');
         assert_true(str_contains($early_body, 'navigator.clipboard.writeText'), 'out-of-band branch manager copies the current review URL when supported');
         assert_true(str_contains($early_body, 'function conflictEntityContext'), 'out-of-band branch manager normalizes conflict entity context for review');
