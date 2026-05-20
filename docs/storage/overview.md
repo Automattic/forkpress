@@ -67,6 +67,9 @@ forkpress storage status
 forkpress doctor storage
 ```
 
+For command options, see [`forkpress storage`](../cli/storage.md) and
+[`forkpress doctor`](../cli/doctor.md).
+
 `storage status` reports branch count, the public branch root, the physical
 storage root, lifecycle lock paths, and leftover staging directories from
 interrupted branch operations.

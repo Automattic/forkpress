@@ -14,6 +14,9 @@ Each branch stores its database at `wp-content/database/.ht.sqlite`. A post save
 on `marketing.wp.localhost` writes to `./marketing/wp-content/database/.ht.sqlite`
 and cannot mutate `./main/wp-content/database/.ht.sqlite`.
 
+For the command reference, see [`forkpress branch`](./cli/branch.md) and
+[`forkpress remote`](./cli/remote.md).
+
 ## Create a branch
 
 Create a branch from `main`:

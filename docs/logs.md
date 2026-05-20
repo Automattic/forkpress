@@ -8,6 +8,8 @@ ForkPress shutdown logger. When a plugin or theme fatals on a branch URL,
 `wp-debug.log` should include the branch name, request URI, PHP file, line, and
 fatal message instead of only showing WordPress' "critical error" page.
 
+For command options and log-file aliases, see [`forkpress logs`](./cli/logs.md).
+
 ## Read logs
 
 Show WordPress critical errors and PHP fatals:

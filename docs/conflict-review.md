@@ -5,6 +5,9 @@ has a stable id, a lifecycle state, a next action, and a set of legal
 resolution choices. Use those fields to decide whether to review, revalidate,
 resolve, or leave a conflict for manual repair.
 
+For the full command reference, see the audit and review sections of
+[`forkpress branch`](./cli/branch.md#audit-and-conflict-review).
+
 ## Find History And Branch Edges
 
 Use history when you want chronological merge runs:

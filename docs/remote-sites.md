@@ -11,6 +11,8 @@ This guide covers the boot path:
 - install plugins from wp-admin in that branch;
 - understand what ForkPress means by top-plugin support.
 
+For the command reference, see [`forkpress remote`](./cli/remote.md).
+
 ## Start From A ForkPress Site
 
 Create or enter a local ForkPress site, then start the preview server:
@@ -23,7 +25,7 @@ forkpress serve
 ```
 
 ForkPress creates the local `main` branch and the `.forkpress/` metadata
-directory. Remote-site caches are stored under
+directory. `forkpress remote clone` stores its default remote-site caches under
 `.forkpress/cow/remote-sites/`.
 
 ## Thin-Clone A Remote WordPress Root
