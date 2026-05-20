@@ -19806,6 +19806,91 @@ PHP);
     assert_same($unchecked_plugin_payload['plugin'] ?? null, 'unchecked-auto/unchecked-auto.php', 'unchecked active plugin audit payload records the plugin path');
     assert_same($unchecked_plugin_payload['coverage'] ?? null, 'unchecked', 'unchecked active plugin audit payload records coverage state');
 
+    $plugin_version_base_root = $tmp . '/plugin-version-conflict-base';
+    $plugin_version_source_root = $tmp . '/plugin-version-conflict-source';
+    $plugin_version_target_root = $tmp . '/plugin-version-conflict-target';
+    mkdir($plugin_version_base_root . '/wp-content/database', 0777, true);
+    mkdir($plugin_version_base_root . '/wp-content/plugins/versioned-plugin', 0777, true);
+    $plugin_version_base_db = $plugin_version_base_root . '/wp-content/database/.ht.sqlite';
+    $plugin_version_source_db = $plugin_version_source_root . '/wp-content/database/.ht.sqlite';
+    $plugin_version_target_db = $plugin_version_target_root . '/wp-content/database/.ht.sqlite';
+    $plugin_version_metadata = $tmp . '/.forkpress/cow/merge/plugin-version-conflict-metadata.sqlite';
+    $plugin_version_file_base = $tmp . '/.forkpress/cow/merge/file-bases/plugin-version-conflict.json';
+    create_base_db($plugin_version_base_db);
+    $plugin_v1 = "<?php\n/*\nPlugin Name: Versioned Plugin\nVersion: 1.0.0\n*/\nfunction versioned_plugin_release() { return '1.0.0'; }\n";
+    $plugin_v2 = "<?php\n/*\nPlugin Name: Versioned Plugin\nVersion: 2.0.0-source\n*/\nfunction versioned_plugin_release() { return '2.0.0-source'; }\n";
+    $plugin_v3 = "<?php\n/*\nPlugin Name: Versioned Plugin\nVersion: 3.0.0-target\n*/\nfunction versioned_plugin_release() { return '3.0.0-target'; }\n";
+    write_test_file($plugin_version_base_root . '/wp-content/plugins/versioned-plugin/versioned-plugin.php', $plugin_v1);
+    copy_tree_for_test($plugin_version_base_root, $plugin_version_source_root);
+    copy_tree_for_test($plugin_version_base_root, $plugin_version_target_root);
+    copy($plugin_version_base_db, $plugin_version_source_db);
+    copy($plugin_version_base_db, $plugin_version_target_db);
+    cow_merge_capture_file_base($plugin_version_base_root, $plugin_version_file_base);
+    write_test_file($plugin_version_source_root . '/wp-content/plugins/versioned-plugin/versioned-plugin.php', $plugin_v2);
+    write_test_file($plugin_version_target_root . '/wp-content/plugins/versioned-plugin/versioned-plugin.php', $plugin_v3);
+    $db = open_db($plugin_version_target_db);
+    $db->exec(
+        "INSERT INTO wp_options (option_name, option_value, autoload) VALUES ('active_plugins', '" .
+        SQLite3::escapeString(serialize(['versioned-plugin/versioned-plugin.php'])) .
+        "', 'yes')"
+    );
+    $db->close();
+    $plugin_version_merge = run_merge_cli([
+        'merge',
+        '--base-db', $plugin_version_base_db,
+        '--source-db', $plugin_version_source_db,
+        '--target-db', $plugin_version_target_db,
+        '--metadata-db', $plugin_version_metadata,
+        '--source', 'feature-plugin-version-two',
+        '--target', 'main',
+        '--base-files', $plugin_version_file_base,
+        '--source-root', $plugin_version_source_root,
+        '--target-root', $plugin_version_target_root,
+    ]);
+    assert_same($plugin_version_merge['status'], 0, 'active plugin two-version file conflict merge exits successfully');
+    assert_true(str_contains($plugin_version_merge['output'], 'status:    completed_with_conflicts'), 'active plugin two-version file conflict leaves the merge conflicted');
+    assert_true(str_contains($plugin_version_merge['output'], 'unchecked=1'), 'active plugin two-version conflict records unchecked plugin coverage');
+    assert_same(
+        file_get_contents($plugin_version_target_root . '/wp-content/plugins/versioned-plugin/versioned-plugin.php'),
+        $plugin_v3,
+        'target active plugin version wins before explicit file conflict review'
+    );
+    $plugin_version_run_id = (int)scalar($plugin_version_metadata, 'SELECT MAX(id) FROM merge_runs');
+    $plugin_version_file_identity = SQLite3::escapeString(cow_merge_file_identity_json('wp-content/plugins/versioned-plugin/versioned-plugin.php'));
+    $plugin_version_conflict_id = (int)scalar($plugin_version_metadata, "SELECT id FROM merge_conflicts WHERE table_name = '__files__' AND conflict_type = 'file-conflict' AND row_identity = '$plugin_version_file_identity' ORDER BY id DESC LIMIT 1");
+    assert_true($plugin_version_conflict_id > 0, 'active plugin two-version merge records the plugin PHP file as a file conflict');
+    $plugin_version_file_audit = cow_merge_audit_report($plugin_version_metadata, $plugin_version_run_id, 10, [
+        'scope' => 'files',
+        'records' => 'conflicts',
+        'file_path' => 'wp-content/plugins/versioned-plugin/versioned-plugin.php',
+    ]);
+    assert_same(count($plugin_version_file_audit['conflicts']), 1, 'active plugin two-version file conflict is filterable by exact plugin file path');
+    assert_same($plugin_version_file_audit['conflicts'][0]['resolution_choices'] ?? null, ['source', 'target'], 'active plugin two-version file conflict offers explicit source or target choices');
+    assert_true(($plugin_version_file_audit['conflicts'][0]['source_payload'] ?? null) !== ($plugin_version_file_audit['conflicts'][0]['target_payload'] ?? null), 'active plugin two-version file conflict records distinct source and target file payloads');
+    assert_same($plugin_version_file_audit['conflicts'][0]['chosen_payload'] ?? null, $plugin_version_file_audit['conflicts'][0]['target_payload'] ?? null, 'active plugin two-version file conflict defaults to the target plugin payload');
+    $plugin_version_unchecked_audit = cow_merge_audit_report($plugin_version_metadata, $plugin_version_run_id, 10, [
+        'scope' => 'plugin',
+        'records' => 'decisions',
+        'decision' => 'plugin-validator-unchecked',
+    ]);
+    assert_same(count($plugin_version_unchecked_audit['decisions']), 1, 'active plugin two-version merge exposes unchecked plugin coverage in plugin audit');
+    $plugin_version_unchecked_payload = cow_merge_decode_payload_json((string)($plugin_version_unchecked_audit['decisions'][0]['chosen_payload'] ?? ''), 'plugin version unchecked payload');
+    assert_same($plugin_version_unchecked_payload['plugin'] ?? null, 'versioned-plugin/versioned-plugin.php', 'unchecked plugin audit names the active plugin with conflicting versions');
+    $plugin_version_source_resolution = cow_merge_resolve_conflict(
+        $plugin_version_metadata,
+        $plugin_version_conflict_id,
+        'source',
+        true,
+        'Apply reviewed source plugin version.',
+        'cow-test'
+    );
+    assert_same($plugin_version_source_resolution['status'], 'applied', 'reviewed source plugin file version resolution applies');
+    assert_same(
+        file_get_contents($plugin_version_target_root . '/wp-content/plugins/versioned-plugin/versioned-plugin.php'),
+        $plugin_v2,
+        'reviewed source plugin file resolution installs the source plugin version'
+    );
+
     $plugin_explicit_import_base_root = $tmp . '/plugin-explicit-import-base';
     $plugin_explicit_import_source_root = $tmp . '/plugin-explicit-import-source';
     $plugin_explicit_import_target_root = $tmp . '/plugin-explicit-import-target';
