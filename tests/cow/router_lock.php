@@ -349,7 +349,8 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Previous check'), 'out-of-band branch manager can move backward through the filtered review queue');
         assert_true(str_contains($early_body, 'Next check'), 'out-of-band branch manager can move forward through the filtered review queue');
         assert_true(str_contains($early_body, 'Conflict check \' + String(selectedIndex + 1) + \' of'), 'out-of-band branch manager labels the selected conflict check position');
-        assert_true(str_contains($early_body, 'Revalidate conflict checks'), 'out-of-band branch manager exposes a revalidation action near the review queue');
+        assert_true(str_contains($early_body, 'Check for changes'), 'out-of-band branch manager exposes a clear stale-conflict refresh action near the review queue');
+        assert_true(str_contains($early_body, 'humanConflictType'), 'out-of-band branch manager translates internal conflict type labels before rendering them');
         assert_true(str_contains($early_body, '.fp-buttons .fp-conflict-meta'), 'out-of-band branch manager keeps inline action labels from stretching mobile controls');
         assert_true(str_contains($early_body, 'overflow-x: auto'), 'out-of-band branch manager keeps mobile conflict actions compact');
         assert_true(str_contains($early_body, 'b.title = label'), 'out-of-band branch manager gives compact buttons full action titles');
@@ -402,8 +403,10 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'function configureForkAction'), 'out-of-band branch manager points fork actions at the selected branch context');
         assert_true(str_contains($early_body, 'function configureMergeAction'), 'out-of-band branch manager points merge actions at the selected revision context');
         assert_true(str_contains($early_body, 'function closeActionDetails'), 'out-of-band branch manager keeps one branch action popover open at a time');
+        assert_true(str_contains($early_body, 'summary::-webkit-details-marker'), 'out-of-band branch manager suppresses default disclosure triangles on branch action buttons');
         assert_true(str_contains($early_body, 'Flag follow-up'), 'out-of-band branch manager gives needs-action review state a clearer user action');
         assert_true(str_contains($early_body, 'Add a review note explaining the follow-up'), 'out-of-band branch manager requires context before flagging follow-up work');
+        assert_true(str_contains($early_body, 'renderConflicts(payload);'), 'out-of-band branch manager rerenders conflict navigation after selecting a different check');
         assert_true(str_contains($early_body, 'body.fp-reviewing .fp-conflict-workbench-body'), 'out-of-band branch manager gives conflict review panes their own scroll container');
         assert_true(str_contains($early_body, 'overscroll-behavior: contain'), 'out-of-band branch manager keeps conflict-pane scrolling contained');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');

@@ -1411,7 +1411,7 @@ function forkpress_branch_revalidate_merge_run(int $run): array {
 
     $result = json_decode($output, true);
     if (!is_array($result)) {
-        return [1, 'ForkPress returned invalid revalidation JSON.', null];
+        return [1, 'ForkPress returned invalid conflict change-check JSON.', null];
     }
 
     return [0, $output, $result];
@@ -1707,7 +1707,7 @@ add_action('admin_post_forkpress_branch_restore_crash', 'forkpress_handle_branch
 
 function forkpress_handle_branch_revalidate_conflicts(): void {
     if (!forkpress_branch_can_manage()) {
-        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot revalidate ForkPress merge conflicts from this site.');
+        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot check ForkPress merge conflicts for changes from this site.');
     }
     if (function_exists('check_admin_referer')) {
         check_admin_referer('forkpress_branch_revalidate_conflicts');
@@ -1716,18 +1716,18 @@ function forkpress_handle_branch_revalidate_conflicts(): void {
     $current = forkpress_current_branch() ?: 'main';
     $run = forkpress_branch_post_int('run');
     if ($run === null) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to revalidate.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose a merge run to check for changes.');
     }
 
     [$code, $output, $result] = forkpress_branch_revalidate_merge_run($run);
     if ($code !== 0) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not revalidate merge conflicts.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not check merge conflicts for changes.');
     }
 
     $checked = max(0, (int)($result['checked'] ?? 0));
     $stale = max(0, (int)($result['stale'] ?? 0));
     $carried = max(0, (int)($result['carried'] ?? 0));
-    $message = 'Revalidated merge run ' . $run . ': checked ' . $checked . ', stale ' . $stale . ', carried ' . $carried . '.';
+    $message = 'Checked merge run ' . $run . ' for changes: ' . $checked . ' checked, ' . $stale . ' changed, ' . $carried . ' unchanged.';
     forkpress_branch_finish_action(
         forkpress_branch_url($current, '/wp-admin/'),
         'warning',
@@ -1737,6 +1737,7 @@ function forkpress_handle_branch_revalidate_conflicts(): void {
             'checked' => $checked,
             'stale' => $stale,
             'carried' => $carried,
+            'changeCheck' => $result,
             'revalidation' => $result,
             'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
         ]
@@ -1826,10 +1827,10 @@ function forkpress_handle_branch_resolve_conflict(): void {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution requires a new source or target choice.');
     }
     if ($apply_reviewed && $after_revalidate) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'After revalidate requires a source or target choice.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Checking again requires a source or target choice.');
     }
     if ($replace_applied && $after_revalidate) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution cannot be combined with after revalidate.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution cannot be combined with checking again.');
     }
     if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose source or target for the conflict resolution.');
@@ -1843,7 +1844,7 @@ function forkpress_handle_branch_resolve_conflict(): void {
     if ($apply_reviewed && $run !== null) {
         [$code, $output, $revalidation] = forkpress_branch_revalidate_merge_run($run);
         if ($code !== 0) {
-            forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not revalidate merge conflicts before applying the reviewed choice.');
+            forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not check merge conflicts for changes before applying the reviewed choice.');
         }
         if ($revalidation !== null && forkpress_branch_revalidation_needs_action_for_conflict($revalidation, $conflict)) {
             $checked = max(0, (int)($revalidation['checked'] ?? 0));
@@ -1852,13 +1853,14 @@ function forkpress_handle_branch_resolve_conflict(): void {
             forkpress_branch_finish_action(
                 forkpress_branch_url($current, '/wp-admin/'),
                 'error',
-                'Conflict #' . $conflict . ' changed since review. Revalidate and review it before applying the reviewed choice.',
+                'Conflict #' . $conflict . ' changed since review. Check it again and review it before applying the reviewed choice.',
                 [
                     'run' => $run,
                     'conflict' => $conflict,
                     'checked' => $checked,
                     'stale' => $stale,
                     'carried' => $carried,
+                    'changeCheck' => $revalidation,
                     'revalidation' => $revalidation,
                     'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
                 ]
@@ -3096,7 +3098,7 @@ function forkpress_render_branch_switcher(): void {
                 'plugin: ' + String(record.plugin),
                 record.plugin_object ? 'object: ' + String(record.plugin_object) : '',
                 record.plugin_severity ? 'severity: ' + String(record.plugin_severity) : '',
-                record.plugin_validator ? 'validator: ' + String(record.plugin_validator) : ''
+                record.plugin_validator ? 'plugin check: ' + String(record.plugin_validator) : ''
             ].filter(Boolean).join(' / ');
         }
 
@@ -3407,7 +3409,7 @@ function forkpress_render_branch_switcher(): void {
                 var button = document.createElement('button');
                 button.className = 'forkpress-switcher-button';
                 button.type = 'button';
-                button.textContent = 'Revalidate conflicts';
+                button.textContent = 'Check for changes';
                 button.addEventListener('click', function () {
                     fetchConflictRevalidation(payload.run);
                 });
@@ -3706,7 +3708,7 @@ function forkpress_render_branch_switcher(): void {
             body.append('action', 'forkpress_branch_revalidate_conflicts');
             body.append('_wpnonce', actions.revalidateNonce);
             body.append('run', String(run));
-            showStatus('warning', 'Revalidating conflicts...');
+            showStatus('warning', 'Checking conflicts for changes...');
             fetch(actions.url, {
                 method: 'POST',
                 body: body,
@@ -3724,15 +3726,15 @@ function forkpress_render_branch_switcher(): void {
                         payload = null;
                     }
                     if (!response.ok || !payload || payload.success === false) {
-                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict revalidation failed.'));
+                        throw new Error(payload && payload.message ? payload.message : (text || 'ForkPress conflict change check failed.'));
                     }
                     return payload;
                 });
             }).then(function (payload) {
-                showStatus('warning', payload.message || 'Revalidated conflicts.');
+                showStatus('warning', payload.message || 'Checked conflicts for changes.');
                 fetchConflictAudit(run, payload.message || '', { lifecycleState: 'needs-action' });
             }).catch(function (error) {
-                showStatus('error', error && error.message ? error.message : 'ForkPress conflict revalidation failed.');
+                showStatus('error', error && error.message ? error.message : 'ForkPress conflict change check failed.');
             });
         }
 

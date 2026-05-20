@@ -841,7 +841,7 @@ function forkpress_cow_conflict_entity_context(array $record): array {
                 'plugin' => $plugin,
                 'object' => $object,
                 'severity' => $record['plugin_severity'] ?? null,
-                'validator' => $record['plugin_validator'] ?? null,
+                'plugin_check' => $record['plugin_validator'] ?? null,
                 'semantic_scope' => $record['semantic_scope'] ?? null,
                 'files' => $record['plugin_files'] ?? null,
                 'tables' => $record['plugin_tables'] ?? null,
@@ -1044,7 +1044,7 @@ function forkpress_cow_branch_revalidate_merge_run(int $run): array {
 
     $result = json_decode($output, true);
     if (!is_array($result)) {
-        return [1, 'ForkPress returned invalid revalidation JSON.', null];
+        return [1, 'ForkPress returned invalid conflict change-check JSON.', null];
     }
 
     return [0, $output, $result];
@@ -1294,20 +1294,20 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
     if ($action === 'forkpress_branch_revalidate_conflicts') {
         $run = forkpress_cow_branch_post_int('run');
         if ($run === null) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge run to revalidate.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose a merge run to check for changes.');
             return true;
         }
 
         [$code, $output, $result] = forkpress_cow_branch_revalidate_merge_run($run);
         if ($code !== 0) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not revalidate merge conflicts.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not check merge conflicts for changes.');
             return true;
         }
 
         $checked = max(0, (int)($result['checked'] ?? 0));
         $stale = max(0, (int)($result['stale'] ?? 0));
         $carried = max(0, (int)($result['carried'] ?? 0));
-        $message = 'Revalidated merge run ' . $run . ': checked ' . $checked . ', stale ' . $stale . ', carried ' . $carried . '.';
+        $message = 'Checked merge run ' . $run . ' for changes: ' . $checked . ' checked, ' . $stale . ' changed, ' . $carried . ' unchanged.';
         forkpress_cow_branch_finish_json(
             200,
             $current_url,
@@ -1319,6 +1319,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
                 'checked' => $checked,
                 'stale' => $stale,
                 'carried' => $carried,
+                'changeCheck' => $result,
                 'revalidation' => $result,
                 'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
             ]
@@ -1400,11 +1401,11 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             return true;
         }
         if ($apply_reviewed && $after_revalidate) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'After revalidate requires a source or target choice.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Checking again requires a source or target choice.');
             return true;
         }
         if ($replace_applied && $after_revalidate) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution cannot be combined with after revalidate.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution cannot be combined with checking again.');
             return true;
         }
         if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
@@ -1416,7 +1417,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         if ($apply_reviewed && $run !== null) {
             [$code, $output, $revalidation] = forkpress_cow_branch_revalidate_merge_run($run);
             if ($code !== 0) {
-                forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not revalidate merge conflicts before applying the reviewed choice.');
+                forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not check merge conflicts for changes before applying the reviewed choice.');
                 return true;
             }
             if ($revalidation !== null && forkpress_cow_branch_revalidation_needs_action_for_conflict($revalidation, $conflict)) {
@@ -1427,13 +1428,14 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
                     400,
                     $current_url,
                     false,
-                    'Conflict #' . $conflict . ' changed since review. Revalidate and review it before applying the reviewed choice.',
+                    'Conflict #' . $conflict . ' changed since review. Check it again and review it before applying the reviewed choice.',
                     [
                         'run' => $run,
                         'conflict' => $conflict,
                         'checked' => $checked,
                         'stale' => $stale,
                         'carried' => $carried,
+                        'changeCheck' => $revalidation,
                         'revalidation' => $revalidation,
                         'auditCommand' => 'forkpress branch merge-audit --revalidate --run ' . $run . ' --reviewer wordpress-ui --format json',
                     ]
@@ -1985,9 +1987,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-bottom-actions details.fp-actions summary {
         border: 1px solid #8c8f94;
         border-radius: 6px;
+        list-style: none;
         min-height: 32px;
         padding: 6px 10px;
         white-space: nowrap;
+    }
+    .fp-bottom-actions details.fp-actions summary::-webkit-details-marker {
+        display: none;
     }
     .fp-bottom-actions details.fp-actions[open] summary {
         border-color: var(--accent);
@@ -2673,7 +2679,15 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function humanStatus(value) {
         value = String(value || '');
         if (value === 'completed_with_conflicts') return 'merged; has unreviewed checks';
+        if (value === 'revalidate') return 'check again';
+        if (value === 'validated') return 'checked';
         return value.replace(/_/g, ' ');
+    }
+    function humanConflictType(value) {
+        value = String(value || '');
+        if (value === 'plugin-validator-conflict') return 'plugin check conflict';
+        if (value === 'plugin-theme-template-conflict') return 'theme template conflict';
+        return humanStatus(value);
     }
     function conflictUnreviewedCount(summary) {
         return Number(summary && summary.unresolved || 0);
@@ -3306,7 +3320,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             entityType: type || 'record',
             entityLabel: label || 'Record',
             identifier: identifier,
-            field: field,
+            field: humanConflictType(field),
             context: contextText,
             details: details,
             table: table,
@@ -3320,7 +3334,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             record.plugin ? 'plugin: ' + String(record.plugin) : '',
             record.plugin_object ? 'object: ' + String(record.plugin_object) : '',
             record.plugin_severity ? 'severity: ' + String(record.plugin_severity) : '',
-            record.plugin_validator ? 'validator: ' + String(record.plugin_validator) : ''
+            record.plugin_validator ? 'plugin check: ' + String(record.plugin_validator) : ''
         ].filter(Boolean).join(' / ');
     }
     function conflictPluginGuidance(record) {
@@ -3451,7 +3465,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         appendConflictInfo(panel, 'plugin', record.plugin);
         appendConflictInfo(panel, 'object', record.plugin_object);
         appendConflictInfo(panel, 'severity', record.plugin_severity);
-        appendConflictInfo(panel, 'validator', record.plugin_validator);
+        appendConflictInfo(panel, 'plugin check', record.plugin_validator);
         appendConflictInfo(panel, 'reason', record.plugin_reason);
         appendConflictInfo(panel, 'policy', record.plugin_resolution_policy);
         appendConflictInfo(panel, 'manual review', record.plugin_manual_review_reason);
@@ -3489,7 +3503,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             record.next_action ? 'next: ' + humanStatus(record.next_action) : '',
             record.review_status ? 'review: ' + record.review_status : '',
             record.latest_resolution_status ? 'resolution: ' + humanStatus(record.latest_resolution_status) : '',
-            record.stale_status ? 'stale: ' + humanStatus(record.stale_status) : ''
+            record.stale_status ? 'changed: ' + humanStatus(record.stale_status) : ''
         ].filter(Boolean).join(' / ');
     }
     function setSelectedConflict(payload, record) {
@@ -3499,13 +3513,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var run = runById(payload && payload.run) || {};
             setWorkbenchMode((isMergeRun(run) ? 'Reviewing merge #' : 'Reviewing revision #') + String(payload && payload.run || '') + ', conflict #' + String(record.id) + '.');
         }
-        Array.prototype.slice.call(conflicts.querySelectorAll('tr[data-conflict-id]')).forEach(function (row) {
-            row.className = row.getAttribute('data-conflict-id') === selectedConflictId ? 'is-selected' : '';
-        });
-        var slot = document.getElementById('fp-conflict-inspector-slot');
-        if (!slot) return;
-        slot.innerHTML = '';
-        slot.appendChild(renderConflictInspector(payload, record));
+        renderConflicts(payload);
     }
     function renderConflictTable(payload, list) {
         var wrap = document.createElement('div');
@@ -3542,8 +3550,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 { className: 'fp-table-muted', text: context.entityType }
             ]);
             appendTableCell(row, 'Field', [
-                { className: 'fp-table-primary', text: context.field || record.conflict_type || '' },
-                { className: 'fp-table-muted', text: record.conflict_type || '' }
+                { className: 'fp-table-primary', text: context.field || humanConflictType(record.conflict_type) || '' },
+                { className: 'fp-table-muted', text: humanConflictType(record.conflict_type) || '' }
             ]);
             appendTableCell(row, 'Context', [
                 { className: 'fp-table-primary', text: context.context || details || '(no context)' },
@@ -3573,12 +3581,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         node.id = 'fp-conflict-card-' + String(record.id || '');
         var title = textNode('div', 'fp-conflict-title', '#' + String(record.id || '') + ' ' + conflictObjectLabel(record));
         var metaParts = [
-            record.conflict_type,
-            record.lifecycle_state,
-            record.next_action,
-            record.stale_status ? 'stale: ' + record.stale_status : '',
+            humanConflictType(record.conflict_type),
+            humanStatus(record.lifecycle_state),
+            record.next_action ? 'next: ' + humanStatus(record.next_action) : '',
+            record.stale_status ? 'changed: ' + humanStatus(record.stale_status) : '',
             record.review_status ? 'review: ' + record.review_status : '',
-            record.latest_resolution_status ? 'resolution: ' + record.latest_resolution_status : '',
+            record.latest_resolution_status ? 'resolution: ' + humanStatus(record.latest_resolution_status) : '',
             conflictPluginMeta(record)
         ].filter(Boolean);
         var meta = textNode('div', 'fp-conflict-meta', metaParts.join(' / '));
@@ -3595,7 +3603,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         noteLabel.textContent = 'Review note';
         var note = document.createElement('textarea');
         note.value = record.review_note || '';
-        note.placeholder = 'Record why this choice is correct, what follow-up is needed, or what changed after revalidation.';
+        note.placeholder = 'Record why this choice is correct, what follow-up is needed, or what changed after checking again.';
         noteWrap.appendChild(noteLabel);
         noteWrap.appendChild(note);
         var choiceWrap = document.createElement('div');
@@ -3648,7 +3656,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (pluginPayload) {
                 var pluginValues = document.createElement('div');
                 pluginValues.className = 'fp-conflict-grid';
-                pluginValues.appendChild(conflictValueField('Validator payload', pluginPayload));
+                pluginValues.appendChild(conflictValueField('Plugin check payload', pluginPayload));
                 node.appendChild(pluginValues);
             }
         } else if (prioritizeResolutionChange) {
@@ -3750,7 +3758,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             return;
         }
         if (!list.length) {
-            conflictActions.appendChild(button('Revalidate conflict checks', function () { return revalidateConflicts(payload.run); }));
+            conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
             appendBranchPreviewLinks(conflictActions, source, target);
             appendReviewLinkAction(conflictActions);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflict checks found for this revision.'));
@@ -3761,7 +3769,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!filteredList.length) {
             selectedConflictId = null;
             syncReviewUrl();
-            conflictActions.appendChild(button('Revalidate conflict checks', function () { return revalidateConflicts(payload.run); }));
+            conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
             appendBranchPreviewLinks(conflictActions, source, target);
             appendReviewLinkAction(conflictActions);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No ' + conflictFilterLabel(selectedConflictFilter) + ' match this filter.'));
@@ -3786,7 +3794,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         conflictActions.appendChild(previous);
         conflictActions.appendChild(next);
         conflictActions.appendChild(textNode('span', 'fp-conflict-meta', 'Conflict check ' + String(selectedIndex + 1) + ' of ' + String(filteredList.length)));
-        conflictActions.appendChild(button('Revalidate conflict checks', function () { return revalidateConflicts(payload.run); }));
+        conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
         if (Number(summary.resolved || 0) > 0) {
             conflictActions.appendChild(button('Apply reviewed choices', function () { applyReviewedConflicts(payload.run); }, 'primary'));
         }
@@ -3914,9 +3922,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function revalidateConflicts(run) {
         return post('forkpress_branch_revalidate_conflicts', { run: String(run || '') }).then(function (payload) {
-            setStatus(statusKindForPayload(payload, 'warn'), payload.message || 'Merge conflicts revalidated.');
+            setStatus(statusKindForPayload(payload, 'warn'), payload.message || 'Checked merge conflicts for changes.');
             return refreshAfterConflictAction(run);
-        }).catch(function (error) { setStatus('error', error.message || 'Could not revalidate conflicts.'); });
+        }).catch(function (error) { setStatus('error', error.message || 'Could not check conflicts for changes.'); });
     }
     function restoreCrashRecovery(run) {
         if (!window.confirm('Restore crash recovery artifacts for merge run #' + String(run || '') + '?')) return;

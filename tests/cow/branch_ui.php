@@ -939,9 +939,11 @@ $revalidation = run_branch_ui_action(
 $revalidation_payload = decode_branch_ui_payload($revalidation);
 assert_same($revalidation_payload['success'] ?? null, true, 'branch conflict revalidation returns JSON success');
 assert_same($revalidation_payload['type'] ?? null, 'warning', 'branch conflict revalidation returns warning type');
+assert_same($revalidation_payload['message'] ?? null, 'Checked merge run 42 for changes: 4 checked, 2 changed, 1 unchanged.', 'branch conflict change check uses clear user-facing wording');
 assert_same($revalidation_payload['checked'] ?? null, 4, 'branch conflict revalidation exposes checked count');
 assert_same($revalidation_payload['stale'] ?? null, 2, 'branch conflict revalidation exposes stale count');
 assert_same($revalidation_payload['carried'] ?? null, 1, 'branch conflict revalidation exposes carried count');
+assert_same($revalidation_payload['changeCheck']['checked'] ?? null, 4, 'branch conflict change check exposes structured change-check details');
 assert_same(
     $revalidation_payload['auditCommand'] ?? null,
     'forkpress branch merge-audit --revalidate --run 42 --reviewer wordpress-ui --format json',
@@ -1129,7 +1131,7 @@ $invalid_revalidation = run_branch_ui_action(
 );
 $invalid_revalidation_payload = decode_branch_ui_payload($invalid_revalidation);
 assert_same($invalid_revalidation_payload['success'] ?? null, false, 'branch conflict revalidation rejects invalid run ids');
-assert_same($invalid_revalidation_payload['message'] ?? null, 'Choose a merge run to revalidate.', 'branch conflict revalidation explains invalid run ids');
+assert_same($invalid_revalidation_payload['message'] ?? null, 'Choose a merge run to check for changes.', 'branch conflict revalidation explains invalid run ids');
 assert_same(count($invalid_revalidation['argv']), 0, 'branch conflict revalidation does not invoke CLI for invalid run ids');
 
 $invalid_apply_reviewed = run_branch_ui_action(
@@ -1151,7 +1153,7 @@ $invalid_revalidation_json = run_branch_ui_action(
 );
 $invalid_revalidation_json_payload = decode_branch_ui_payload($invalid_revalidation_json);
 assert_same($invalid_revalidation_json_payload['success'] ?? null, false, 'branch conflict revalidation rejects invalid CLI JSON');
-assert_same($invalid_revalidation_json_payload['message'] ?? null, 'ForkPress returned invalid revalidation JSON.', 'branch conflict revalidation explains invalid CLI JSON');
+assert_same($invalid_revalidation_json_payload['message'] ?? null, 'ForkPress returned invalid conflict change-check JSON.', 'branch conflict revalidation explains invalid CLI JSON');
 
 $invalid_json_audit = run_branch_ui_action(
     ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
@@ -1290,6 +1292,8 @@ assert_true(str_contains($switcher_html, "fetchConflictAudit(run, payload.messag
 assert_true(str_contains($switcher_html, 'forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictRevalidation'), 'branch switcher renders conflict revalidation client handler');
+assert_true(str_contains($switcher_html, 'Check for changes'), 'branch switcher labels conflict rechecks without internal validation wording');
+assert_true(str_contains($switcher_html, 'Checked conflicts for changes.'), 'branch switcher reports conflict rechecks without internal validation wording');
 assert_true(str_contains($switcher_html, 'forkpress_branch_review_conflict'), 'branch switcher renders conflict review action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_review_conflict'), 'branch switcher renders conflict review nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictReview'), 'branch switcher renders conflict review client handler');
@@ -1317,6 +1321,7 @@ assert_true(str_contains($switcher_html, 'function conflictPluginMeta'), 'branch
 assert_true(str_contains($switcher_html, 'record.plugin_object'), 'branch switcher renders plugin conflict object metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_severity'), 'branch switcher renders plugin conflict severity metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_validator'), 'branch switcher renders plugin conflict validator metadata');
+assert_true(str_contains($switcher_html, 'plugin check: '), 'branch switcher labels plugin validator metadata as plugin checks');
 assert_true(str_contains($switcher_html, 'function conflictPluginGuidance'), 'branch switcher renders plugin conflict guidance metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_resolution_policy'), 'branch switcher renders plugin conflict resolution policy');
 assert_true(str_contains($switcher_html, 'record.plugin_suggested_action'), 'branch switcher renders plugin conflict suggested action');
