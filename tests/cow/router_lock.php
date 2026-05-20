@@ -411,7 +411,9 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'record.semantic_scope'), 'out-of-band branch manager exposes validator semantic scope');
         assert_true(str_contains($early_body, 'function pluginDriverFor'), 'out-of-band branch manager matches plugin conflicts to approved drivers');
         assert_true(str_contains($early_body, 'Run plugin driver'), 'out-of-band branch manager exposes approved plugin driver actions');
-        assert_true(str_contains($early_body, 'No approved driver'), 'out-of-band branch manager explains plugin conflicts without configured drivers');
+        assert_true(str_contains($early_body, 'No approved automation for this plugin'), 'out-of-band branch manager labels plugin conflicts without configured drivers clearly');
+        assert_true(str_contains($early_body, 'ForkPress has no trusted merge driver approved'), 'out-of-band branch manager explains why plugin conflicts without configured drivers need manual inspection');
+        assert_true(str_contains($early_body, 'FORKPRESS_PLUGIN_MERGE_DRIVERS'), 'out-of-band branch manager explains how trusted plugin drivers are configured');
         assert_true(str_contains($early_body, 'function runPluginDriver'), 'out-of-band branch manager can run approved plugin drivers from conflict review');
         assert_true(str_contains($early_body, 'Run the approved plugin driver'), 'out-of-band branch manager confirms before running plugin driver automation');
         assert_true(str_contains($early_body, 'Fork from here'), 'out-of-band branch manager exposes branch creation as a direct contextual action');
