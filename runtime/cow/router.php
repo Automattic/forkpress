@@ -562,6 +562,21 @@ function forkpress_cow_branch_history_summary(array $report, int $limit): array 
 
 function forkpress_cow_branch_tree_summary(array $report, int $limit): array {
     $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    foreach ($records as &$record) {
+        if (!is_array($record)) {
+            continue;
+        }
+        $conflicts = (int)($record['conflict_count'] ?? 0);
+        if ($conflicts > 0 && !isset($record['conflictSummary']) && !isset($record['conflict_summary'])) {
+            $record['conflictSummary'] = [
+                'total' => $conflicts,
+                'resolved' => 0,
+                'unresolved' => $conflicts,
+                'estimated' => true,
+            ];
+        }
+    }
+    unset($record);
     return [
         'records' => $records,
         'recordCount' => count($records),
@@ -1291,8 +1306,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         min-height: 440px;
         min-width: 760px;
     }
-    .fp-row-hit { cursor: pointer; fill: transparent; }
-    .fp-row-hit:hover { fill: #f6f7f7; }
+    .fp-row-hit { cursor: pointer; fill: transparent; pointer-events: all; stroke: transparent; stroke-width: 1; }
+    .fp-row-hit:hover { fill: transparent; stroke: #cfe7ff; }
     .fp-timeline-lane { fill: none; stroke-linecap: round; stroke-width: 4; }
     .fp-timeline-fork { fill: none; stroke-linecap: round; stroke-width: 4; }
     .fp-timeline-merge { fill: none; stroke-linecap: round; stroke-width: 4; }
@@ -1419,6 +1434,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         display: grid;
         gap: 8px;
         padding: 10px;
+    }
+    .fp-conflict-loading {
+        background: #f6f7f7;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        padding: 12px;
     }
     .fp-conflict-title { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
     .fp-conflict-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
@@ -1620,6 +1643,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!summary && total > 0) unresolved = total;
         return { total: total, resolved: resolved, unresolved: unresolved };
     }
+    function hasConflictSummary(run) {
+        return !!(run && (run._conflictSummary || run.conflictSummary || run.conflict_summary));
+    }
     function runVisualClass(run) {
         var summary = conflictSummary(run);
         var status = String(run.status || '');
@@ -1693,13 +1719,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (when) parts.push(when);
         return parts.filter(Boolean).join('  ·  ');
     }
-    function drawPill(text, x, y, color) {
+    function drawPill(text, x, y, color, layer) {
+        var parent = layer || graph;
         var width = Math.max(46, Math.min(150, 14 + String(text).length * 6.3));
         var rect = svg('rect', { x: x, y: y - 12, width: width, height: 18, rx: 9, class: 'fp-branch-pill', stroke: color });
         var label = svg('text', { x: x + 8, y: y + 1, class: 'fp-branch-pill-text' });
         label.textContent = text.length > 20 ? text.slice(0, 18) + '...' : text;
-        graph.appendChild(rect);
-        graph.appendChild(label);
+        parent.appendChild(rect);
+        parent.appendChild(label);
         return width;
     }
     function laneActivity(entries, lanes) {
@@ -1746,49 +1773,61 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             return 0;
         });
     }
-    function annotateConflictRuns() {
-        var conflictRuns = records.filter(function (run) {
-            return Number(run.conflict_count || 0) > 0 && run.id && !run._conflictSummary;
+    function seedConflictSummaries() {
+        records.forEach(function (run) {
+            var total = Number(run && run.conflict_count || 0);
+            if (total > 0 && !hasConflictSummary(run)) {
+                run._conflictSummary = { total: total, resolved: 0, unresolved: total, estimated: true };
+            }
         });
-        if (!conflictRuns.length) return Promise.resolve();
-        return Promise.all(conflictRuns.map(function (run) {
-            return post('forkpress_branch_conflicts', { run: String(run.id) }).then(function (payload) {
-                run._conflictSummary = payload.conflictSummary || payload.conflict_summary || null;
-                run._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
-            }).catch(function () {
-                run._conflictSummary = { total: Number(run.conflict_count || 0), resolved: 0, unresolved: Number(run.conflict_count || 0) };
-            });
-        })).then(function () {});
+    }
+    function firstConflictRun() {
+        return records.find(function (run) { return Number(run && run.conflict_count || 0) > 0 && run.id; }) || null;
+    }
+    function runById(run) {
+        var id = String(run || '');
+        return records.find(function (item) { return String(item && item.id || '') === id; }) || null;
     }
     function renderGraph() {
         var entries = sortedRunEntries();
         var lanes = laneNames(entries);
         var forkParents = branchForkParents(entries);
-        var graphLeft = 72;
-        var laneGap = 54;
+        var graphLeft = 84;
+        var laneGap = 64;
         var graphWidth = Math.max(1, lanes.length) * laneGap;
         var textX = graphLeft + graphWidth + 56;
-        var top = 58;
-        var rowGap = 64;
-        var rowHeight = 56;
-        var width = Math.max(1120, textX + 720);
+        var top = 64;
+        var rowGap = 70;
+        var rowHeight = 60;
+        var width = Math.max(1180, textX + 740);
         var height = Math.max(520, top + Math.max(entries.length, 1) * rowGap + 34);
         graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
         graph.setAttribute('width', width);
         graph.setAttribute('height', height);
         graph.innerHTML = '';
+        var rowLayer = svg('g', { class: 'fp-row-layer' });
+        var laneLayer = svg('g', { class: 'fp-lane-layer' });
+        var edgeLayer = svg('g', { class: 'fp-edge-layer' });
+        var nodeLayer = svg('g', { class: 'fp-node-layer' });
+        var textLayer = svg('g', { class: 'fp-text-layer' });
+        var hitLayer = svg('g', { class: 'fp-hit-layer' });
+        [rowLayer, laneLayer, edgeLayer, nodeLayer, textLayer, hitLayer].forEach(function (layer) { graph.appendChild(layer); });
         var x = {};
         var activity = laneActivity(entries, lanes);
         lanes.forEach(function (name, index) {
             x[name] = graphLeft + index * laneGap;
         });
+        entries.forEach(function (entry, rowIndex) {
+            var y = top + rowIndex * rowGap;
+            rowLayer.appendChild(svg('line', { x1: 0, x2: width - 20, y1: y + rowHeight / 2, y2: y + rowHeight / 2, class: 'fp-row-divider' }));
+        });
         lanes.forEach(function (name) {
             var span = activity[name];
             if (!span || span.first === null || span.last === null) return;
             var color = branchColor(name, lanes);
-            var startY = top + span.first * rowGap - 18;
-            var endY = top + span.last * rowGap + 18;
-            graph.appendChild(svg('path', {
+            var startY = top + span.first * rowGap - 22;
+            var endY = top + span.last * rowGap + 22;
+            laneLayer.appendChild(svg('path', {
                 d: 'M ' + x[name] + ' ' + startY + ' L ' + x[name] + ' ' + endY,
                 class: 'fp-timeline-lane',
                 stroke: color,
@@ -1796,14 +1835,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             }));
             var cap = svg('circle', { cx: x[name], cy: startY, r: 4, class: 'fp-lane-cap', stroke: color });
             cap.appendChild(svg('title', {})).textContent = name + ' latest visible revision';
-            graph.appendChild(cap);
+            nodeLayer.appendChild(cap);
             var end = svg('circle', { cx: x[name], cy: endY, r: 4, class: 'fp-lane-end', stroke: color });
             end.appendChild(svg('title', {})).textContent = name + ' oldest visible revision';
-            graph.appendChild(end);
+            nodeLayer.appendChild(end);
             if (span.first < 6) {
                 var label = svg('text', { x: x[name] + 7, y: startY - 4, class: 'fp-lane-label' });
                 label.textContent = name.length > 15 ? name.slice(0, 13) + '...' : name;
-                graph.appendChild(label);
+                textLayer.appendChild(label);
             }
         });
         entries.forEach(function (entry, rowIndex) {
@@ -1821,20 +1860,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var isFork = isBranchForkRun(run);
             var forkParent = forkParents[source] || 'main';
             var px = x[forkParent] !== undefined ? x[forkParent] : graphLeft;
-            var hit = svg('rect', {
-                x: 0,
-                y: y - rowHeight / 2,
-                width: width,
-                height: rowHeight,
-                class: 'fp-row-hit',
-                'data-kind': 'run',
-                'data-index': entry.index
-            });
-            graph.appendChild(hit);
-            graph.appendChild(svg('line', { x1: 0, x2: width - 20, y1: y + rowHeight / 2, y2: y + rowHeight / 2, class: 'fp-row-divider' }));
             if (isFork && px !== sx) {
                 var forkPath = svg('path', {
-                    d: 'M ' + px + ' ' + y + ' C ' + px + ' ' + (y - 26) + ', ' + sx + ' ' + (y - 26) + ', ' + sx + ' ' + (y - 2),
+                    d: 'M ' + px + ' ' + y + ' C ' + px + ' ' + (y - 24) + ', ' + sx + ' ' + (y - 24) + ', ' + sx + ' ' + y,
                     class: 'fp-timeline-fork',
                     stroke: sourceColor,
                     opacity: '.92',
@@ -1842,20 +1870,20 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     'data-index': entry.index
                 });
                 forkPath.appendChild(svg('title', {})).textContent = source + ' branched from ' + forkParent;
-                graph.appendChild(forkPath);
-                graph.appendChild(svg('circle', { cx: px, cy: y, r: 5, class: 'fp-merge-dot', stroke: branchColor(forkParent, lanes), 'data-kind': 'run', 'data-index': entry.index }));
+                edgeLayer.appendChild(forkPath);
+                nodeLayer.appendChild(svg('circle', { cx: px, cy: y, r: 5, class: 'fp-merge-dot', stroke: branchColor(forkParent, lanes), 'data-kind': 'run', 'data-index': entry.index }));
             }
             if (isMerge) {
-                var bend = Math.max(28, Math.abs(tx - sx) / 2);
+                var bend = Math.max(32, Math.abs(tx - sx) / 2);
                 var mergePath = svg('path', {
-                    d: 'M ' + sx + ' ' + (y - 26) + ' C ' + sx + ' ' + (y - 4) + ', ' + (tx + (sx < tx ? -bend : bend)) + ' ' + (y - 4) + ', ' + tx + ' ' + y,
+                    d: 'M ' + sx + ' ' + y + ' C ' + sx + ' ' + (y - 24) + ', ' + (tx + (sx < tx ? -bend : bend)) + ' ' + (y - 24) + ', ' + tx + ' ' + y,
                     class: 'fp-timeline-merge' + (visual.indexOf('is-conflict') !== -1 ? ' is-conflict' : '') + (visual.indexOf('is-resolved') !== -1 ? ' is-resolved' : ''),
                     stroke: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : sourceColor),
                     'data-kind': 'run',
                     'data-index': entry.index
                 });
-                graph.appendChild(mergePath);
-                graph.appendChild(svg('circle', { cx: sx, cy: y - 26, r: 5, class: 'fp-merge-dot', stroke: sourceColor, 'data-kind': 'run', 'data-index': entry.index }));
+                edgeLayer.appendChild(mergePath);
+                nodeLayer.appendChild(svg('circle', { cx: sx, cy: y, r: 5, class: 'fp-merge-dot', stroke: sourceColor, 'data-kind': 'run', 'data-index': entry.index }));
             }
             var node = svg('circle', {
                 cx: tx,
@@ -1867,37 +1895,46 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 'data-index': entry.index
             });
             node.appendChild(svg('title', {})).textContent = isFork ? ('#' + String(run.id || '') + ' ' + source + ' branched from ' + forkParent) : ('#' + String(run.id || '') + ' ' + source + ' -> ' + target + ' / ' + String(run.status || ''));
-            graph.appendChild(node);
+            nodeLayer.appendChild(node);
             var title = svg('text', { x: textX, y: y - 6, class: 'fp-row-title' });
             title.textContent = isFork ? ('#' + String(run.id || '') + ' ' + source + ' branched from ' + forkParent) : runLabel(run);
-            graph.appendChild(title);
+            textLayer.appendChild(title);
             var meta = svg('text', { x: textX, y: y + 12, class: 'fp-row-meta' });
             meta.textContent = runMeta(run);
-            graph.appendChild(meta);
-            var pillX = textX + 280;
+            textLayer.appendChild(meta);
+            var pillX = textX + 305;
             if (isFork) {
-                pillX += drawPill(forkParent, pillX, y - 7, branchColor(forkParent, lanes)) + 8;
+                pillX += drawPill(forkParent, pillX, y - 7, branchColor(forkParent, lanes), textLayer) + 8;
                 var forkText = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
                 forkText.textContent = 'forks';
-                graph.appendChild(forkText);
+                textLayer.appendChild(forkText);
                 pillX += 34;
-                drawPill(source, pillX, y - 7, sourceColor);
+                drawPill(source, pillX, y - 7, sourceColor, textLayer);
             } else {
-                pillX += drawPill(source, pillX, y - 7, sourceColor) + 8;
+                pillX += drawPill(source, pillX, y - 7, sourceColor, textLayer) + 8;
             }
             if (isMerge) {
                 var arrow = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
                 arrow.textContent = 'into';
-                graph.appendChild(arrow);
+                textLayer.appendChild(arrow);
                 pillX += 30;
-                drawPill(target, pillX, y - 7, targetColor);
+                drawPill(target, pillX, y - 7, targetColor, textLayer);
             }
             if (conflict.total > 0) {
-                graph.appendChild(svg('circle', { cx: tx + 10, cy: y - 14, r: 9, class: 'fp-conflict-badge' + (conflict.unresolved === 0 && run._conflictSummary ? ' is-resolved' : '') }));
-                var badge = svg('text', { x: tx + 10, y: y - 10, class: 'fp-badge-text', 'text-anchor': 'middle' });
-                badge.textContent = String(conflict.unresolved === 0 && run._conflictSummary ? conflict.total : conflict.unresolved);
-                graph.appendChild(badge);
+                nodeLayer.appendChild(svg('circle', { cx: tx + 16, cy: y - 17, r: 9, class: 'fp-conflict-badge' + (conflict.unresolved === 0 && hasConflictSummary(run) ? ' is-resolved' : '') }));
+                var badge = svg('text', { x: tx + 16, y: y - 13, class: 'fp-badge-text', 'text-anchor': 'middle' });
+                badge.textContent = String(conflict.unresolved === 0 && hasConflictSummary(run) ? conflict.total : conflict.unresolved);
+                nodeLayer.appendChild(badge);
             }
+            hitLayer.appendChild(svg('rect', {
+                x: 0,
+                y: y - rowHeight / 2,
+                width: width,
+                height: rowHeight,
+                class: 'fp-row-hit',
+                'data-kind': 'run',
+                'data-index': entry.index
+            }));
         });
         summary.textContent = lanes.length + ' graph lanes / ' + entries.length + ' timeline revisions / newest first';
     }
@@ -2098,13 +2135,16 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         setStatus('warn', 'Loading branch graph...');
         return post('forkpress_branch_tree', { limit: '50' }).then(function (payload) {
             records = Array.isArray(payload.records) ? payload.records : [];
+            seedConflictSummaries();
             renderGraph();
             clearStatus();
-            if (records.length) selectRun(records[0]); else selectBranch(state.currentBranch);
-            annotateConflictRuns().then(function () {
-                renderGraph();
-                if (records.length) selectRun(records[0]);
-            });
+            var initialRun = firstConflictRun() || records[0] || null;
+            if (initialRun) {
+                selectRun(initialRun);
+                if (Number(initialRun.conflict_count || 0) > 0) loadConflicts(initialRun.id, { defaultLoad: true });
+            } else {
+                selectBranch(state.currentBranch);
+            }
         }).catch(function (error) {
             records = [];
             renderGraph();
@@ -2116,14 +2156,42 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         setStatus('warn', 'Loading history...');
         post('forkpress_branch_history', { limit: '50' }).then(function (payload) {
             records = Array.isArray(payload.records) ? payload.records : [];
+            seedConflictSummaries();
             renderGraph();
             setStatus('ok', payload.message || 'Loaded history.');
-            annotateConflictRuns().then(renderGraph);
         }).catch(function (error) { setStatus('error', error.message || 'Could not load history.'); });
     }
-    function loadConflicts(run) {
+    function renderConflictLoading(run) {
+        conflicts.innerHTML = '';
+        raw.textContent = '';
+        raw.style.display = 'none';
+        conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'Loading conflict list for run #' + String(run) + '...'));
+    }
+    function cacheConflictPayload(run, payload) {
+        var item = runById(run);
+        if (!item) return;
+        item._conflictSummary = payload.conflictSummary || payload.conflict_summary || item._conflictSummary || null;
+        item._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
+    }
+    function loadConflicts(run, options) {
+        var item = runById(run);
+        if (item && Array.isArray(item._conflictRecords)) {
+            renderConflicts({
+                run: Number(run),
+                records: item._conflictRecords,
+                conflictSummary: item._conflictSummary || null,
+                message: 'Loaded cached conflict details.'
+            });
+            if (!options || !options.refresh) return Promise.resolve();
+        } else {
+            renderConflictLoading(run);
+        }
         setStatus('warn', 'Loading conflicts...');
-        post('forkpress_branch_conflicts', { run: String(run) }).then(renderConflicts).catch(function (error) {
+        return post('forkpress_branch_conflicts', { run: String(run) }).then(function (payload) {
+            cacheConflictPayload(run, payload);
+            renderConflicts(payload);
+            renderGraph();
+        }).catch(function (error) {
             setStatus('error', error.message || 'Could not load conflicts.');
         });
     }

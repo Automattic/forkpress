@@ -1321,6 +1321,21 @@ function forkpress_branch_history_summary(array $report, int $limit): array {
 
 function forkpress_branch_tree_summary(array $report, int $limit): array {
     $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    foreach ($records as &$record) {
+        if (!is_array($record)) {
+            continue;
+        }
+        $conflicts = (int)($record['conflict_count'] ?? 0);
+        if ($conflicts > 0 && !isset($record['conflictSummary']) && !isset($record['conflict_summary'])) {
+            $record['conflictSummary'] = [
+                'total' => $conflicts,
+                'resolved' => 0,
+                'unresolved' => $conflicts,
+                'estimated' => true,
+            ];
+        }
+    }
+    unset($record);
     return [
         'records' => $records,
         'recordCount' => count($records),

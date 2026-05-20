@@ -428,6 +428,9 @@ assert_same($tree_payload['message'] ?? null, 'Loaded 1 branch tree edge.', 'bra
 assert_same($tree_payload['recordCount'] ?? null, 1, 'branch tree admin action reports record count');
 assert_same($tree_payload['records'][0]['source_branch'] ?? null, 'feature', 'branch tree admin action exposes source branch');
 assert_same($tree_payload['records'][0]['target_branch'] ?? null, 'main', 'branch tree admin action exposes target branch');
+assert_same($tree_payload['records'][0]['conflictSummary']['total'] ?? null, 3, 'branch tree admin action includes conflict totals for fast graph badges');
+assert_same($tree_payload['records'][0]['conflictSummary']['unresolved'] ?? null, 3, 'branch tree admin action seeds unresolved conflict count without extra audits');
+assert_same($tree_payload['records'][0]['conflictSummary']['estimated'] ?? null, true, 'branch tree admin action marks seeded conflict summaries as estimated');
 assert_same($tree_payload['treeCommand'] ?? null, 'forkpress branch tree --limit 5 --format json', 'branch tree admin action exposes the matching CLI command');
 assert_same(count($tree['argv']), 1, 'branch tree admin action invokes ForkPress CLI once');
 assert_same(

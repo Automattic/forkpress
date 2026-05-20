@@ -253,7 +253,9 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-row-title'), 'out-of-band branch manager renders revisions as timeline rows');
         assert_true(str_contains($early_body, 'sortedRunEntries'), 'out-of-band branch manager sorts real revision records, not one row per branch');
         assert_true(str_contains($early_body, 'timeline revisions / newest first'), 'out-of-band branch manager labels revision timeline direction');
-        assert_true(str_contains($early_body, 'annotateConflictRuns'), 'out-of-band branch manager annotates conflict runs with review state');
+        assert_true(str_contains($early_body, 'seedConflictSummaries'), 'out-of-band branch manager seeds conflict summaries without extra conflict audits');
+        assert_true(!str_contains($early_body, 'Promise.all(conflictRuns.map'), 'out-of-band branch manager avoids N+1 conflict audit loading');
+        assert_true(str_contains($early_body, 'renderConflictLoading'), 'out-of-band branch manager renders an immediate conflict loader');
         assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
         assert_true(str_contains($early_body, 'forkpress_branch_conflicts'), 'out-of-band branch manager can revisit conflicts');
         assert_true(str_contains($early_body, 'fp-conflict-grid'), 'out-of-band branch manager renders conflict values as review fields');
