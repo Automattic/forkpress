@@ -10,7 +10,7 @@ source "$(dirname "$0")/_lib/docker-chown-trap.sh"
 # `make test-cow-fast` (PHP test suite) and the heavier production-build /
 # COW-e2e chunks land in follow-up steps with their own image / cache setup.
 
-# We're root inside the `rust:1.95-bookworm` container, so apt-get works
+# We're root inside the `rust:1.95-trixie` container, so apt-get works
 # without sudo. The image doesn't ship PHP; install it so `make test-cow-fast`
 # can run its sqlite-backed PHP test suite. ~15s overhead per build.
 echo "--- :package: Installing PHP"

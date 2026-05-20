@@ -10,7 +10,7 @@ source "$(dirname "$0")/_lib/docker-chown-trap.sh"
 #   - scripts/build-dist.sh   (static PHP runtime bundle, 3-5 min)
 #   - cargo build --release   (forkpress for x86_64-unknown-linux-musl)
 #   - tests/cow/e2e.sh        (COW strategy end-to-end against the binary)
-# We're root inside the rust:1.95-bookworm container so apt works without
+# We're root inside the rust:1.95-trixie container so apt works without
 # sudo. Caching is intentionally absent for now; the static PHP compile pays
 # the full 3-5 min cost on every build.
 
@@ -18,7 +18,7 @@ TARGET=x86_64-unknown-linux-musl
 
 echo "--- :package: Installing build deps"
 apt-get update -qq
-# rust:1.95-bookworm (buildpack-deps base) already has build-essential, clang,
+# rust:1.95-trixie (buildpack-deps base) already has build-essential, clang,
 # curl, git, pkg-config, unzip. Add the rest that build-dist.sh and the musl
 # linker want.
 apt-get install -y --no-install-recommends \
