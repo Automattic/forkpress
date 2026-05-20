@@ -474,6 +474,41 @@ if (is_resource($process)) {
     assert_true(!file_exists($started), 'router branch create action did not fall through to WordPress');
 }
 
+if (class_exists('SQLite3')) {
+    @mkdir($cow . '/merge', 0777, true);
+    $metadata = new SQLite3($cow . '/merge/metadata.sqlite');
+    $metadata->exec('CREATE TABLE merge_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, source_branch TEXT NOT NULL, target_branch TEXT NOT NULL, base_ref TEXT, started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, finished_at TEXT, status TEXT NOT NULL, policy TEXT NOT NULL, source_db TEXT NOT NULL, target_db TEXT NOT NULL, base_db TEXT NOT NULL, source_root TEXT NOT NULL DEFAULT "", target_root TEXT NOT NULL DEFAULT "", target_before_db TEXT NOT NULL DEFAULT "", target_before_root TEXT NOT NULL DEFAULT "", failure_reason TEXT)');
+    $metadata->exec('CREATE TABLE merge_conflicts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, table_name TEXT NOT NULL, conflict_type TEXT NOT NULL)');
+    $metadata->exec('CREATE TABLE merge_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL)');
+    $metadata->exec("INSERT INTO merge_runs (source_branch, target_branch, base_ref, started_at, finished_at, status, policy, source_db, target_db, base_db) VALUES ('feature-a', 'main', 'test', '2026-05-20 12:00:00', '2026-05-20 12:00:01', 'completed', 'target-wins', '', '', '')");
+    $metadata->close();
+
+    $process = proc_open(
+        [PHP_BINARY, $child, $branches, $cow, $router, '/wp-admin/admin-post.php?action=forkpress_branch_tree&limit=50', $entered],
+        $descriptor,
+        $pipes,
+        null,
+        ['FORKPRESS_BIN' => '', 'FORKPRESS_WORK_DIR' => '']
+    );
+    assert_true(is_resource($process), 'spawned metadata fallback branch tree request process');
+    if (is_resource($process)) {
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $status = proc_close($process);
+        $payload = json_decode($stdout, true);
+        assert_same($status, 0, 'metadata fallback branch tree exits cleanly');
+        assert_same($stderr, '', 'metadata fallback branch tree produced no stderr');
+        assert_true(is_array($payload), 'metadata fallback branch tree returns JSON');
+        assert_same($payload['success'] ?? null, true, 'metadata fallback branch tree reports success');
+        assert_same($payload['records'][0]['source_branch'] ?? null, 'feature-a', 'metadata fallback branch tree returns merge runs');
+        $branch_names = array_map(static fn($branch) => $branch['name'] ?? '', $payload['branches'] ?? []);
+        assert_true(in_array('feature-a', $branch_names, true), 'metadata fallback branch tree returns branches discovered from merge metadata');
+    }
+}
+
 rm_tree($tmp);
 
 echo "\n=== COW router lock tests: $pass passed, $fail failed ===\n";

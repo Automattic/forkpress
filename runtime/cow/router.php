@@ -347,6 +347,141 @@ function forkpress_cow_branch_run_cli(array $args): array {
     return [(int)$code, trim((string)$stdout . "\n" . (string)$stderr)];
 }
 
+function forkpress_cow_metadata_db_path(string $branches_dir): string {
+    $cow_dir = getenv('FORKPRESS_COW_DIR') ?: dirname(rtrim($branches_dir, "/\\"));
+    return rtrim($cow_dir, "/\\") . '/merge/metadata.sqlite';
+}
+
+function forkpress_cow_metadata_branch_names(string $branches_dir): array {
+    $metadata_db = forkpress_cow_metadata_db_path($branches_dir);
+    if (!class_exists('SQLite3') || !is_file($metadata_db)) {
+        return [];
+    }
+
+    try {
+        $db = new SQLite3($metadata_db, SQLITE3_OPEN_READONLY);
+        $names = [];
+        foreach ([
+            'SELECT DISTINCT source_branch AS branch FROM merge_runs UNION SELECT DISTINCT target_branch AS branch FROM merge_runs',
+            'SELECT DISTINCT branch_name AS branch FROM merge_autoincrement_bands',
+            'SELECT DISTINCT branch_name AS branch FROM merge_row_identities',
+        ] as $sql) {
+            $rows = @$db->query($sql);
+            if (!$rows instanceof SQLite3Result) {
+                continue;
+            }
+            while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+                $name = trim((string)($row['branch'] ?? ''));
+                if ($name !== '' && preg_match('/^[a-zA-Z0-9_\-]{1,63}$/', $name)) {
+                    $names[$name] = true;
+                }
+            }
+            $rows->finalize();
+        }
+        $db->close();
+        return array_keys($names);
+    } catch (Throwable) {
+        return [];
+    }
+}
+
+function forkpress_cow_branch_tree_report_from_metadata(string $branches_dir, int $limit): ?array {
+    $metadata_db = forkpress_cow_metadata_db_path($branches_dir);
+    if (!class_exists('SQLite3') || !is_file($metadata_db)) {
+        return null;
+    }
+
+    try {
+        $db = new SQLite3($metadata_db, SQLITE3_OPEN_READONLY);
+        $stmt = $db->prepare(
+            'SELECT r.id, r.source_branch, r.target_branch, r.base_ref, r.started_at, r.finished_at, r.status, r.policy, ' .
+            'r.source_db, r.target_db, r.base_db, r.source_root, r.target_root, r.target_before_db, r.target_before_root, r.failure_reason, ' .
+            '(SELECT COUNT(*) FROM merge_conflicts c WHERE c.run_id = r.id) AS conflict_count, ' .
+            '(SELECT COUNT(*) FROM merge_decisions d WHERE d.run_id = r.id) AS decision_count ' .
+            'FROM merge_runs r ORDER BY r.id DESC LIMIT :limit'
+        );
+        if (!$stmt instanceof SQLite3Stmt) {
+            $db->close();
+            return null;
+        }
+        $stmt->bindValue(':limit', $limit, SQLITE3_INTEGER);
+        $rows = $stmt->execute();
+        if (!$rows instanceof SQLite3Result) {
+            $db->close();
+            return null;
+        }
+        $runs = [];
+        while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+            $row['id'] = (int)($row['id'] ?? 0);
+            $row['conflict_count'] = (int)($row['conflict_count'] ?? 0);
+            $row['decision_count'] = (int)($row['decision_count'] ?? 0);
+            $runs[] = $row;
+        }
+        $rows->finalize();
+        $db->close();
+        return [
+            'runs' => $runs,
+            'metadata_db' => $metadata_db,
+            'branches' => forkpress_cow_metadata_branch_names($branches_dir),
+            'source' => 'metadata',
+        ];
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+function forkpress_cow_branch_conflict_report_from_metadata(string $branches_dir, int $run): ?array {
+    $metadata_db = forkpress_cow_metadata_db_path($branches_dir);
+    if (!class_exists('SQLite3') || !is_file($metadata_db)) {
+        return null;
+    }
+
+    try {
+        $db = new SQLite3($metadata_db, SQLITE3_OPEN_READONLY);
+        $stmt = $db->prepare(
+            'SELECT c.*, r.source_branch, r.target_branch, r.source_db, r.target_db, r.base_db, ' .
+            '(SELECT ce.lifecycle_state FROM merge_conflict_events ce WHERE ce.conflict_id = c.id ORDER BY ce.id DESC LIMIT 1) AS lifecycle_state, ' .
+            '(SELECT ce.event_type FROM merge_conflict_events ce WHERE ce.conflict_id = c.id ORDER BY ce.id DESC LIMIT 1) AS latest_event_type, ' .
+            '(SELECT rn.status FROM merge_review_notes rn WHERE rn.record_type = "conflict" AND rn.record_id = c.id ORDER BY rn.id DESC LIMIT 1) AS review_status, ' .
+            '(SELECT rn.note FROM merge_review_notes rn WHERE rn.record_type = "conflict" AND rn.record_id = c.id ORDER BY rn.id DESC LIMIT 1) AS review_note, ' .
+            '(SELECT mr.id FROM merge_resolutions mr WHERE mr.conflict_id = c.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_id, ' .
+            '(SELECT mr.choice FROM merge_resolutions mr WHERE mr.conflict_id = c.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_choice, ' .
+            '(SELECT mr.applied FROM merge_resolutions mr WHERE mr.conflict_id = c.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_applied, ' .
+            '(SELECT mr.status FROM merge_resolutions mr WHERE mr.conflict_id = c.id ORDER BY mr.id DESC LIMIT 1) AS latest_resolution_status, ' .
+            '(SELECT rv.revalidation_class FROM merge_revalidations rv WHERE rv.conflict_id = c.id ORDER BY rv.id DESC LIMIT 1) AS stale_status ' .
+            'FROM merge_conflicts c JOIN merge_runs r ON r.id = c.run_id WHERE c.run_id = :run ORDER BY c.id ASC'
+        );
+        if (!$stmt instanceof SQLite3Stmt) {
+            $db->close();
+            return null;
+        }
+        $stmt->bindValue(':run', $run, SQLITE3_INTEGER);
+        $rows = $stmt->execute();
+        if (!$rows instanceof SQLite3Result) {
+            $db->close();
+            return null;
+        }
+        $conflicts = [];
+        while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+            $row['id'] = (int)($row['id'] ?? 0);
+            $row['run_id'] = (int)($row['run_id'] ?? 0);
+            $row['latest_resolution_id'] = isset($row['latest_resolution_id']) ? (int)$row['latest_resolution_id'] : null;
+            $row['latest_resolution_applied'] = isset($row['latest_resolution_applied']) ? (int)$row['latest_resolution_applied'] : 0;
+            $row['resolution_choices'] = ['source', 'target'];
+            $conflicts[] = $row;
+        }
+        $rows->finalize();
+        $db->close();
+        return [
+            'conflicts' => $conflicts,
+            'metadata_db' => $metadata_db,
+            'source' => 'metadata',
+        ];
+    } catch (Throwable) {
+        return null;
+    }
+}
+
 function forkpress_cow_branch_plugin_driver_entry(string $plugin, string $driver): ?array {
     $plugin = trim($plugin);
     $driver = trim($driver);
@@ -1182,16 +1317,23 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
 
         [$code, $output] = forkpress_cow_branch_run_cli(['tree', '--limit', (string)$limit, '--format', 'json']);
         if ($code !== 0) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect the branch tree.');
-            return true;
-        }
-        $report = json_decode($output, true);
-        if (!is_array($report)) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid branch tree JSON.');
-            return true;
+            $report = forkpress_cow_branch_tree_report_from_metadata($branches_dir, $limit);
+            if ($report === null) {
+                forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect the branch tree.');
+                return true;
+            }
+        } else {
+            $report = json_decode($output, true);
+            if (!is_array($report)) {
+                forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid branch tree JSON.');
+                return true;
+            }
         }
 
         $summary = forkpress_cow_branch_tree_summary($report, $limit);
+        if (is_array($report['branches'] ?? null)) {
+            $summary['branches'] = forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/', $report['branches']);
+        }
         $count = (int)($summary['recordCount'] ?? 0);
         forkpress_cow_branch_finish_json(
             200,
@@ -1218,31 +1360,35 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
 
         [$crash_code, $crash_output] = forkpress_cow_branch_run_cli(['merge-audit', '--records', 'crash-recovery', '--run', (string)$run, '--format', 'json']);
         if ($crash_code !== 0) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, $crash_output ?: 'ForkPress could not inspect pending crash recovery.');
-            return true;
-        }
-        $crash_report = json_decode($crash_output, true);
-        if (!is_array($crash_report)) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid crash recovery JSON.');
-            return true;
-        }
-        $crash_summary = forkpress_cow_branch_crash_recovery_summary($crash_report, $run);
-        if (($crash_summary['crashRecoveryCount'] ?? 0) > 0) {
-            $message = 'Merge run ' . $run . ' has pending crash recovery. Restore it before reviewing conflicts.';
-            forkpress_cow_branch_finish_json(200, $current_url, true, $message, array_merge(['type' => 'warning'], $crash_summary));
-            return true;
+            $crash_summary = ['crashRecoveryCount' => 0];
+        } else {
+            $crash_report = json_decode($crash_output, true);
+            if (!is_array($crash_report)) {
+                forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid crash recovery JSON.');
+                return true;
+            }
+            $crash_summary = forkpress_cow_branch_crash_recovery_summary($crash_report, $run);
+            if (($crash_summary['crashRecoveryCount'] ?? 0) > 0) {
+                $message = 'Merge run ' . $run . ' has pending crash recovery. Restore it before reviewing conflicts.';
+                forkpress_cow_branch_finish_json(200, $current_url, true, $message, array_merge(['type' => 'warning'], $crash_summary));
+                return true;
+            }
         }
 
         $audit_args = array_merge(['merge-audit', '--records', 'conflicts', '--run', (string)$run, '--format', 'json'], $filters['args']);
         [$code, $output] = forkpress_cow_branch_run_cli($audit_args);
         if ($code !== 0) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect merge conflicts.');
-            return true;
-        }
-        $report = json_decode($output, true);
-        if (!is_array($report)) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid merge audit JSON.');
-            return true;
+            $report = forkpress_cow_branch_conflict_report_from_metadata($branches_dir, $run);
+            if ($report === null) {
+                forkpress_cow_branch_finish_json(400, $current_url, false, $output ?: 'ForkPress could not inspect merge conflicts.');
+                return true;
+            }
+        } else {
+            $report = json_decode($output, true);
+            if (!is_array($report)) {
+                forkpress_cow_branch_finish_json(400, $current_url, false, 'ForkPress returned invalid merge audit JSON.');
+                return true;
+            }
         }
 
         $summary = forkpress_cow_branch_conflict_audit_summary($report, $run, $filters['filters']);
@@ -4061,6 +4207,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         options = options || {};
         setStatus('warn', 'Loading branch graph...');
         return post('forkpress_branch_tree', { limit: '50' }).then(function (payload) {
+            if (Array.isArray(payload.branches)) {
+                state.branches = payload.branches;
+                refreshForms();
+            }
             records = Array.isArray(payload.records) ? payload.records : [];
             seedConflictSummaries();
             renderGraph();
@@ -4258,7 +4408,7 @@ function forkpress_cow_handle_branch_manager(string $path, string $current_branc
     header('Pragma: no-cache');
     echo str_replace('__STATE__', forkpress_cow_json_encode([
         'currentBranch' => $current_branch,
-        'branches' => forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/'),
+        'branches' => forkpress_cow_branch_switcher_data($current_branch, '/wp-admin/', forkpress_cow_metadata_branch_names($branches_dir)),
         'pluginDrivers' => array_values(forkpress_cow_branch_plugin_driver_map($branches_dir, $current_branch)),
         'actionUrl' => '/_forkpress/action',
         'rootUrl' => '/_forkpress/branches',
