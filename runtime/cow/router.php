@@ -2306,6 +2306,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             justify-content: center;
             white-space: normal;
         }
+        .fp-conflict-workbench .fp-buttons {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            padding-bottom: 2px;
+        }
+        .fp-conflict-workbench .fp-buttons button,
+        .fp-conflict-workbench .fp-buttons .fp-button {
+            flex: 0 0 auto;
+            justify-content: center;
+            white-space: nowrap;
+        }
         body.fp-reviewing .fp-layout { grid-template-rows: minmax(260px, 36vh) auto; }
         body.fp-reviewing .fp-graph-wrap {
             max-height: 300px;
@@ -2339,6 +2350,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     </div>
                 </div>
                 <div class="fp-buttons">
+                    <button type="button" id="fp-focus-selected">Focus selected</button>
                     <button type="button" id="fp-refresh">Refresh</button>
                     <button type="button" id="fp-load-history">History</button>
                 </div>
@@ -2424,10 +2436,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var createFrom = document.getElementById('fp-create-from');
     var mergeSource = document.getElementById('fp-merge-source');
     var mergeTarget = document.getElementById('fp-merge-target');
+    var initialParams = new URLSearchParams(window.location.search);
+    var initialRunId = initialParams.get('run') || '';
     var records = [];
     var selectedRunId = null;
-    var selectedConflictId = null;
-    var selectedConflictFilter = 'all';
+    var selectedConflictId = initialParams.get('conflict') || null;
+    var selectedConflictFilter = initialParams.get('filter') || 'all';
 
     function branch(name) {
         return state.branches.find(function (item) { return item.name === name; }) || { name: name, url: '#', siteUrl: '#', adminUrl: '#', managerUrl: '#' };
@@ -2442,6 +2456,18 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function setWorkbenchMode(message) {
         workbenchMode.textContent = message || 'Select a branch, revision, or merge event.';
+    }
+    function syncReviewUrl() {
+        if (!window.history || !window.history.replaceState) return;
+        var params = new URLSearchParams(window.location.search);
+        if (selectedRunId) params.set('run', selectedRunId);
+        else params.delete('run');
+        if (selectedConflictId) params.set('conflict', selectedConflictId);
+        else params.delete('conflict');
+        if (selectedConflictFilter && selectedConflictFilter !== 'all') params.set('filter', selectedConflictFilter);
+        else params.delete('filter');
+        var query = params.toString();
+        window.history.replaceState(null, '', window.location.pathname + (query ? '?' + query : ''));
     }
     function showConflictWorkbench(title, message) {
         document.body.classList.add('fp-reviewing');
@@ -2902,6 +2928,20 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         });
         summary.textContent = lanes.length + ' lanes / ' + entries.length + ' events / newest first';
     }
+    function scrollSelectedRunIntoView() {
+        if (!selectedRunId || !graph.parentNode) return;
+        var entries = sortedRunEntries();
+        var index = entries.findIndex(function (entry) {
+            return String(entry.run && entry.run.id || '') === String(selectedRunId);
+        });
+        if (index < 0) return;
+        var rowY = 38 + index * 46;
+        var wrap = graph.parentNode;
+        var currentTop = wrap.scrollTop || 0;
+        var currentBottom = currentTop + (wrap.clientHeight || 0);
+        if (rowY > currentTop + 60 && rowY < currentBottom - 80) return;
+        wrap.scrollTop = Math.max(0, rowY - Math.max(120, (wrap.clientHeight || 0) / 2));
+    }
     function setDetail(title, rows, actions, object) {
         detailTitle.textContent = title;
         detail.innerHTML = '';
@@ -2939,6 +2979,24 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         a.href = href;
         a.textContent = label;
         return a;
+    }
+    function appendBranchPreviewLinks(container, source, target) {
+        if (source) container.appendChild(link('Open source: ' + source, branch(source).siteUrl));
+        if (target) container.appendChild(link('Open target: ' + target, branch(target).siteUrl));
+    }
+    function appendReviewLinkAction(container) {
+        container.appendChild(button('Copy review link', function () {
+            syncReviewUrl();
+            if (!navigator.clipboard || !navigator.clipboard.writeText) {
+                setStatus('warn', 'Copy is not available in this browser. Use the current address bar URL.');
+                return;
+            }
+            navigator.clipboard.writeText(window.location.href).then(function () {
+                setStatus('ok', 'Review link copied.');
+            }).catch(function () {
+                setStatus('warn', 'Could not copy automatically. Use the current address bar URL.');
+            });
+        }));
     }
     function button(label, fn, extraClass) {
         var b = document.createElement('button');
@@ -3157,9 +3215,20 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         });
         return counts;
     }
+    function conflictFilterLabel(filter) {
+        return {
+            all: 'all',
+            open: 'open',
+            resolved: 'resolved',
+            plugin: 'plugin',
+            theme: 'theme',
+            database: 'database',
+            file: 'file'
+        }[filter] || 'selected';
+    }
     function renderConflictFilters(payload, list) {
         var counts = conflictFilterCounts(list);
-        if (!Object.prototype.hasOwnProperty.call(counts, selectedConflictFilter) || counts[selectedConflictFilter] === 0) {
+        if (!Object.prototype.hasOwnProperty.call(counts, selectedConflictFilter)) {
             selectedConflictFilter = 'all';
         }
         var bar = document.createElement('div');
@@ -3235,11 +3304,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function appendTableCell(row, label, parts) {
         var cell = document.createElement('td');
+        var tooltip = [];
         cell.setAttribute('data-label', label || '');
         (parts || []).forEach(function (part) {
             if (!part || part.text === undefined || part.text === null || part.text === '') return;
+            tooltip.push(String(part.text));
             cell.appendChild(textNode('div', part.className || '', part.text));
         });
+        if (tooltip.length) cell.title = tooltip.join('\n');
         row.appendChild(cell);
         return cell;
     }
@@ -3254,6 +3326,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function setSelectedConflict(payload, record) {
         selectedConflictId = String(record && record.id || '');
+        syncReviewUrl();
         if (record && record.id) {
             var run = runById(payload && payload.run) || {};
             setWorkbenchMode((isMergeRun(run) ? 'Reviewing merge #' : 'Reviewing revision #') + String(payload && payload.run || '') + ', conflict #' + String(record.id) + '.');
@@ -3283,6 +3356,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var context = conflictEntityContext(record);
             var row = document.createElement('tr');
             row.setAttribute('data-conflict-id', String(record.id || ''));
+            row.setAttribute('role', 'button');
+            row.setAttribute('tabindex', '0');
+            row.setAttribute('aria-label', 'Inspect conflict #' + String(record.id || '') + ' ' + String(context.identifier || context.entityLabel || ''));
             if (String(record.id || '') === String(selectedConflictId || '')) row.className = 'is-selected';
             var details = detailsText(context.details);
             appendTableCell(row, 'Conflict', [
@@ -3308,6 +3384,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             tbody.appendChild(row);
             row.addEventListener('click', function (event) {
                 if (event.target && event.target.tagName === 'BUTTON') return;
+                setSelectedConflict(payload, record);
+            });
+            row.addEventListener('keydown', function (event) {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
                 setSelectedConflict(payload, record);
             });
         });
@@ -3414,6 +3495,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function selectBranch(name) {
         var item = branch(name);
         selectedRunId = null;
+        selectedConflictId = null;
         clearStatus();
         setDetail('Branch ' + name, { branch: name, current: name === state.currentBranch ? 'yes' : 'no' }, [
             link('Open site', item.siteUrl || item.url),
@@ -3421,9 +3503,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             link('Focus manager', item.managerUrl || state.rootUrl)
         ], item);
         setWorkbenchMode('Viewing branch ' + name + '.');
+        syncReviewUrl();
     }
     function selectRun(run) {
-        selectedRunId = String(run && run.id || '');
+        var nextRunId = String(run && run.id || '');
+        var preserveInitialConflict = initialRunId && nextRunId === String(initialRunId) && selectedConflictId;
+        selectedRunId = nextRunId;
+        if (!preserveInitialConflict) selectedConflictId = null;
         clearStatus();
         var isMerge = isMergeRun(run);
         var actions = [
@@ -3445,14 +3531,19 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             finished: run.finished_at || run.started_at || ''
         }, actions, run);
         setWorkbenchMode(isMerge ? ('Reviewing merge #' + String(run.id || '') + ' into ' + String(run.target_branch || '') + '.') : ('Viewing revision #' + String(run.id || '') + '.'));
+        renderGraph();
+        scrollSelectedRunIntoView();
         if (Number(run.conflict_count || 0) > 0 && run.id) {
             loadConflicts(run.id);
+        } else {
+            syncReviewUrl();
         }
     }
     function renderConflicts(payload) {
         var list = Array.isArray(payload.records) ? payload.records : [];
         if (refreshSelectedRunConflictState(payload.run, payload.conflictSummary || payload.conflict_summary || null)) {
             renderGraph();
+            scrollSelectedRunIntoView();
         }
         setStatus(list.length ? 'warn' : 'ok', payload.message || 'Loaded conflict details.');
         var summary = payload.conflictSummary || payload.conflict_summary || {};
@@ -3473,13 +3564,18 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         conflicts.appendChild(renderConflictFilters(payload, list));
         var filteredList = list.filter(function (record) { return conflictMatchesFilter(record, selectedConflictFilter); });
         if (!filteredList.length) {
-            conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflicts match this filter.'));
+            selectedConflictId = null;
+            syncReviewUrl();
+            appendBranchPreviewLinks(conflictActions, source, target);
+            appendReviewLinkAction(conflictActions);
+            conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No ' + conflictFilterLabel(selectedConflictFilter) + ' conflicts match this filter.'));
             return;
         }
         if (!selectedConflictId || !filteredList.some(function (record) { return String(record.id || '') === String(selectedConflictId); })) {
             selectedConflictId = String(filteredList[0] && filteredList[0].id || '');
         }
         var selected = filteredList.find(function (record) { return String(record.id || '') === String(selectedConflictId); }) || filteredList[0];
+        syncReviewUrl();
         var selectedIndex = filteredList.indexOf(selected);
         var previous = button('Previous conflict', function () {
             var prior = filteredList[Math.max(0, selectedIndex - 1)];
@@ -3493,8 +3589,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         next.disabled = selectedIndex >= filteredList.length - 1;
         conflictActions.appendChild(previous);
         conflictActions.appendChild(next);
-        if (source) conflictActions.appendChild(link('Open source: ' + source, branch(source).siteUrl));
-        if (target) conflictActions.appendChild(link('Open target: ' + target, branch(target).siteUrl));
+        appendBranchPreviewLinks(conflictActions, source, target);
+        appendReviewLinkAction(conflictActions);
         var reviewGrid = document.createElement('div');
         reviewGrid.className = 'fp-conflict-review-grid';
         reviewGrid.appendChild(renderConflictTable(payload, filteredList));
@@ -3510,8 +3606,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             records = Array.isArray(payload.records) ? payload.records : [];
             seedConflictSummaries();
             renderGraph();
+            scrollSelectedRunIntoView();
             clearStatus();
-            var initialRun = firstConflictRun() || records[0] || null;
+            var initialRun = initialRunId ? runById(initialRunId) : null;
+            initialRun = initialRun || firstConflictRun() || records[0] || null;
             if (initialRun) {
                 selectRun(initialRun);
             } else {
@@ -3530,6 +3628,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             records = Array.isArray(payload.records) ? payload.records : [];
             seedConflictSummaries();
             renderGraph();
+            scrollSelectedRunIntoView();
             setStatus('ok', payload.message || 'Loaded history.');
         }).catch(function (error) { setStatus('error', error.message || 'Could not load history.'); });
     }
@@ -3569,6 +3668,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (String(selectedRunId || '') !== requestedRun) return;
             renderConflicts(payload);
             renderGraph();
+            scrollSelectedRunIntoView();
             clearStatus();
         }).catch(function (error) {
             setStatus('error', error.message || 'Could not load conflicts.');
@@ -3619,6 +3719,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         }).catch(function (error) { setStatus('error', error.message || 'Merge failed.'); }).then(function () { submit.disabled = false; });
     });
     document.getElementById('fp-refresh').addEventListener('click', loadTree);
+    document.getElementById('fp-focus-selected').addEventListener('click', scrollSelectedRunIntoView);
     document.getElementById('fp-load-history').addEventListener('click', loadHistory);
     current.textContent = 'Current: ' + state.currentBranch;
     adminLink.href = branch(state.currentBranch).adminUrl || '#';
