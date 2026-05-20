@@ -3592,6 +3592,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         }
         return decodeAuditPayload(record[key]);
     }
+    function compactValuePreview(value) {
+        value = value === undefined || value === null ? '' : String(value);
+        value = value.replace(/\s+/g, ' ').trim();
+        if (value === '' || value === 'null') return 'empty';
+        if (value.length > 220) return 'too long to display';
+        if (value.length > 72) return value.slice(0, 69) + '...';
+        return value;
+    }
     function conflictObjectLabel(record) {
         if (record.table_name === '__plugins__' && record.plugin_object) return record.plugin_object;
         if (record.table_name && record.column_name) return record.table_name + '.' + record.column_name;
@@ -3685,14 +3693,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function pluginDriverMissingMessage(record) {
         var object = String(record && record.plugin_object || record && record.plugin || 'this plugin conflict');
         var plugin = String(record && record.plugin || 'this plugin');
-        return 'ForkPress has no trusted merge driver approved for ' + object + '. It will not run arbitrary plugin repair code. Inspect the conflict details and resolve it manually, or add a trusted driver for ' + plugin + ' with FORKPRESS_PLUGIN_MERGE_DRIVERS or a forkpress-merge-driver.php file.';
-    }
-    function pluginDriverExplanationPanel(record) {
-        var panel = document.createElement('div');
-        panel.className = 'fp-conflict-guidance';
-        panel.appendChild(textNode('strong', '', 'No approved automation'));
-        panel.appendChild(textNode('div', '', pluginDriverMissingMessage(record)));
-        return panel;
+        var subject = conflictScope(record) === 'theme' ? 'theme' : 'plugin';
+        var driverTarget = subject === 'theme' ? 'this theme' : plugin;
+        return 'No approved automation for this ' + subject + ': ForkPress has no trusted merge driver approved for ' + object + ', so it will not run arbitrary plugin repair code. Inspect the conflict details or add a trusted driver for ' + driverTarget + ' with FORKPRESS_PLUGIN_MERGE_DRIVERS or a forkpress-merge-driver.php file.';
     }
     function conflictScope(record) {
         if (!record) return 'unknown';
@@ -3849,20 +3852,31 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function conflictChoiceLabel(value) {
         value = String(value || '');
-        if (value === 'source') return 'source value';
-        if (value === 'target') return 'target value';
+        if (value === 'source') return 'Source branch value';
+        if (value === 'target') return 'Target branch value';
         if (value === 'reviewed') return 'saved choice';
-        if (!value) return 'current target value';
+        if (!value) return 'Target branch value';
         return humanStatus(value);
+    }
+    function conflictResolutionValue(record, choice) {
+        choice = String(choice || '');
+        if (choice === 'source') return conflictValue(record, 'source_payload', 'source_preview');
+        if (choice === 'target') return conflictValue(record, 'target_payload', 'target_preview');
+        return conflictValue(record, 'chosen_payload', 'chosen_preview')
+            || conflictValue(record, 'current_target_payload', 'current_target_preview')
+            || conflictValue(record, 'target_payload', 'target_preview');
+    }
+    function conflictResolutionChoiceLabel(record, choice) {
+        return conflictChoiceLabel(choice) + ' (' + compactValuePreview(conflictResolutionValue(record, choice)) + ')';
     }
     function conflictResolutionLabel(record) {
         if (Number(record && record.latest_resolution_applied || 0) === 1) {
-            return 'Applied: ' + conflictChoiceLabel(record.latest_resolution_choice || '');
+            return 'Applied: ' + conflictResolutionChoiceLabel(record, record.latest_resolution_choice || '');
         }
         if (record && record.latest_resolution_choice) {
-            return 'Saved: ' + conflictChoiceLabel(record.latest_resolution_choice);
+            return 'Saved: ' + conflictResolutionChoiceLabel(record, record.latest_resolution_choice);
         }
-        return 'Current target value';
+        return conflictResolutionChoiceLabel(record, '');
     }
     function conflictGuidancePanel(record) {
         var rows = [];
@@ -4048,7 +4062,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (pluginDriver) {
                 row.appendChild(button('Run plugin driver', function () { runPluginDriver(record.id, payload.run, pluginDriver.key); }, 'primary'));
             }
-            if (!pluginDriver) row.appendChild(textNode('span', 'fp-conflict-meta', 'No approved automation for this plugin'));
+            if (!pluginDriver) row.appendChild(textNode('span', 'fp-conflict-meta', pluginDriverMissingMessage(record)));
         } else if (record.id && record.lifecycle_state !== 'resolved') {
             row.appendChild(button('Apply selected choice', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
         } else if (prioritizeResolutionChange) {
@@ -4062,17 +4076,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         node.appendChild(header);
         controls.appendChild(row);
         if (isPluginConflict) {
+            var extensionLabel = conflictScope(record) === 'theme' ? 'Theme' : 'Plugin';
             scrollBody.appendChild(disclosure('Resolution note', noteWrap, false));
             var guidance = conflictGuidancePanel(record);
             if (guidance) scrollBody.appendChild(guidance);
-            if (!pluginDriver) scrollBody.appendChild(pluginDriverExplanationPanel(record));
-            if (pluginPanel) scrollBody.appendChild(disclosure('Plugin details', pluginPanel, false));
+            if (pluginPanel) scrollBody.appendChild(disclosure(extensionLabel + ' details', pluginPanel, false));
             var pluginPayload = conflictValue(record, 'chosen_payload', 'chosen_preview');
             if (pluginPayload) {
                 var pluginValues = document.createElement('div');
                 pluginValues.className = 'fp-conflict-grid';
-                pluginValues.appendChild(conflictValueField('Plugin check payload', pluginPayload));
-                scrollBody.appendChild(disclosure('Plugin check payload', pluginValues, false));
+                pluginValues.appendChild(conflictValueField('Conflict check payload', pluginPayload));
+                scrollBody.appendChild(disclosure('Conflict check payload', pluginValues, false));
             }
         } else if (prioritizeResolutionChange) {
             controls.appendChild(choiceWrap);
