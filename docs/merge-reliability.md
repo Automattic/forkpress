@@ -1,6 +1,22 @@
 # Merge Reliability Matrix
 
-Status: 2026-05-18
+Status: 2026-05-20
+
+Audience: ForkPress maintainers. For user workflow documentation, start with
+[Merging](./merging.md) and [Conflict Review](./conflict-review.md).
+
+## Current Summary
+
+- Merge policy remains conservative: apply source exactly, preserve target, or
+  leave an auditable conflict.
+- Strong coverage exists for WordPress semantic graphs, plugin validator audit
+  metadata, filesystem safety, branch birth, ID bands, stale reviews, crash
+  recovery, and Git publication paths.
+- Review-first behavior is still intentional for ambiguous plugin-owned repairs,
+  unsafe media regeneration, cyclic or semantically unclear schema changes, and
+  platform-specific crash windows that need broader product kill harnesses.
+- Release-gate notes in this page are point-in-time evidence. Check GitHub
+  releases and release workflow runs when making a current release claim.
 
 ForkPress COW merge is intentionally conservative: it should either apply a
 source change exactly, preserve target state, or leave an auditable conflict.
@@ -190,17 +206,412 @@ Recent additions in the current merge-reliability work:
 - Existing non-main Git branch updates now reject missing branch SQLite
   databases before staging or publishing pushed files, matching the runtime
   write guard for incomplete branch-birth metadata.
-| Objective item | Evidence on trunk | Remaining gap |
-| --- | --- | --- |
-| 1. Real WordPress semantic merge coverage | `tests/cow/e2e.sh` creates source and target branches through runtime WordPress requests, validates each branch-local graph before merge, then merges pages, branch-local page edits/deletes with edited content and authors, postmeta, users/usermeta, authors, comments/commentmeta, hierarchical taxonomy terms, nav menus and menu locations, reusable `wp_block` rows, synced pattern rows, page-to-reusable-block refs, branch-local `wp_template_part`, `wp_template`, and `wp_global_styles` Site Editor rows, `core/image` block refs and featured-image refs to media attachments, options and JSON options with branch user/object IDs, media uploads with attachment parents plus generated-size metadata/files, a CPT-like `forkpress_note`, and plugin-shaped custom tables/files. The semantic E2E merge now requires `status: completed` and a zero-conflict merge run, so runtime-only state cannot hide behind a surviving object graph. The branch UI E2E also submits branch create without `Accept: application/json` or `X-ForkPress-Async`, and fails if WordPress HTML reaches the caller instead of ForkPress JSON. `tests/cow/merge_smoke.php` now fast-gates page create/create, edit/create, delete/create, page-plus-postmeta create/create, page-plus-comment create/create, page-plus-custom-post-type create/create, Events Calendar-shaped event/venue/organizer CPT create/create and edit/delete with event metadata, taxonomy, and option JSON refs, page-plus-taxonomy create/create, page-plus-menu create/create, page-plus-reusable-block create/create, page-plus-navigation-block create/create, page-plus-template-part create/create, page-plus-template create/create, global-styles create/create, page-plus-attachment create/create, page-plus-image-block create/create, page-plus-gallery create/create, page-plus-file-block create/create, page-plus-media-text create/create, composite page graph create/create across reusable block refs, image block refs, featured image metadata, taxonomy, nav menu locations, JSON/serialized options, and upload files, and page-plus-options JSON/serialized create/create invariants without starting WordPress: independent main inserts must survive while branch page inserts, edits, deletes, postmeta graph rows, comment users, usermeta, comments, commentmeta, plugin-like custom post type rows, event plugin CPT rows, CPT postmeta, CPT taxonomy relationships, CPT option refs, terms, term-taxonomy rows, page-term relationships, nav menu terms, menu item posts/postmeta/relationships, merged theme-mod menu locations, reusable `wp_block` rows referenced from block comments, `wp_navigation` rows referenced from navigation comments, `wp_template_part` rows referenced from template-part comments, `wp_template` rows referenced from page template assignments, independent `wp_global_styles` rows, attachment rows, featured-image and attachment metadata, `core/image`, `core/gallery`, `core/file`, and `core/media-text` block JSON refs, upload files, and JSON/serialized option references apply cleanly with zero conflicts while preserving branch-specific IDs without rewrite; denormalized built-in category counts, nav-menu counts, and post `comment_count` values are recomputed from merged relationships/comments while custom/plugin taxonomy counts are left alone. It also fast-gates same-object page/postmeta edit-vs-delete conflicts, user/usermeta edit-vs-delete conflicts, comment/commentmeta edit-vs-delete conflicts, custom-post-type edit-vs-delete conflicts across CPT rows, CPT postmeta, CPT option indexes, and CPT taxonomy relationships, taxonomy-term edit-vs-delete conflicts across terms, term-taxonomy rows, termmeta, and page-term relationships, reusable-block edit-vs-delete conflicts across the `wp_block` row and target page cleanup, navigation-block edit-vs-delete conflicts across the `wp_navigation` row and target page cleanup, template-part edit-vs-delete conflicts across the `wp_template_part` row and target page cleanup, template edit-vs-delete conflicts across the `wp_template` row and target page template assignment cleanup, global-styles edit-vs-delete conflicts across `wp_global_styles` rows, navigation-menu edit-vs-delete conflicts across menu terms, term-taxonomy rows, menu item posts, menu item metadata, relationships, serialized nav-widget options, and theme-mod location cleanup, attachment edit-vs-delete conflicts across attachment rows, metadata rows, original files, and generated files, plus JSON and serialized option edit-vs-delete conflicts. `tests/cow/wp_semantic_validator.php` is a focused fast gate for discovered WordPress semantic validators that catch pages left pointing at deleted reusable blocks, synced patterns, navigation blocks, or template parts, child pages, attachments, or revisions left pointing at deleted `post_parent` rows, posts or attachments left pointing at deleted `post_author` users, postmeta left pointing at deleted posts, usermeta left pointing at deleted users, nav menu items left pointing at deleted parent menu items, pages, or taxonomy terms, featured-image postmeta left pointing at deleted attachment rows/files, `core/audio`, `core/cover`, `core/file`, `core/image`, `core/video`, `core/media-text`, and `core/gallery` block JSON left pointing at deleted attachment rows/files, classic `wp-image-*` and `[gallery ids="..."]` content left pointing at deleted attachment rows/files, `core/avatar` and `core/latest-posts` block JSON left pointing at deleted users, `core/navigation-link` and `core/navigation-submenu` block JSON left pointing at deleted pages or taxonomy terms, `core/query` block JSON including `taxQuery` and `core/latest-posts` category filters left pointing at deleted author users or taxonomy terms, term relationships left pointing at deleted taxonomy terms, term taxonomy rows left pointing at deleted terms, child taxonomy terms left pointing at deleted parent terms, termmeta left pointing at deleted terms, comments left pointing at deleted posts/users/parent comments, commentmeta left pointing at deleted comments, and options/widgets/theme mods, including block, text, and custom HTML widget content, media widgets, pages widgets, and nav menu auto-add options, left pointing at deleted WordPress objects. It also proves the built-in WordPress page-route validator holds duplicate route-visible page slugs under the same parent, the built-in term-route validator holds duplicate taxonomy/parent/slug routes, the built-in user-login validator holds duplicate case-insensitive `wp_users.user_login` identities, the built-in global-styles validator holds duplicate published `wp_global_styles` style keys, and the built-in Site Editor validator holds duplicate published `wp_template` and `wp_template_part` object keys as review conflicts with structured audit payloads, and the built-in block asset validator holds active-plugin `block.json` `file:` references to missing, URL-like, drive-letter, or otherwise unsafe script, style, render, or other standard plugin-local assets as review conflicts, while ignoring duplicates that predate the merge. Built-in WordPress semantic findings are filterable as `semantic_scope=wordpress` instead of being indistinguishable from ordinary plugin-owned validator findings. `tests/cow/merge.php` adds deterministic WordPress row fingerprint and validator coverage. | Add broader concurrent edit/delete matrices for complete WP objects and deterministic repair policies only where the owner object is unambiguous. |
-| 2. Plugin-specific merge semantics | `docs/plugin-merge-validators.md` defines the validator contract, including rejecting contradictory status/finding output and optional first-class `severity` and `logical_identity` evidence for plugin-defined object identity. `scripts/cow/merge.php` discovers active plugin and mu-plugin validators, records active plugins that did not ship a discoverable validator as durable `plugin-validator-unchecked` audit decisions, runs explicit validators, records plugin-scoped conflicts, validates first-class plugin validator identity, severity, review-guidance, and logical-identity fields, filters plugin audit queues by plugin, plugin object, plugin severity, and plugin logical identity, groups plugin conflict, event, and resolution queues by the same first-class fields, rolls back inline validator failures, and runs explicit plugin drivers with conflict context, reruns discovered plugin validators before recording applied `plugin-driver` resolutions, fingerprints the pre-driver validator files so a mutating driver cannot delete or rewrite the validator it is supposed to satisfy, rejects repairs that leave the same validator finding open, and records `plugin-driver` resolution evidence without allowing generic source/target resolution of plugin conflicts. Plugin-driver resolution of replacement validator evidence now requires the previous reviewed conflict to have a latest current `replacement-evidence` revalidation that points at the replacement conflict; stale originals, unrevalidated replacements, incompatible revalidations, and drifted replacement evidence are rejected. Ordinary cross-run plugin conflict lineage remains resolvable without pretending it is replacement evidence. `wp-plugin/forkpress-wp.php` exposes configured and plugin-shipped active plugin drivers in the branch switcher and full Branches wp-admin page with opaque allowlist keys, can run an approved driver for a plugin conflict row, and refreshes the needs-action queue after the driver records its result. `tests/cow/plugin_validator.php` is a focused fast gate for discovered validator review of plugin-owned DB/JSON/file graphs and serialized/JSON option/postmeta/file graphs, plugin-scoped audit output for incoherent JSON, missing or unsafe file references including URL-like and Windows drive-letter plugin file references, stale serialized/JSON asset references, real-plugin-shaped WooCommerce HPOS, Gravity Forms, ACF, Elementor, Yoast SEO, and The Events Calendar graph validators, identical validator rerun dedupe, contradictory validator output rejection, malformed validator identity rejection, replacement-evidence revalidation when validator findings change after review, guarded plugin-driver application of the current replacement conflict, cross-run plugin conflict lineage resolution, explicit plugin source-evidence drift recorded by validator reruns, plugin `severity` audit fields, plugin object/severity/logical-identity filters and groupings, generic merge-resolve rejection for plugin conflicts, explicit plugin-driver runner and direct recorder repair resolution audit, non-clearing applied driver rejection, ForkPress-owned driver rollback, validator deletion/rewrite bypass rejection, and `logical_identity` drift returning reviewed findings to `needs-action`. `tests/cow/branch_ui.php` fast-gates the WordPress UI allowlist and active-plugin discovery so browser requests cannot choose arbitrary driver paths. `tests/cow/merge.php` covers clean custom-table graph merges, validator findings, plugin and plugin-severity conflict grouping, audit/review grouping, validator rerun evidence, file-root context, active-plugin discovery, unchecked active-plugin coverage reporting, explicit-ID plugin graph validation, contradictory validator output rejection, and failed-validator rollback. `tests/cow/e2e.sh` covers a runtime plugin-shaped graph across custom table parent/child rows, child JSON payload refs, JSON, serialized data, options, postmeta, CPT data, and branch-owned file contents. | Promote the tested plugin-shaped validators into production/plugin-shipped validators where maintainers can own semantics, and add merge drivers only for plugin-owned repairs that can prove correctness. |
-| 3. Remaining review-only schema cases | `scripts/cow/merge.php` validates source-added views/triggers/indexes, preserves invalid dependency cases as conflicts, and supports safe schema object resolution for deterministic subsets. `tests/cow/schema_review.php` is a focused fast gate proving acyclic source-added dependent views, views depending on source-added tables, trigger programs, and triggers depending on source-added tables including trigger `WHEN` clauses apply in dependency order, source-added triggers can depend on source-added views in trigger bodies and `WHEN` clauses, source-changed views and triggers apply automatically when the target kept the base object and validation passes, source-changed views/triggers can depend on source-added tables that materialize earlier in the same merge, source-changed triggers can depend on source-added views in trigger bodies or `WHEN` clauses, source-changed view rewrites that would invalidate target trigger bodies stay reviewable, cyclic source-added views/triggers stay reviewable, source-added triggers with missing target dependencies stay gated until the dependency is restored, source-added table/view drops with unresolved dependent target views/triggers/schema objects stay reviewable with blocked source choices until the dependencies are resolved, source-added expression unique indexes blocked by target rows stay reviewable until the blocking rows are removed, and reviewed source-added or source-changed indexes/views/triggers, dropped-table restores, and table rebuild conflicts return to `needs-action` with current source SQL evidence when the reviewed source SQL changes after review. Source-added/source-changed index, view, and trigger source drift can be guarded and source-applied after revalidation when the current source SQL validates against the current target. Dropped-table restore source drift can be guarded and source-applied after revalidation when the target table is still absent and a dry-run restore of the current source payload validates. Table rebuild conflicts also retain rebuild-plan evidence for direct indexes/triggers, dependent views, and dependent view triggers, so dependency-only source drift returns reviewed conflicts to `needs-action`; compatible table rebuild source drift can now replace prior source-applied rebuild dependencies and source-apply after revalidation when the dry-run planner proves the current source rebuild works. It also covers target-side SQL drift for reviewed source-added or source-changed view, trigger, and index conflicts, source-dropped index conflicts, dropped-table restore, and table rebuild conflicts, including current target SQL evidence; source-added/source-changed index, source-dropped index, view, and trigger target drift can be classified as `compatible-schema-*-target-drift` and applied with `--after-revalidate` when dry-run source replacement or drop validates against the current target. `tests/cow/merge.php` covers broader cyclic/invalid view and trigger dependency handling, source-added dependent view/trigger/index ordering, and rebuild validation cases. | Improve dependency planning for more safe reorderings. Add guarded schema revalidation resolution flows beyond validated source/target drift cases where the schema planner can prove compatibility. Cyclic or semantically ambiguous cases should stay review-only. |
-| 4. Filesystem merge hardening | `tests/cow/filesystem.php` is a focused fast gate for safe source text/binary file application, conflicting binary file edits staying target-kept with hash payload metadata instead of text decoding, safe relative symlinks can merge, unsafe symlinks to absolute paths, root-escaping paths, self-references, and ForkPress-managed paths remain conflicts, reviewed source resolution cannot force-apply unsafe symlinks, reviewed source directory-subtree resolution cannot force-apply unsafe symlinks nested inside a replacement directory, and unsupported special source filesystem entries remain review-held and cannot be source-applied on platforms with FIFO support. Directory/file and file/directory replacements get type-specific review conflicts, unchanged target descendants and source descendants under reviewed replacements are held until review, source directory deletions with target-side descendants are held with source resolution blocked before any descendant deletion, reviewed source replacements can apply supported file/dir/symlink changes including safe directory subtrees, reviewed filesystem source drift can be source-applied after revalidation only when the latest source and target payloads still match the revalidation record, and WordPress upload files still referenced by the merged attachment metadata are protected from source-side deletes as file conflicts before semantic validation runs. WordPress E2E links attachment rows to original and generated-size upload files, plugin-shaped E2E checks branch-owned file contents, and PHP coverage uses discovered and built-in validators to cross-check attachment metadata against merged upload files, missing required attachment metadata rows, invalid serialized attachment metadata, malformed `image_meta`, invalid original/generated/backup dimensions, original/generated/backup filesize drift, attachment `post_mime_type`, byte-signature MIME drift, and generated-size/backup `mime-type` drift against known upload file extensions including AVIF and PDF, missing or empty metadata-side original file fields, generated-size, `original_image`, and backup filename drift, upload paths that exist as non-file entries, missing original/generated upload files including metadata-side original, `original_image`, and backup image files, attached-file metadata drift, duplicate original/generated/backup upload ownership, and unsafe primary/metadata/generated/`original_image`/backup upload paths, including root-escaping, dot or empty path segments, URL-like primary/metadata/generated, and Windows drive-letter primary/metadata upload metadata. `tests/cow/merge.php` covers file adds/deletes/conflicts, binary hash comparisons, symlink safety, directory/file and file/directory replacement review, rollback artifacts, upload-file validators, generated and backup attachment file checks, original/generated dimension drift, malformed `image_meta`, generated-size filename drift, featured-image/image-block/media metadata drift, and unsafe metadata paths. `tests/cow/e2e.sh` verifies real merged upload originals and generated thumbnails. | Add stricter uploads-specific validators for more drift shapes and implement a deterministic media repair driver only if WordPress can prove exact regeneration. |
-| 5. Crash consistency across DB/files/metadata/Git | `docs/merge-crash-consistency.md` lists the covered boundaries. `tests/cow/merge.php` covers target DB, metadata, file, rollback-failure, ID-band, and whole-branch rollback paths. `tests/cow/plugin_validator.php` covers a plugin-driver failpoint after a mutating driver returns but before `plugin-driver` resolution metadata is written, proving target DB/files are restored and no resolution is recorded for ordinary pre-resolution failures. It also kills the plugin-driver runner at the same boundary, verifies the target DB/files may be partially mutated before recovery, verifies the pending `plugin-driver-resolution` crash artifact blocks retries, exposes that artifact through `merge-audit --records crash-recovery`, and restores target DB/files through `recover-crash --restore-target-db --restore-files`. `crates/forkpress-storage/src/lib.rs` and `scripts/cow/git_server.php` publish post-merge and Git-created-branch DB/filesystem merge-base snapshots by atomic replacement instead of remove-before-rename, with focused storage and Git-server tests proving failed publication keeps the previous snapshot. `tests/cow/e2e.sh` drives public merge/create/reset/recover crash/retry flows for DB, metadata, before-file, after-file, recovery-cleanup, branch-birth, branch-reset publication failpoints, restores a pending public merge crash through the WordPress branch UI restore action, and covers actual smart-HTTP Git-created branch pushes interrupted before branch-birth metadata, after branch-birth metadata but before branch tree publication, after branch storage publication, before branch-list publication, and after branch-list publication, each verified after a fresh server restart. `tests/cow/git_server.php` covers Git-created branch birth, Git update/delete, stale cleanup, object-prune interruption, and atomic merge-base file publication. | Broaden external kill harness coverage across the remaining platform-specific Git publication and APFS/cleanup checkpoints, then verify post-crash state from a fresh process. |
-| 6. Branch birth always captures merge bases | `crates/forkpress-storage/src/lib.rs` requires branch birth metadata for branch reuse/merge and blocks pending reset states. `tests/cow/branch_birth.php` fast-gates required ID bands, keyless row identities, filesystem merge-base capture as a frozen pre-write snapshot with managed DB/config/Git exclusions, cleanup of rollback metadata, and cleanup isolation for unrelated branch metadata. `tests/cow/git_server.php` covers Git-created branch DB/file base, ID-band, row identity, decision/run metadata, branch-birth decision cleanup, DB merge-base sidecar cleanup, file-base cleanup, cleanup/rollback paths, and existing non-main Git branch updates rejecting missing branch DB, DB merge base, filesystem merge base, or branch-birth metadata before writes publish. `tests/cow/e2e.sh` covers public create retry after interrupted birth metadata, public reset retry after interrupted reset publication, and remote-cache branch creation followed by AUTOINCREMENT-band insertion and mergeback to `main`. | Keep every new creation/reuse/reset path under the same invariant and add regressions whenever a new branch publication path is introduced. |
-| 7. ID-band enforcement beyond happy paths | `tests/cow/id_bands.php` is a focused fast gate for separate branch AUTOINCREMENT bands, JSON/serialized references that keep branch IDs distinct without rewrite, normal in-band branch reuse that refreshes existing bands instead of allocating fresh ones, reset protection that allocates fresh bands when a branch DB drops below its old reservation, non-colliding non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin rows, review-held non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin collisions including ordinary implicit rowid allocation where both branches independently receive `id=1`, and audit/text output that names non-bandable plugin tables and explains the missing durable `sqlite_sequence` reservation point. `tests/cow/explicit_ids.php` fast-gates in-band explicit AUTOINCREMENT imports that should merge without ID rewrite, fresh band allocation when an in-band explicit import reaches the previous band end before the next implicit insert, out-of-band AUTOINCREMENT inserts and primary-key rewrites for WordPress and plugin tables, paired source deletes held behind explicit inserts, inserted or updated `wp_posts` rows with `post_author`, `core/avatar`, and `core/query` author references behind out-of-band explicit `wp_users` imports, inserted or updated `wp_usermeta` and `wp_comments` rows held behind out-of-band explicit `wp_users` imports, inserted or updated `wp_commentmeta` plus threaded comments behind out-of-band explicit `wp_comments` imports, inserted or updated featured-image postmeta, image-block content, classic `wp-image-*` and `[gallery ids="..."]` content, `site_icon`, theme-mod `custom_logo`, and media/block/text/custom HTML widget options held behind out-of-band explicit attachment imports, pages-widget options and inserted or updated `core/navigation-link`, `core/navigation-submenu`, and `core/navigation` post_content refs behind out-of-band explicit page/term/`wp_navigation` imports, and inserted or updated `wp_termmeta`, `wp_term_taxonomy`, `wp_term_relationships`, serialized theme-mod menu locations, nav-menu widgets, and `nav_menu_options` options held behind out-of-band explicit `wp_terms` imports. `tests/cow/merge.php` covers AUTOINCREMENT allocation, rollback, reset below old bands, independent branch IDs, explicit out-of-band source IDs, child rows behind held explicit post/term/user IDs, inserted and updated scalar/serialized/theme/widget `wp_options`, `wp_posts`, `wp_postmeta`, `wp_comments`, `wp_commentmeta`, `wp_usermeta`, `wp_termmeta`, `wp_term_taxonomy`, `wp_term_relationships`, post-author, taxonomy menu-item, reusable/media/avatar/navigation/query block `post_content`, and comment-user references behind held explicit post/term/user IDs, JSON/serialized references that keep branch IDs distinct, plugin validator review for no-FK child rows behind held explicit plugin AUTOINCREMENT parents, and non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin graph collisions as review-held. `tests/cow/e2e.sh` verifies runtime branch post IDs fall inside branch bands and requires an independently banded source/target WordPress post merge to finish with `status: completed` and zero recorded conflicts while preserving embedded JSON/serialized post IDs. | Expand explicit-ID/import handling beyond currently covered AUTOINCREMENT row-insert/rewrite cases and enforce review for more plugin/custom logical identities that are not safely bandable. |
-| 8. Better stale-audit workflow | `docs/stale-audit-workflow.md` describes the revalidation model. `scripts/cow/merge.php` implements `revalidate-reviews`, `merge-audit --revalidate`, `merge-resolve --after-revalidate`, revalidation classes, latest revalidation status checks, source/target drift checks, schema index/view/trigger/table-restore/table-rebuild source/target drift checks, plugin validator replacement evidence, plugin replacement conflict links, WordPress semantic fingerprints, conservative non-PK `UNIQUE` logical-key drift detection for custom/plugin tables, source/target row-context payloads for new database cell conflicts, current `--resolution-choice` and `--blocked-resolution-choice` conflict queue filters, `--event-type`, conflict-event grouping, blocked resolution attempt events, resolver-contract filtering/grouping by resolution strategy, generic resolver support, and after-revalidate support, `--latest-revalidation-status`, `--stale-status`, and matching group-by queue filters, and text/JSON revalidation summaries that name the carried and already-open `needs-action` conflict ids, classifiers, drift reasons, revalidation records, and replacement conflict ids. The CLI also exposes `forkpress branch conflicts` as a shortcut for `merge-audit --records conflicts`, with the same filters and revalidation contract, so conflict review queues do not require remembering the lower-level audit record selector. `tests/cow/stale_audit.php` is a focused fast gate for reviewed cell conflicts, target drift detection, source cell/row drift detection, deleted target rows classified as `missing`, no-primary-key rowid replacement classified as `incompatible`, WordPress post, postmeta, option, term, term taxonomy, termmeta, user, usermeta, comment, and commentmeta semantic replacements classified as `incompatible`, custom/plugin `UNIQUE` logical-key replacement on source or target classified as `incompatible`, row-context-backed source/target logical-key replacement for cell conflicts where the reviewed cell value itself is unchanged, `needs-action` carry-forward, idempotent revalidation, actionable revalidation summaries, audit-visible revalidation classes, latest revalidation current/drifted status output, live stale-status filtering/grouping, and guarded `--after-revalidate` source resolution. `tests/cow/plugin_validator.php` fast-gates plugin validator replacement evidence when rerun findings change, including explicit changed plugin `source` payload evidence and changed first-class plugin `logical_identity` evidence. `tests/cow/schema_review.php` fast-gates source-added schema index/view/trigger, dropped-table restore, and table rebuild source drift returning reviewed schema conflicts to `needs-action` with current source SQL evidence; source-added view/trigger source drift can get compatible classes and guarded `--after-revalidate` source resolution when current source SQL now validates, while source-added index, view, and trigger target drift get compatible classes and guarded source resolution only when dry-run source replacement validates. Table rebuild payloads include direct indexes/triggers, dependent views, and dependent view triggers, so dependency-only source drift is visible even when table SQL is unchanged. It also covers target-side source-added view, trigger, index, dropped-table restore, and table rebuild drift with current target SQL evidence. `tests/cow/merge.php` covers stale row/cell/file drift, source drift, deleted targets, no-PK rowid replacement, supported WordPress semantic fingerprints, guarded resolution, live source-applicable and source-blocked audit filters, conflict event-type filtering and grouping, blocked resolution attempt events, resolver-contract filtering/grouping, idempotent carried notes, plugin validator rerun evidence through direct and `merge-audit --revalidate` paths, duplicate identical validator rerun handling, and replacement validator conflict ids. | Add guarded plugin/schema-specific resolution flows beyond currently validated schema drift classes where a plugin or schema planner can prove compatibility. |
-| 9. Release gate issue | `scripts/build-dist.sh` and release preflight tests fail earlier when static-PHP prerequisites are missing, avoid macOS bash empty-array expansion under `set -u` while wrapping Apple Silicon `spc` commands in `arch -arm64`, and `docs/merge-reliability.md` tracks aarch64 macOS as a release gate. Release `v0.1.42` was published from workflow run `26052666457` at release commit `2531d184d2b7a2e49c9d62b8e0fcdf72ceb3fd15` after all five release targets built, packaged, and smoke-tested: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`. The Apple Silicon archive is available at `https://github.com/Automattic/forkpress/releases/download/v0.1.42/forkpress-aarch64-apple-darwin.tar.gz`, uploaded with the other release assets, `ForkPressSetup.exe`, and `SHA256SUMS`. The mac APFS e2e gate still tolerates only the known transient `hdiutil compact` "Resource temporarily unavailable" failure after storage has already detached. | Keep aarch64 macOS release and APFS sparsebundle E2E green on trunk for future releases; do not treat a transient compact skip as proof that compaction itself succeeded. |
+
+## Detailed Objective Coverage
+
+### Real WordPress semantic merge coverage
+
+**Evidence on trunk**
+
+`tests/cow/e2e.sh` creates source and target branches through runtime WordPress requests,
+validates each branch-local graph before merge, then merges pages, branch-local page
+edits/deletes with edited content and authors, postmeta, users/usermeta, authors,
+comments/commentmeta, hierarchical taxonomy terms, nav menus and menu locations, reusable
+`wp_block` rows, synced pattern rows, page-to-reusable-block refs, branch-local
+`wp_template_part`, `wp_template`, and `wp_global_styles` Site Editor rows, `core/image` block
+refs and featured-image refs to media attachments, options and JSON options with branch
+user/object IDs, media uploads with attachment parents plus generated-size metadata/files, a
+CPT-like `forkpress_note`, and plugin-shaped custom tables/files. The semantic E2E merge now
+requires `status: completed` and a zero-conflict merge run, so runtime-only state cannot hide
+behind a surviving object graph. The branch UI E2E also submits branch create without `Accept:
+application/json` or `X-ForkPress-Async`, and fails if WordPress HTML reaches the caller instead
+of ForkPress JSON. `tests/cow/merge_smoke.php` now fast-gates page create/create, edit/create,
+delete/create, page-plus-postmeta create/create, page-plus-comment create/create,
+page-plus-custom-post-type create/create, Events Calendar-shaped event/venue/organizer CPT
+create/create and edit/delete with event metadata, taxonomy, and option JSON refs,
+page-plus-taxonomy create/create, page-plus-menu create/create, page-plus-reusable-block
+create/create, page-plus-navigation-block create/create, page-plus-template-part create/create,
+page-plus-template create/create, global-styles create/create, page-plus-attachment
+create/create, page-plus-image-block create/create, page-plus-gallery create/create,
+page-plus-file-block create/create, page-plus-media-text create/create, composite page graph
+create/create across reusable block refs, image block refs, featured image metadata, taxonomy,
+nav menu locations, JSON/serialized options, and upload files, and page-plus-options
+JSON/serialized create/create invariants without starting WordPress: independent main inserts
+must survive while branch page inserts, edits, deletes, postmeta graph rows, comment users,
+usermeta, comments, commentmeta, plugin-like custom post type rows, event plugin CPT rows, CPT
+postmeta, CPT taxonomy relationships, CPT option refs, terms, term-taxonomy rows, page-term
+relationships, nav menu terms, menu item posts/postmeta/relationships, merged theme-mod menu
+locations, reusable `wp_block` rows referenced from block comments, `wp_navigation` rows
+referenced from navigation comments, `wp_template_part` rows referenced from template-part
+comments, `wp_template` rows referenced from page template assignments, independent
+`wp_global_styles` rows, attachment rows, featured-image and attachment metadata, `core/image`,
+`core/gallery`, `core/file`, and `core/media-text` block JSON refs, upload files, and
+JSON/serialized option references apply cleanly with zero conflicts while preserving
+branch-specific IDs without rewrite; denormalized built-in category counts, nav-menu counts, and
+post `comment_count` values are recomputed from merged relationships/comments while
+custom/plugin taxonomy counts are left alone. It also fast-gates same-object page/postmeta
+edit-vs-delete conflicts, user/usermeta edit-vs-delete conflicts, comment/commentmeta
+edit-vs-delete conflicts, custom-post-type edit-vs-delete conflicts across CPT rows, CPT
+postmeta, CPT option indexes, and CPT taxonomy relationships, taxonomy-term edit-vs-delete
+conflicts across terms, term-taxonomy rows, termmeta, and page-term relationships,
+reusable-block edit-vs-delete conflicts across the `wp_block` row and target page cleanup,
+navigation-block edit-vs-delete conflicts across the `wp_navigation` row and target page
+cleanup, template-part edit-vs-delete conflicts across the `wp_template_part` row and target
+page cleanup, template edit-vs-delete conflicts across the `wp_template` row and target page
+template assignment cleanup, global-styles edit-vs-delete conflicts across `wp_global_styles`
+rows, navigation-menu edit-vs-delete conflicts across menu terms, term-taxonomy rows, menu item
+posts, menu item metadata, relationships, serialized nav-widget options, and theme-mod location
+cleanup, attachment edit-vs-delete conflicts across attachment rows, metadata rows, original
+files, and generated files, plus JSON and serialized option edit-vs-delete conflicts.
+`tests/cow/wp_semantic_validator.php` is a focused fast gate for discovered WordPress semantic
+validators that catch pages left pointing at deleted reusable blocks, synced patterns,
+navigation blocks, or template parts, child pages, attachments, or revisions left pointing at
+deleted `post_parent` rows, posts or attachments left pointing at deleted `post_author` users,
+postmeta left pointing at deleted posts, usermeta left pointing at deleted users, nav menu items
+left pointing at deleted parent menu items, pages, or taxonomy terms, featured-image postmeta
+left pointing at deleted attachment rows/files, `core/audio`, `core/cover`, `core/file`,
+`core/image`, `core/video`, `core/media-text`, and `core/gallery` block JSON left pointing at
+deleted attachment rows/files, classic `wp-image-*` and `[gallery ids="..."]` content left
+pointing at deleted attachment rows/files, `core/avatar` and `core/latest-posts` block JSON left
+pointing at deleted users, `core/navigation-link` and `core/navigation-submenu` block JSON left
+pointing at deleted pages or taxonomy terms, `core/query` block JSON including `taxQuery` and
+`core/latest-posts` category filters left pointing at deleted author users or taxonomy terms,
+term relationships left pointing at deleted taxonomy terms, term taxonomy rows left pointing at
+deleted terms, child taxonomy terms left pointing at deleted parent terms, termmeta left
+pointing at deleted terms, comments left pointing at deleted posts/users/parent comments,
+commentmeta left pointing at deleted comments, and options/widgets/theme mods, including block,
+text, and custom HTML widget content, media widgets, pages widgets, and nav menu auto-add
+options, left pointing at deleted WordPress objects. It also proves the built-in WordPress
+page-route validator holds duplicate route-visible page slugs under the same parent, the
+built-in term-route validator holds duplicate taxonomy/parent/slug routes, the built-in
+user-login validator holds duplicate case-insensitive `wp_users.user_login` identities, the
+built-in global-styles validator holds duplicate published `wp_global_styles` style keys, and
+the built-in Site Editor validator holds duplicate published `wp_template` and
+`wp_template_part` object keys as review conflicts with structured audit payloads, and the
+built-in block asset validator holds active-plugin `block.json` `file:` references to missing,
+URL-like, drive-letter, or otherwise unsafe script, style, render, or other standard
+plugin-local assets as review conflicts, while ignoring duplicates that predate the merge.
+Built-in WordPress semantic findings are filterable as `semantic_scope=wordpress` instead of
+being indistinguishable from ordinary plugin-owned validator findings. `tests/cow/merge.php`
+adds deterministic WordPress row fingerprint and validator coverage.
+
+**Remaining gap**
+
+Add broader concurrent edit/delete matrices for complete WP objects and deterministic repair
+policies only where the owner object is unambiguous.
+
+### Plugin-specific merge semantics
+
+**Evidence on trunk**
+
+`docs/plugin-merge-validators.md` defines the validator contract, including rejecting
+contradictory status/finding output and optional first-class `severity` and `logical_identity`
+evidence for plugin-defined object identity. `scripts/cow/merge.php` discovers active plugin and
+mu-plugin validators, records active plugins that did not ship a discoverable validator as
+durable `plugin-validator-unchecked` audit decisions, runs explicit validators, records
+plugin-scoped conflicts, validates first-class plugin validator identity, severity,
+review-guidance, and logical-identity fields, filters plugin audit queues by plugin, plugin
+object, plugin severity, and plugin logical identity, groups plugin conflict, event, and
+resolution queues by the same first-class fields, rolls back inline validator failures, and runs
+explicit plugin drivers with conflict context, reruns discovered plugin validators before
+recording applied `plugin-driver` resolutions, fingerprints the pre-driver validator files so a
+mutating driver cannot delete or rewrite the validator it is supposed to satisfy, rejects
+repairs that leave the same validator finding open, and records `plugin-driver` resolution
+evidence without allowing generic source/target resolution of plugin conflicts. Plugin-driver
+resolution of replacement validator evidence now requires the previous reviewed conflict to have
+a latest current `replacement-evidence` revalidation that points at the replacement conflict;
+stale originals, unrevalidated replacements, incompatible revalidations, and drifted replacement
+evidence are rejected. Ordinary cross-run plugin conflict lineage remains resolvable without
+pretending it is replacement evidence. `wp-plugin/forkpress-wp.php` exposes configured and
+plugin-shipped active plugin drivers in the branch switcher and full Branches wp-admin page with
+opaque allowlist keys, can run an approved driver for a plugin conflict row, and refreshes the
+needs-action queue after the driver records its result. `tests/cow/plugin_validator.php` is a
+focused fast gate for discovered validator review of plugin-owned DB/JSON/file graphs and
+serialized/JSON option/postmeta/file graphs, plugin-scoped audit output for incoherent JSON,
+missing or unsafe file references including URL-like and Windows drive-letter plugin file
+references, stale serialized/JSON asset references, real-plugin-shaped WooCommerce HPOS, Gravity
+Forms, ACF, Elementor, Yoast SEO, and The Events Calendar graph validators, identical validator
+rerun dedupe, contradictory validator output rejection, malformed validator identity rejection,
+replacement-evidence revalidation when validator findings change after review, guarded
+plugin-driver application of the current replacement conflict, cross-run plugin conflict lineage
+resolution, explicit plugin source-evidence drift recorded by validator reruns, plugin
+`severity` audit fields, plugin object/severity/logical-identity filters and groupings, generic
+merge-resolve rejection for plugin conflicts, explicit plugin-driver runner and direct recorder
+repair resolution audit, non-clearing applied driver rejection, ForkPress-owned driver rollback,
+validator deletion/rewrite bypass rejection, and `logical_identity` drift returning reviewed
+findings to `needs-action`. `tests/cow/branch_ui.php` fast-gates the WordPress UI allowlist and
+active-plugin discovery so browser requests cannot choose arbitrary driver paths.
+`tests/cow/merge.php` covers clean custom-table graph merges, validator findings, plugin and
+plugin-severity conflict grouping, audit/review grouping, validator rerun evidence, file-root
+context, active-plugin discovery, unchecked active-plugin coverage reporting, explicit-ID plugin
+graph validation, contradictory validator output rejection, and failed-validator rollback.
+`tests/cow/e2e.sh` covers a runtime plugin-shaped graph across custom table parent/child rows,
+child JSON payload refs, JSON, serialized data, options, postmeta, CPT data, and branch-owned
+file contents.
+
+**Remaining gap**
+
+Promote the tested plugin-shaped validators into production/plugin-shipped validators where
+maintainers can own semantics, and add merge drivers only for plugin-owned repairs that can
+prove correctness.
+
+### Remaining review-only schema cases
+
+**Evidence on trunk**
+
+`scripts/cow/merge.php` validates source-added views/triggers/indexes, preserves invalid
+dependency cases as conflicts, and supports safe schema object resolution for deterministic
+subsets. `tests/cow/schema_review.php` is a focused fast gate proving acyclic source-added
+dependent views, views depending on source-added tables, trigger programs, and triggers
+depending on source-added tables including trigger `WHEN` clauses apply in dependency order,
+source-added triggers can depend on source-added views in trigger bodies and `WHEN` clauses,
+source-changed views and triggers apply automatically when the target kept the base object and
+validation passes, source-changed views/triggers can depend on source-added tables that
+materialize earlier in the same merge, source-changed triggers can depend on source-added views
+in trigger bodies or `WHEN` clauses, source-changed view rewrites that would invalidate target
+trigger bodies stay reviewable, cyclic source-added views/triggers stay reviewable, source-added
+triggers with missing target dependencies stay gated until the dependency is restored,
+source-added table/view drops with unresolved dependent target views/triggers/schema objects
+stay reviewable with blocked source choices until the dependencies are resolved, source-added
+expression unique indexes blocked by target rows stay reviewable until the blocking rows are
+removed, and reviewed source-added or source-changed indexes/views/triggers, dropped-table
+restores, and table rebuild conflicts return to `needs-action` with current source SQL evidence
+when the reviewed source SQL changes after review. Source-added/source-changed index, view, and
+trigger source drift can be guarded and source-applied after revalidation when the current
+source SQL validates against the current target. Dropped-table restore source drift can be
+guarded and source-applied after revalidation when the target table is still absent and a
+dry-run restore of the current source payload validates. Table rebuild conflicts also retain
+rebuild-plan evidence for direct indexes/triggers, dependent views, and dependent view triggers,
+so dependency-only source drift returns reviewed conflicts to `needs-action`; compatible table
+rebuild source drift can now replace prior source-applied rebuild dependencies and source-apply
+after revalidation when the dry-run planner proves the current source rebuild works. It also
+covers target-side SQL drift for reviewed source-added or source-changed view, trigger, and
+index conflicts, source-dropped index conflicts, dropped-table restore, and table rebuild
+conflicts, including current target SQL evidence; source-added/source-changed index,
+source-dropped index, view, and trigger target drift can be classified as
+`compatible-schema-*-target-drift` and applied with `--after-revalidate` when dry-run source
+replacement or drop validates against the current target. `tests/cow/merge.php` covers broader
+cyclic/invalid view and trigger dependency handling, source-added dependent view/trigger/index
+ordering, and rebuild validation cases.
+
+**Remaining gap**
+
+Improve dependency planning for more safe reorderings. Add guarded schema revalidation
+resolution flows beyond validated source/target drift cases where the schema planner can prove
+compatibility. Cyclic or semantically ambiguous cases should stay review-only.
+
+### Filesystem merge hardening
+
+**Evidence on trunk**
+
+`tests/cow/filesystem.php` is a focused fast gate for safe source text/binary file application,
+conflicting binary file edits staying target-kept with hash payload metadata instead of text
+decoding, safe relative symlinks can merge, unsafe symlinks to absolute paths, root-escaping
+paths, self-references, and ForkPress-managed paths remain conflicts, reviewed source resolution
+cannot force-apply unsafe symlinks, reviewed source directory-subtree resolution cannot
+force-apply unsafe symlinks nested inside a replacement directory, and unsupported special
+source filesystem entries remain review-held and cannot be source-applied on platforms with FIFO
+support. Directory/file and file/directory replacements get type-specific review conflicts,
+unchanged target descendants and source descendants under reviewed replacements are held until
+review, source directory deletions with target-side descendants are held with source resolution
+blocked before any descendant deletion, reviewed source replacements can apply supported
+file/dir/symlink changes including safe directory subtrees, reviewed filesystem source drift can
+be source-applied after revalidation only when the latest source and target payloads still match
+the revalidation record, and WordPress upload files still referenced by the merged attachment
+metadata are protected from source-side deletes as file conflicts before semantic validation
+runs. WordPress E2E links attachment rows to original and generated-size upload files,
+plugin-shaped E2E checks branch-owned file contents, and PHP coverage uses discovered and
+built-in validators to cross-check attachment metadata against merged upload files, missing
+required attachment metadata rows, invalid serialized attachment metadata, malformed
+`image_meta`, invalid original/generated/backup dimensions, original/generated/backup filesize
+drift, attachment `post_mime_type`, byte-signature MIME drift, and generated-size/backup
+`mime-type` drift against known upload file extensions including AVIF and PDF, missing or empty
+metadata-side original file fields, generated-size, `original_image`, and backup filename drift,
+upload paths that exist as non-file entries, missing original/generated upload files including
+metadata-side original, `original_image`, and backup image files, attached-file metadata drift,
+duplicate original/generated/backup upload ownership, and unsafe
+primary/metadata/generated/`original_image`/backup upload paths, including root-escaping, dot or
+empty path segments, URL-like primary/metadata/generated, and Windows drive-letter
+primary/metadata upload metadata. `tests/cow/merge.php` covers file adds/deletes/conflicts,
+binary hash comparisons, symlink safety, directory/file and file/directory replacement review,
+rollback artifacts, upload-file validators, generated and backup attachment file checks,
+original/generated dimension drift, malformed `image_meta`, generated-size filename drift,
+featured-image/image-block/media metadata drift, and unsafe metadata paths. `tests/cow/e2e.sh`
+verifies real merged upload originals and generated thumbnails.
+
+**Remaining gap**
+
+Add stricter uploads-specific validators for more drift shapes and implement a deterministic
+media repair driver only if WordPress can prove exact regeneration.
+
+### Crash consistency across DB/files/metadata/Git
+
+**Evidence on trunk**
+
+`docs/merge-crash-consistency.md` lists the covered boundaries. `tests/cow/merge.php` covers
+target DB, metadata, file, rollback-failure, ID-band, and whole-branch rollback paths.
+`tests/cow/plugin_validator.php` covers a plugin-driver failpoint after a mutating driver
+returns but before `plugin-driver` resolution metadata is written, proving target DB/files are
+restored and no resolution is recorded for ordinary pre-resolution failures. It also kills the
+plugin-driver runner at the same boundary, verifies the target DB/files may be partially mutated
+before recovery, verifies the pending `plugin-driver-resolution` crash artifact blocks retries,
+exposes that artifact through `merge-audit --records crash-recovery`, and restores target
+DB/files through `recover-crash --restore-target-db --restore-files`.
+`crates/forkpress-storage/src/lib.rs` and `scripts/cow/git_server.php` publish post-merge and
+Git-created-branch DB/filesystem merge-base snapshots by atomic replacement instead of
+remove-before-rename, with focused storage and Git-server tests proving failed publication keeps
+the previous snapshot. `tests/cow/e2e.sh` drives public merge/create/reset/recover crash/retry
+flows for DB, metadata, before-file, after-file, recovery-cleanup, branch-birth, branch-reset
+publication failpoints, restores a pending public merge crash through the WordPress branch UI
+restore action, and covers actual smart-HTTP Git-created branch pushes interrupted before
+branch-birth metadata, after branch-birth metadata but before branch tree publication, after
+branch storage publication, before branch-list publication, and after branch-list publication,
+each verified after a fresh server restart. `tests/cow/git_server.php` covers Git-created branch
+birth, Git update/delete, stale cleanup, object-prune interruption, and atomic merge-base file
+publication.
+
+**Remaining gap**
+
+Broaden external kill harness coverage across the remaining platform-specific Git publication
+and APFS/cleanup checkpoints, then verify post-crash state from a fresh process.
+
+### Branch birth always captures merge bases
+
+**Evidence on trunk**
+
+`crates/forkpress-storage/src/lib.rs` requires branch birth metadata for branch reuse/merge and
+blocks pending reset states. `tests/cow/branch_birth.php` fast-gates required ID bands, keyless
+row identities, filesystem merge-base capture as a frozen pre-write snapshot with managed
+DB/config/Git exclusions, cleanup of rollback metadata, and cleanup isolation for unrelated
+branch metadata. `tests/cow/git_server.php` covers Git-created branch DB/file base, ID-band, row
+identity, decision/run metadata, branch-birth decision cleanup, DB merge-base sidecar cleanup,
+file-base cleanup, cleanup/rollback paths, and existing non-main Git branch updates rejecting
+missing branch DB, DB merge base, filesystem merge base, or branch-birth metadata before writes
+publish. `tests/cow/e2e.sh` covers public create retry after interrupted birth metadata, public
+reset retry after interrupted reset publication, and remote-cache branch creation followed by
+AUTOINCREMENT-band insertion and mergeback to `main`.
+
+**Remaining gap**
+
+Keep every new creation/reuse/reset path under the same invariant and add regressions whenever a
+new branch publication path is introduced.
+
+### ID-band enforcement beyond happy paths
+
+**Evidence on trunk**
+
+`tests/cow/id_bands.php` is a focused fast gate for separate branch AUTOINCREMENT bands,
+JSON/serialized references that keep branch IDs distinct without rewrite, normal in-band branch
+reuse that refreshes existing bands instead of allocating fresh ones, reset protection that
+allocates fresh bands when a branch DB drops below its old reservation, non-colliding
+non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin rows, review-held non-AUTOINCREMENT `INTEGER
+PRIMARY KEY` plugin collisions including ordinary implicit rowid allocation where both branches
+independently receive `id=1`, and audit/text output that names non-bandable plugin tables and
+explains the missing durable `sqlite_sequence` reservation point. `tests/cow/explicit_ids.php`
+fast-gates in-band explicit AUTOINCREMENT imports that should merge without ID rewrite, fresh
+band allocation when an in-band explicit import reaches the previous band end before the next
+implicit insert, out-of-band AUTOINCREMENT inserts and primary-key rewrites for WordPress and
+plugin tables, paired source deletes held behind explicit inserts, inserted or updated
+`wp_posts` rows with `post_author`, `core/avatar`, and `core/query` author references behind
+out-of-band explicit `wp_users` imports, inserted or updated `wp_usermeta` and `wp_comments`
+rows held behind out-of-band explicit `wp_users` imports, inserted or updated `wp_commentmeta`
+plus threaded comments behind out-of-band explicit `wp_comments` imports, inserted or updated
+featured-image postmeta, image-block content, classic `wp-image-*` and `[gallery ids="..."]`
+content, `site_icon`, theme-mod `custom_logo`, and media/block/text/custom HTML widget options
+held behind out-of-band explicit attachment imports, pages-widget options and inserted or
+updated `core/navigation-link`, `core/navigation-submenu`, and `core/navigation` post_content
+refs behind out-of-band explicit page/term/`wp_navigation` imports, and inserted or updated
+`wp_termmeta`, `wp_term_taxonomy`, `wp_term_relationships`, serialized theme-mod menu locations,
+nav-menu widgets, and `nav_menu_options` options held behind out-of-band explicit `wp_terms`
+imports. `tests/cow/merge.php` covers AUTOINCREMENT allocation, rollback, reset below old bands,
+independent branch IDs, explicit out-of-band source IDs, child rows behind held explicit
+post/term/user IDs, inserted and updated scalar/serialized/theme/widget `wp_options`,
+`wp_posts`, `wp_postmeta`, `wp_comments`, `wp_commentmeta`, `wp_usermeta`, `wp_termmeta`,
+`wp_term_taxonomy`, `wp_term_relationships`, post-author, taxonomy menu-item,
+reusable/media/avatar/navigation/query block `post_content`, and comment-user references behind
+held explicit post/term/user IDs, JSON/serialized references that keep branch IDs distinct,
+plugin validator review for no-FK child rows behind held explicit plugin AUTOINCREMENT parents,
+and non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin graph collisions as review-held.
+`tests/cow/e2e.sh` verifies runtime branch post IDs fall inside branch bands and requires an
+independently banded source/target WordPress post merge to finish with `status: completed` and
+zero recorded conflicts while preserving embedded JSON/serialized post IDs.
+
+**Remaining gap**
+
+Expand explicit-ID/import handling beyond currently covered AUTOINCREMENT row-insert/rewrite
+cases and enforce review for more plugin/custom logical identities that are not safely bandable.
+
+### Better stale-audit workflow
+
+**Evidence on trunk**
+
+`docs/stale-audit-workflow.md` describes the revalidation model. `scripts/cow/merge.php`
+implements `revalidate-reviews`, `merge-audit --revalidate`, `merge-resolve --after-revalidate`,
+revalidation classes, latest revalidation status checks, source/target drift checks, schema
+index/view/trigger/table-restore/table-rebuild source/target drift checks, plugin validator
+replacement evidence, plugin replacement conflict links, WordPress semantic fingerprints,
+conservative non-PK `UNIQUE` logical-key drift detection for custom/plugin tables, source/target
+row-context payloads for new database cell conflicts, current `--resolution-choice` and
+`--blocked-resolution-choice` conflict queue filters, `--event-type`, conflict-event grouping,
+blocked resolution attempt events, resolver-contract filtering/grouping by resolution strategy,
+generic resolver support, and after-revalidate support, `--latest-revalidation-status`,
+`--stale-status`, and matching group-by queue filters, and text/JSON revalidation summaries that
+name the carried and already-open `needs-action` conflict ids, classifiers, drift reasons,
+revalidation records, and replacement conflict ids. The CLI also exposes `forkpress branch
+conflicts` as a shortcut for `merge-audit --records conflicts`, with the same filters and
+revalidation contract, so conflict review queues do not require remembering the lower-level
+audit record selector. `tests/cow/stale_audit.php` is a focused fast gate for reviewed cell
+conflicts, target drift detection, source cell/row drift detection, deleted target rows
+classified as `missing`, no-primary-key rowid replacement classified as `incompatible`,
+WordPress post, postmeta, option, term, term taxonomy, termmeta, user, usermeta, comment, and
+commentmeta semantic replacements classified as `incompatible`, custom/plugin `UNIQUE`
+logical-key replacement on source or target classified as `incompatible`, row-context-backed
+source/target logical-key replacement for cell conflicts where the reviewed cell value itself is
+unchanged, `needs-action` carry-forward, idempotent revalidation, actionable revalidation
+summaries, audit-visible revalidation classes, latest revalidation current/drifted status
+output, live stale-status filtering/grouping, and guarded `--after-revalidate` source
+resolution. `tests/cow/plugin_validator.php` fast-gates plugin validator replacement evidence
+when rerun findings change, including explicit changed plugin `source` payload evidence and
+changed first-class plugin `logical_identity` evidence. `tests/cow/schema_review.php` fast-gates
+source-added schema index/view/trigger, dropped-table restore, and table rebuild source drift
+returning reviewed schema conflicts to `needs-action` with current source SQL evidence;
+source-added view/trigger source drift can get compatible classes and guarded
+`--after-revalidate` source resolution when current source SQL now validates, while source-added
+index, view, and trigger target drift get compatible classes and guarded source resolution only
+when dry-run source replacement validates. Table rebuild payloads include direct
+indexes/triggers, dependent views, and dependent view triggers, so dependency-only source drift
+is visible even when table SQL is unchanged. It also covers target-side source-added view,
+trigger, index, dropped-table restore, and table rebuild drift with current target SQL evidence.
+`tests/cow/merge.php` covers stale row/cell/file drift, source drift, deleted targets, no-PK
+rowid replacement, supported WordPress semantic fingerprints, guarded resolution, live
+source-applicable and source-blocked audit filters, conflict event-type filtering and grouping,
+blocked resolution attempt events, resolver-contract filtering/grouping, idempotent carried
+notes, plugin validator rerun evidence through direct and `merge-audit --revalidate` paths,
+duplicate identical validator rerun handling, and replacement validator conflict ids.
+
+**Remaining gap**
+
+Add guarded plugin/schema-specific resolution flows beyond currently validated schema drift
+classes where a plugin or schema planner can prove compatibility.
+
+### Release gates
+
+**Evidence on trunk**
+
+`scripts/build-dist.sh` and release preflight tests fail earlier when static-PHP prerequisites
+are missing, avoid macOS bash empty-array expansion under `set -u` while wrapping Apple Silicon
+`spc` commands in `arch -arm64`, and `docs/merge-reliability.md` tracks aarch64 macOS as a
+release gate. The last explicitly recorded release-gate audit in this matrix is release
+`v0.1.48`, workflow run `26067459265`; that run passed release packaging, artifact smoke checks,
+tag creation, GitHub release publication, and Homebrew formula update for all release targets,
+including `aarch64-apple-darwin`. The mac APFS e2e gate still tolerates only the known transient
+`hdiutil compact` "Resource temporarily unavailable" failure after storage has already detached.
+
+**Remaining gap**
+
+Keep aarch64 macOS release and APFS sparsebundle E2E green on trunk for future releases; do not
+treat a transient compact skip as proof that compaction itself succeeded.
+
 
 ## Current Guarantees
 
@@ -252,17 +663,361 @@ Recent focused coverage also tightens three roadmap edges:
   published, proving old metadata/base snapshots are restored and reset can be
   retried cleanly.
 
-| Area | Current state | Missing reliability work |
-| --- | --- | --- |
-| WordPress semantic objects | Tests cover real post creation, postmeta references, users, usermeta, post/comment authors, threaded comments and commentmeta references, branch-local page edits/deletes with edited content/author assertions, same-object page/postmeta edit-vs-delete conflicts with auditable target-wins defaults, same-object user/usermeta edit-vs-delete conflicts that preserve target deletion before review, same-object comment/commentmeta edit-vs-delete conflicts that preserve target deletion before review, same-object custom-post-type edit-vs-delete conflicts across CPT rows, CPT postmeta, CPT option indexes, and CPT taxonomy relationships, same-object taxonomy-term edit-vs-delete conflicts across terms, term-taxonomy rows, termmeta, and page-term relationships, attachment uploads plus original and generated-size files, attachment metadata, attachment-to-page parent links, same-object reusable-block edit-vs-delete conflicts across the `wp_block` row and target page cleanup, same-object navigation-menu edit-vs-delete conflicts across menu terms, term-taxonomy rows, menu item posts, menu item metadata, relationships, serialized nav-widget options, and theme-mod location cleanup, same-object attachment edit-vs-delete conflicts across attachment rows, metadata rows, original files, and generated files, `core/audio`, `core/cover`, `core/file`, `core/image`, `core/video`, `core/media-text`, and `core/gallery` block references and classic `wp-image-*`/`[gallery ids="..."]` content references plus featured-image postmeta references to media attachments, hierarchical taxonomy terms, page-linked nav menus with menu-location assignments, reusable blocks and synced patterns, options with embedded object IDs including branch user refs, JSON option payloads with embedded object IDs including branch user refs, custom post types, plugin AUTOINCREMENT tables, keyless plugin tables, unique collisions, file additions, nested plugin-owned custom-table/JSON/serialized/file graphs, branch merge visibility, a clean zero-conflict semantic E2E merge requirement, a discovered media validator that reports missing original/generated upload files including metadata-side original, `original_image`, and backup image files, duplicate attachment claims on the same upload file including same-attachment generated-file duplicates, unreadable or NUL-corrupted attachment metadata, malformed `image_meta`, empty or unsafe primary/metadata/generated/`original_image`/backup upload metadata paths, original/generated/backup dimension drift, malformed or incomplete generated-size and backup-size metadata, generated-size, `original_image`, and backup filename drift, and `_wp_attached_file` versus `_wp_attachment_metadata` file drift, fast discovered block-reference, post-parent-reference, post-author-reference, postmeta-reference, usermeta-reference, menu-parent-reference, menu-reference, featured-image, image-block, media-block, avatar-navigation-link-block, gallery-block, query-block, term-relationship, term-taxonomy-reference, term-parent-reference, termmeta-reference, and option-reference validators that report pages/posts left pointing at deleted reusable blocks, synced patterns, navigation blocks, or template parts, child pages or attachments left pointing at deleted `post_parent` rows, posts or attachments left pointing at deleted `post_author` users, postmeta rows left pointing at deleted posts, usermeta rows left pointing at deleted users, nav menu items left pointing at deleted parent menu items or deleted post/taxonomy objects, `_thumbnail_id` postmeta left pointing at deleted attachment objects/files, `core/audio`, `core/cover`, `core/file`, `core/image`, `core/video`, `core/media-text`, or `core/gallery` block JSON plus classic `wp-image-*` and `[gallery ids="..."]` content left pointing at deleted attachment objects/files, `core/avatar` and `core/latest-posts` block JSON left pointing at deleted users, `core/navigation-link` and `core/navigation-submenu` block JSON left pointing at deleted pages or taxonomy terms, `core/query` block JSON including `taxQuery` and `core/latest-posts` category filters left pointing at deleted author users or taxonomy terms, `wp_term_relationships` left pointing at deleted taxonomy term rows, term taxonomy rows left pointing at deleted terms, child taxonomy terms left pointing at deleted parent terms, termmeta rows left pointing at deleted terms, serialized theme mods left pointing at deleted post objects, deleted nav-menu terms, or deleted custom-logo attachments plus serialized nav menu widgets, serialized nav menu auto-add options, serialized block/text/custom HTML widget content, serialized media-image/audio/video/gallery and pages widgets, serialized sidebar-widget placements, scalar `site_icon`/`page_on_front`/`page_for_posts` options, and serialized `sticky_posts` options left pointing at deleted objects, and `docs/merge-repair-policy.md` defines when semantic repairs must remain review-only. | Add broader concurrent object matrices, implement only the repair policies that have deterministic owners, and broaden plugin-owned graph conflict/drift cases. |
-| Plugin-specific semantics | Generic SQLite merge is table/row/cell based and does not rewrite embedded IDs. `docs/plugin-merge-validators.md` defines the validator boundary and first test shape. PHP unit and E2E coverage now cover the clean happy path for a plugin-owned custom-table graph with parent/child rows, child JSON payload references, serialized option/postmeta references, referenced CPT data, and a referenced file. The PHP unit suite also covers the metadata/audit foundation for plugin-scoped validator conflicts, including review queues, first-class plugin filters, and queue grouping. Normal branch merges discover validators from active plugin, network-active plugin, and mu-plugin locations in the staged candidate target; discovered custom-table graph validators can abort and roll back a candidate with a broken JSON reference, or complete the merge with plugin-scoped review conflicts for broken serialized graph row/file references, unsafe URL-like or drive-letter plugin file references, and target-conflicting graph state. The focused plugin validator gate now includes serialized and JSON plugin option/postmeta references left pointing at a deleted plugin asset row/file or an unsafe plugin-owned file path, first-class plugin `severity`, validator identity, and `logical_identity` contract validation, plugin/object/severity/logical-identity/file filters and groupings, and `logical_identity` drift evidence for semantic identities that are not expressed as SQLite keys. `forkpress branch run-plugin-validator`, `forkpress branch record-plugin-validator-conflicts`, and `forkpress branch merge --plugin-validator <path>` expose explicit validator execution and findings recording, while rejecting contradictory valid-with-findings output or malformed validator identities before they become conflict metadata. Validator failures after DB/files have staged roll back the merge. | Add broader plugin-owned validators for more real plugins and plugin merge drivers only where a plugin can prove an automatic repair is safe. |
-| Review-only schema cases | Acyclic source-added dependent views, views that depend on source-added tables, trigger programs, and triggers that depend on source-added tables including trigger `WHEN` clauses can apply automatically in dependency order. Source-changed views and triggers also apply automatically when the target kept the base object and the rewritten object validates, including rewrites that depend on source-added tables materialized earlier in the merge. Source-added expression unique indexes that target rows would violate stay reviewable until those rows are removed. Source-dropped table/view conflicts expose `source` as blocked while current target views, triggers, schema objects, or foreign-key children still depend on the object, then advertise `source` after those dependency conflicts are resolved. Reviewed source-added or source-changed index/view/trigger conflicts, source-dropped index conflicts, dropped-table restores, and table rebuild conflicts can be revalidated for changed source/target SQL evidence and return to `needs-action`; compatible index/view/trigger source drift, compatible index/view/trigger target drift including source-dropped index target drift, compatible table-restore source drift, compatible table-rebuild source drift, and compatible table-rebuild target drift can be guarded and source-applied after revalidation when replacement, drop, restore, or rebuild validates. Table rebuild revalidation includes dependency-plan evidence for direct indexes/triggers, dependent views, and dependent view triggers, so dependency-only source drift is not hidden behind unchanged table SQL. Cyclic views/triggers, source-added triggers with unresolved dependencies, invalid preserved trigger/view dependencies, and some rebuild dependency chains are held as auditable conflicts. | Improve dependency planning so more safe schema reorderings can apply automatically. Add guarded schema revalidation resolution flows beyond currently validated source/target drift cases where the schema planner can prove compatibility. Keep non-deterministic or semantically ambiguous cases review-only. |
-| Filesystem semantics | File additions/deletions/conflicts are audited; binary file changes/conflicts are hash-verified, safe relative symlinks can merge, unsafe symlinks to absolute paths, root-escaping paths, self-references, and ForkPress-managed paths remain conflicts, reviewed source resolution cannot force-apply unsafe symlinks, reviewed source directory-subtree resolution cannot force-apply unsafe symlinks nested inside a replacement directory, and unsupported special source filesystem entries remain review-held and cannot be source-applied on platforms with FIFO support. Directory/file and file/directory replacements get type-specific review conflicts, unchanged target descendants and source descendants under reviewed replacements are held until review, source directory deletions with target-side descendants are held with source resolution blocked before any descendant deletion, reviewed source replacements can apply supported file/dir/symlink changes including safe directory subtrees, WordPress E2E links attachment rows to original and generated-size upload files, plugin-shaped E2E checks branch-owned file contents, and PHP coverage uses discovered and built-in validators to cross-check attachment metadata against merged upload files, missing required attachment metadata rows, invalid serialized attachment metadata, malformed `image_meta`, invalid original/generated/backup dimensions, original/generated/backup filesize drift, attachment `post_mime_type`, byte-signature MIME drift, and generated-size/backup `mime-type` drift against known upload file extensions including AVIF and PDF, missing or empty metadata-side original file fields, generated-size, `original_image`, and backup filename drift, upload paths that exist as non-file entries, missing original/generated upload files including metadata-side original, `original_image`, and backup image files, attached-file metadata drift, duplicate original/generated/backup upload ownership, and unsafe primary/metadata/generated/`original_image`/backup upload paths, including root-escaping, dot or empty path segments, URL-like primary/metadata/generated, and Windows drive-letter primary/metadata upload metadata. | Add stricter uploads-specific validators for more conflict/drift shapes, including attachment metadata regeneration decisions. |
-| Crash consistency | DB, metadata, file, rollback-failure, ID-band, plugin-driver, and Git publication paths have targeted rollback tests. DB merge process-death coverage includes crashes before/after target DB commit and before metadata commit, with pending crash artifacts that block later merges until explicit recovery. Whole-branch DB+file merges now keep recoverable target DB, metadata DB, and filesystem-root snapshots across the file phase, so a hard exit after DB commit, before file mutation, or after an individual file operation blocks later merges until `recover-crash --restore-target-db --restore-files` restores a coherent pre-merge state. Plugin-driver runs now leave a crash-recovery artifact if the runner dies after target DB/files mutate but before driver resolution metadata is recorded; retries are blocked until recovery restores target DB/files. Public E2E now drives merge/create/reset/recover crash paths through `forkpress` commands, restores a pending public merge crash through the WordPress branch UI restore action, and covers actual smart-HTTP Git-created branch pushes interrupted before branch-birth metadata, after branch-birth metadata but before branch tree publication, after branch storage publication, before branch-list publication, and after branch-list publication, followed by fresh server restart verification and merge retry/mergeback. Git server process-death coverage includes created-branch metadata/storage/public-link/list publication with retry ref reconciliation after list publication, existing-branch update publication, delete staging, and object pruning. `docs/merge-crash-consistency.md` maps covered boundaries and missing product-level failpoint work. | Broaden the external product-level kill harness across the remaining platform-specific Git-push failpoints, plus platform-specific coverage around sparsebundle detach/compact and rollback-artifact cleanup. |
-| Branch birth | CLI, Git-created, and remote-cache branches allocate ID bands and capture merge base metadata. Branch-birth validation rejects missing ID bands and keyless row identities, filesystem base capture records user content/uploads while excluding managed DB/config/Git files, and rollback cleanup removes only the failed branch metadata and preserves unrelated branch birth metadata. Git-created branches finalize birth metadata before publishing the branch tree, so a pre-metadata crash cannot expose a branch without ID bands or row identities. Existing branches reused by automation or updated through Git publication must still have a database, DB merge base, filesystem merge base, and required birth metadata before reuse/update. The WordPress admin branch create/merge UI is covered as a thin wrapper over the same CLI paths, including validation, CLI failure surfacing, and real runtime E2E create/merge requests. Remote-cache branch E2E coverage registers a materialized `main` cache, creates `remote-cache-branch`, verifies branch storage, inserts into the runtime AUTOINCREMENT probe inside the branch band, then merges branch DB and filesystem changes back to `main`. | Keep branch create, Git ref create, remote-cache branch, reset, UI creation, and Git-updated existing branches on one invariant: DB base, file base, ID bands, and metadata must exist before user writes. |
-| ID bands | AUTOINCREMENT bands protect common WordPress and plugin tables. Normal branch reuse inside the reserved band refreshes existing metadata instead of allocating fresh IDs; reaching the previous band end allocates a fresh band before the next implicit insert while preserving prior reserved ranges as valid for merge; reset below old bands gets fresh bands. Existing non-main Git branch updates with a WordPress SQLite database now validate DB merge base, filesystem merge base, and branch-birth metadata before replacing branch storage, so pushes cannot write into an ID-bearing branch that is missing its band reservation. Explicit source IDs outside the reserved branch band are review-held instead of applied automatically for core WordPress and plugin AUTOINCREMENT tables, paired source deletes in the same AUTOINCREMENT table are also held when an out-of-band explicit insert or primary-key rewrite is held, and source child `wp_posts`, owner/reference `wp_postmeta` including inserted and updated type-aware nav menu object refs, inserted or updated scalar/serialized/theme/widget `wp_options` references, inserted or updated `wp_comments`, `wp_commentmeta`, inserted or updated `wp_termmeta`, hierarchical and updated `wp_term_taxonomy`, inserted or primary-key-rewritten `wp_term_relationships`, inserted or updated `wp_usermeta`, inserted or updated post authors, inserted or updated reusable/media/avatar/latest-posts/navigation/query block `post_content` refs including `taxQuery`, inserted or updated classic attachment refs in `post_content`, inserted or updated taxonomy menu-item object refs, or inserted or updated comment user refs pointing at held explicit post/term/user IDs are review-held instead of leaving orphan WordPress child rows. Focused explicit-ID coverage now includes inserted or updated `wp_posts` rows with `post_author`, `core/avatar`, and `core/query` author references plus `wp_usermeta` and `wp_comments` rows behind held out-of-band explicit `wp_users` imports, inserted or updated `wp_commentmeta` and threaded comments behind held explicit `wp_comments` imports, inserted or updated featured-image postmeta, image-block content, classic `wp-image-*` and `[gallery ids="..."]` content, `site_icon`, theme-mod `custom_logo`, and media/block/text/custom HTML widget options behind held explicit attachment imports, pages-widget options and inserted or updated `core/navigation-link`, `core/navigation-submenu`, and `core/navigation` post_content refs behind held explicit page/term/`wp_navigation` imports, and inserted or updated `wp_termmeta`, `wp_term_taxonomy`, `wp_term_relationships`, serialized theme-mod menu locations, nav-menu widgets, and `nav_menu_options` options behind held explicit `wp_terms` imports. Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin tables are marked non-bandable; non-colliding rows merge, while collisions are review-held and auditable. Dependent source child rows are also held when their foreign key points at a source parent row whose plain integer key collides with a different target parent. | Expand explicit-ID/import handling beyond covered AUTOINCREMENT row-insert cases and reject/review unsafe reuse for more plugin/custom logical identities that are not safely bandable. |
-| Stale audits | Resolution fails if target no longer matches the audited payload. `forkpress branch revalidate-reviews` and `forkpress branch merge-audit --revalidate` carry stale reviewed conflicts back into `needs-action` while preserving prior reviewer intent, avoiding duplicate carried notes, recording revalidated payloads, linking plugin replacement validator conflicts, emitting actionable text/JSON summaries of carried and already-open conflict ids, and storing a conservative revalidation classifier such as `compatible-target-drift`, `compatible-source-drift`, `missing`, no-primary-key rowid-reuse `incompatible`, supported WordPress post/postmeta/option/term/term-taxonomy/termmeta/user/usermeta/comment/commentmeta primary-key semantic `incompatible`, custom/plugin non-PK `UNIQUE` logical-key `incompatible`, plugin `replacement-evidence`, schema `compatible-schema-index-target-drift`, `compatible-schema-view-target-drift`, `compatible-schema-trigger-target-drift`, `compatible-schema-table-target-drift`, or schema index/view/trigger/table-restore/table-rebuild `unclassified` drift. A latest `revalidation-required` event now overrides older unapplied validated choices, and bulk `apply-reviewed-resolutions` preflights live staleness, revalidates stale validated choices, reports them as skipped, and leaves the target unchanged instead of surfacing a raw resolver error or silently applying a stale reviewed choice. If a later revalidation shows the source and target payloads are fresh again, the prior `pending` or `reviewed` intent is restored and validated choices re-enter the `apply-reviewed` queue. New database cell conflicts also retain source/target row-context payloads, so custom/plugin logical-key replacement can be detected even when the reviewed scalar cell value is unchanged. `forkpress branch merge-audit --resolution-choice source` and `--blocked-resolution-choice source` expose the current executable/blocking contract for conflict queues. `forkpress branch merge-audit --event-type recorded|review-pending|review-needs-action|review-reviewed|resolution-validated|resolution-applied|resolution-blocked|revalidation-required` exposes the first-class conflict event history without scraping review notes, including failed resolver attempts that leave conflicts open, and `forkpress branch merge-audit --records conflict-events --group-by event-type|lifecycle|conflict-key` summarizes that history for UI queues. `forkpress branch merge-audit --latest-revalidation-status current|source-drifted|target-drifted|source-and-target-drifted|unknown|none` and `--group-by latest-revalidation-status` expose whether the latest recorded after-revalidate guard still matches live source/target state before the reviewer attempts a guarded resolution. `forkpress branch merge-resolve conflict <id> --after-revalidate` can apply reviewed stale database row/cell and filesystem conflicts only when the current source/target payloads still match the latest revalidation record, the latest classifier is not `incompatible`, and the original logical row still exists; source-added view/trigger compatible source drift, source-added schema index/view/trigger compatible target drift, compatible table-rebuild source drift, and compatible table-rebuild target drift can also source-apply after revalidation only when the planner recorded its matching compatible schema class. The fast stale-audit gate now covers deleted target rows, no-primary-key rowid reuse, supported WordPress semantic replacement classifiers, custom/plugin logical-key replacements inferred from non-PK `UNIQUE` indexes, row-context-backed cell conflict identity drift, stale validated choices being excluded or preflight-revalidated by batch apply, fresh-again restoration into the batch apply queue, live source-applicable/source-blocked audit filters, event-type output/filtering/grouping, latest revalidation status output/filtering/grouping, and the direct revalidation output shape. Plugin validator conflicts now return to `needs-action` when a validator rerun records changed evidence for the same plugin object, including explicit changed plugin `source` payload evidence or changed first-class `logical_identity` evidence. Generic source/target resolution remains blocked for plugin conflicts, but a plugin driver can resolve the current replacement conflict when the previous reviewed conflict has a latest current `replacement-evidence` revalidation pointing at that replacement; stale originals, unrevalidated replacements, incompatible revalidations, and drifted replacement evidence are rejected. Ordinary cross-run plugin conflict lineage remains outside that replacement-evidence guard. Reviewed schema index/view/trigger/table-restore/table-rebuild conflicts now return to `needs-action` with current SQL and, for table rebuilds, dependency-plan evidence when schema SQL or dependent object SQL drifts. Other schema conflicts still need planner-backed guarded resolution before they can be applied after revalidation. `docs/stale-audit-workflow.md` maps the current flow and the remaining richer classifier model. | Add more guarded revalidation resolution for plugin and schema conflicts where a plugin or schema planner can prove compatibility. |
-| Release gates | Linux, Windows, x86_64 macOS, and aarch64 macOS production bundle artifacts built in the last checked release. macOS and Linux release workflows install static PHP build prerequisites up front, `scripts/build-dist.sh` now fails before cloning/building PHP if those tools are missing instead of letting `static-php-cli` mutate package-manager state during the release bundle step, avoids macOS bash empty-array expansion under `set -u` while wrapping Apple Silicon `spc` commands in `arch -arm64`, and the default `static-php-cli` checkout is pinned to a known upstream commit with an explicit override for deliberate upgrades. Release-verification PRs now run the same production bundle matrix even when the source branch is not `release/v*`, while keeping tag-state validation scoped to actual release branches. Release `v0.1.48` workflow run `26067459265` passed release packaging, artifact smoke checks, tag creation, GitHub release publication, and Homebrew formula update for all release targets, including `aarch64-apple-darwin`. The published release is tagged at commit `eb3fe1d390870d3118221221bd4316fe1247fd4a` and includes the Apple Silicon artifact `forkpress-aarch64-apple-darwin.tar.gz`. Trunk and release CI also run APFS sparsebundle E2E on both macOS targets with a bounded product retry and e2e-only tolerance for the known transient `hdiutil compact` unavailable condition. | Keep aarch64 macOS release and APFS sparsebundle E2E green on trunk for future releases. Add a separate product check if compact-success itself becomes release-critical. |
+## Detailed Reliability Gaps
+
+### WordPress semantic objects
+
+**Current state**
+
+Tests cover real post creation, postmeta references, users, usermeta, post/comment authors,
+threaded comments and commentmeta references, branch-local page edits/deletes with edited
+content/author assertions, same-object page/postmeta edit-vs-delete conflicts with auditable
+target-wins defaults, same-object user/usermeta edit-vs-delete conflicts that preserve target
+deletion before review, same-object comment/commentmeta edit-vs-delete conflicts that preserve
+target deletion before review, same-object custom-post-type edit-vs-delete conflicts across CPT
+rows, CPT postmeta, CPT option indexes, and CPT taxonomy relationships, same-object
+taxonomy-term edit-vs-delete conflicts across terms, term-taxonomy rows, termmeta, and page-term
+relationships, attachment uploads plus original and generated-size files, attachment metadata,
+attachment-to-page parent links, same-object reusable-block edit-vs-delete conflicts across the
+`wp_block` row and target page cleanup, same-object navigation-menu edit-vs-delete conflicts
+across menu terms, term-taxonomy rows, menu item posts, menu item metadata, relationships,
+serialized nav-widget options, and theme-mod location cleanup, same-object attachment
+edit-vs-delete conflicts across attachment rows, metadata rows, original files, and generated
+files, `core/audio`, `core/cover`, `core/file`, `core/image`, `core/video`, `core/media-text`,
+and `core/gallery` block references and classic `wp-image-*`/`[gallery ids="..."]` content
+references plus featured-image postmeta references to media attachments, hierarchical taxonomy
+terms, page-linked nav menus with menu-location assignments, reusable blocks and synced
+patterns, options with embedded object IDs including branch user refs, JSON option payloads with
+embedded object IDs including branch user refs, custom post types, plugin AUTOINCREMENT tables,
+keyless plugin tables, unique collisions, file additions, nested plugin-owned
+custom-table/JSON/serialized/file graphs, branch merge visibility, a clean zero-conflict
+semantic E2E merge requirement, a discovered media validator that reports missing
+original/generated upload files including metadata-side original, `original_image`, and backup
+image files, duplicate attachment claims on the same upload file including same-attachment
+generated-file duplicates, unreadable or NUL-corrupted attachment metadata, malformed
+`image_meta`, empty or unsafe primary/metadata/generated/`original_image`/backup upload metadata
+paths, original/generated/backup dimension drift, malformed or incomplete generated-size and
+backup-size metadata, generated-size, `original_image`, and backup filename drift, and
+`_wp_attached_file` versus `_wp_attachment_metadata` file drift, fast discovered
+block-reference, post-parent-reference, post-author-reference, postmeta-reference,
+usermeta-reference, menu-parent-reference, menu-reference, featured-image, image-block,
+media-block, avatar-navigation-link-block, gallery-block, query-block, term-relationship,
+term-taxonomy-reference, term-parent-reference, termmeta-reference, and option-reference
+validators that report pages/posts left pointing at deleted reusable blocks, synced patterns,
+navigation blocks, or template parts, child pages or attachments left pointing at deleted
+`post_parent` rows, posts or attachments left pointing at deleted `post_author` users, postmeta
+rows left pointing at deleted posts, usermeta rows left pointing at deleted users, nav menu
+items left pointing at deleted parent menu items or deleted post/taxonomy objects,
+`_thumbnail_id` postmeta left pointing at deleted attachment objects/files, `core/audio`,
+`core/cover`, `core/file`, `core/image`, `core/video`, `core/media-text`, or `core/gallery`
+block JSON plus classic `wp-image-*` and `[gallery ids="..."]` content left pointing at deleted
+attachment objects/files, `core/avatar` and `core/latest-posts` block JSON left pointing at
+deleted users, `core/navigation-link` and `core/navigation-submenu` block JSON left pointing at
+deleted pages or taxonomy terms, `core/query` block JSON including `taxQuery` and
+`core/latest-posts` category filters left pointing at deleted author users or taxonomy terms,
+`wp_term_relationships` left pointing at deleted taxonomy term rows, term taxonomy rows left
+pointing at deleted terms, child taxonomy terms left pointing at deleted parent terms, termmeta
+rows left pointing at deleted terms, serialized theme mods left pointing at deleted post
+objects, deleted nav-menu terms, or deleted custom-logo attachments plus serialized nav menu
+widgets, serialized nav menu auto-add options, serialized block/text/custom HTML widget content,
+serialized media-image/audio/video/gallery and pages widgets, serialized sidebar-widget
+placements, scalar `site_icon`/`page_on_front`/`page_for_posts` options, and serialized
+`sticky_posts` options left pointing at deleted objects, and `docs/merge-repair-policy.md`
+defines when semantic repairs must remain review-only.
+
+**Missing reliability work**
+
+Add broader concurrent object matrices, implement only the repair policies that have
+deterministic owners, and broaden plugin-owned graph conflict/drift cases.
+
+### Plugin-specific semantics
+
+**Current state**
+
+Generic SQLite merge is table/row/cell based and does not rewrite embedded IDs.
+`docs/plugin-merge-validators.md` defines the validator boundary and first test shape. PHP unit
+and E2E coverage now cover the clean happy path for a plugin-owned custom-table graph with
+parent/child rows, child JSON payload references, serialized option/postmeta references,
+referenced CPT data, and a referenced file. The PHP unit suite also covers the metadata/audit
+foundation for plugin-scoped validator conflicts, including review queues, first-class plugin
+filters, and queue grouping. Normal branch merges discover validators from active plugin,
+network-active plugin, and mu-plugin locations in the staged candidate target; discovered
+custom-table graph validators can abort and roll back a candidate with a broken JSON reference,
+or complete the merge with plugin-scoped review conflicts for broken serialized graph row/file
+references, unsafe URL-like or drive-letter plugin file references, and target-conflicting graph
+state. The focused plugin validator gate now includes serialized and JSON plugin option/postmeta
+references left pointing at a deleted plugin asset row/file or an unsafe plugin-owned file path,
+first-class plugin `severity`, validator identity, and `logical_identity` contract validation,
+plugin/object/severity/logical-identity/file filters and groupings, and `logical_identity` drift
+evidence for semantic identities that are not expressed as SQLite keys. `forkpress branch
+run-plugin-validator`, `forkpress branch record-plugin-validator-conflicts`, and `forkpress
+branch merge --plugin-validator <path>` expose explicit validator execution and findings
+recording, while rejecting contradictory valid-with-findings output or malformed validator
+identities before they become conflict metadata. Validator failures after DB/files have staged
+roll back the merge.
+
+**Missing reliability work**
+
+Add broader plugin-owned validators for more real plugins and plugin merge drivers only where a
+plugin can prove an automatic repair is safe.
+
+### Review-only schema cases
+
+**Current state**
+
+Acyclic source-added dependent views, views that depend on source-added tables, trigger
+programs, and triggers that depend on source-added tables including trigger `WHEN` clauses can
+apply automatically in dependency order. Source-changed views and triggers also apply
+automatically when the target kept the base object and the rewritten object validates, including
+rewrites that depend on source-added tables materialized earlier in the merge. Source-added
+expression unique indexes that target rows would violate stay reviewable until those rows are
+removed. Source-dropped table/view conflicts expose `source` as blocked while current target
+views, triggers, schema objects, or foreign-key children still depend on the object, then
+advertise `source` after those dependency conflicts are resolved. Reviewed source-added or
+source-changed index/view/trigger conflicts, source-dropped index conflicts, dropped-table
+restores, and table rebuild conflicts can be revalidated for changed source/target SQL evidence
+and return to `needs-action`; compatible index/view/trigger source drift, compatible
+index/view/trigger target drift including source-dropped index target drift, compatible
+table-restore source drift, compatible table-rebuild source drift, and compatible table-rebuild
+target drift can be guarded and source-applied after revalidation when replacement, drop,
+restore, or rebuild validates. Table rebuild revalidation includes dependency-plan evidence for
+direct indexes/triggers, dependent views, and dependent view triggers, so dependency-only source
+drift is not hidden behind unchanged table SQL. Cyclic views/triggers, source-added triggers
+with unresolved dependencies, invalid preserved trigger/view dependencies, and some rebuild
+dependency chains are held as auditable conflicts.
+
+**Missing reliability work**
+
+Improve dependency planning so more safe schema reorderings can apply automatically. Add guarded
+schema revalidation resolution flows beyond currently validated source/target drift cases where
+the schema planner can prove compatibility. Keep non-deterministic or semantically ambiguous
+cases review-only.
+
+### Filesystem semantics
+
+**Current state**
+
+File additions/deletions/conflicts are audited; binary file changes/conflicts are hash-verified,
+safe relative symlinks can merge, unsafe symlinks to absolute paths, root-escaping paths,
+self-references, and ForkPress-managed paths remain conflicts, reviewed source resolution cannot
+force-apply unsafe symlinks, reviewed source directory-subtree resolution cannot force-apply
+unsafe symlinks nested inside a replacement directory, and unsupported special source filesystem
+entries remain review-held and cannot be source-applied on platforms with FIFO support.
+Directory/file and file/directory replacements get type-specific review conflicts, unchanged
+target descendants and source descendants under reviewed replacements are held until review,
+source directory deletions with target-side descendants are held with source resolution blocked
+before any descendant deletion, reviewed source replacements can apply supported
+file/dir/symlink changes including safe directory subtrees, WordPress E2E links attachment rows
+to original and generated-size upload files, plugin-shaped E2E checks branch-owned file
+contents, and PHP coverage uses discovered and built-in validators to cross-check attachment
+metadata against merged upload files, missing required attachment metadata rows, invalid
+serialized attachment metadata, malformed `image_meta`, invalid original/generated/backup
+dimensions, original/generated/backup filesize drift, attachment `post_mime_type`,
+byte-signature MIME drift, and generated-size/backup `mime-type` drift against known upload file
+extensions including AVIF and PDF, missing or empty metadata-side original file fields,
+generated-size, `original_image`, and backup filename drift, upload paths that exist as non-file
+entries, missing original/generated upload files including metadata-side original,
+`original_image`, and backup image files, attached-file metadata drift, duplicate
+original/generated/backup upload ownership, and unsafe
+primary/metadata/generated/`original_image`/backup upload paths, including root-escaping, dot or
+empty path segments, URL-like primary/metadata/generated, and Windows drive-letter
+primary/metadata upload metadata.
+
+**Missing reliability work**
+
+Add stricter uploads-specific validators for more conflict/drift shapes, including attachment
+metadata regeneration decisions.
+
+### Crash consistency
+
+**Current state**
+
+DB, metadata, file, rollback-failure, ID-band, plugin-driver, and Git publication paths have
+targeted rollback tests. DB merge process-death coverage includes crashes before/after target DB
+commit and before metadata commit, with pending crash artifacts that block later merges until
+explicit recovery. Whole-branch DB+file merges now keep recoverable target DB, metadata DB, and
+filesystem-root snapshots across the file phase, so a hard exit after DB commit, before file
+mutation, or after an individual file operation blocks later merges until `recover-crash
+--restore-target-db --restore-files` restores a coherent pre-merge state. Plugin-driver runs now
+leave a crash-recovery artifact if the runner dies after target DB/files mutate but before
+driver resolution metadata is recorded; retries are blocked until recovery restores target
+DB/files. Public E2E now drives merge/create/reset/recover crash paths through `forkpress`
+commands, restores a pending public merge crash through the WordPress branch UI restore action,
+and covers actual smart-HTTP Git-created branch pushes interrupted before branch-birth metadata,
+after branch-birth metadata but before branch tree publication, after branch storage
+publication, before branch-list publication, and after branch-list publication, followed by
+fresh server restart verification and merge retry/mergeback. Git server process-death coverage
+includes created-branch metadata/storage/public-link/list publication with retry ref
+reconciliation after list publication, existing-branch update publication, delete staging, and
+object pruning. `docs/merge-crash-consistency.md` maps covered boundaries and missing
+product-level failpoint work.
+
+**Missing reliability work**
+
+Broaden the external product-level kill harness across the remaining platform-specific Git-push
+failpoints, plus platform-specific coverage around sparsebundle detach/compact and
+rollback-artifact cleanup.
+
+### Branch birth
+
+**Current state**
+
+CLI, Git-created, and remote-cache branches allocate ID bands and capture merge base metadata.
+Branch-birth validation rejects missing ID bands and keyless row identities, filesystem base
+capture records user content/uploads while excluding managed DB/config/Git files, and rollback
+cleanup removes only the failed branch metadata and preserves unrelated branch birth metadata.
+Git-created branches finalize birth metadata before publishing the branch tree, so a
+pre-metadata crash cannot expose a branch without ID bands or row identities. Existing branches
+reused by automation or updated through Git publication must still have a database, DB merge
+base, filesystem merge base, and required birth metadata before reuse/update. The WordPress
+admin branch create/merge UI is covered as a thin wrapper over the same CLI paths, including
+validation, CLI failure surfacing, and real runtime E2E create/merge requests. Remote-cache
+branch E2E coverage registers a materialized `main` cache, creates `remote-cache-branch`,
+verifies branch storage, inserts into the runtime AUTOINCREMENT probe inside the branch band,
+then merges branch DB and filesystem changes back to `main`.
+
+**Missing reliability work**
+
+Keep branch create, Git ref create, remote-cache branch, reset, UI creation, and Git-updated
+existing branches on one invariant: DB base, file base, ID bands, and metadata must exist before
+user writes.
+
+### ID bands
+
+**Current state**
+
+AUTOINCREMENT bands protect common WordPress and plugin tables. Normal branch reuse inside the
+reserved band refreshes existing metadata instead of allocating fresh IDs; reaching the previous
+band end allocates a fresh band before the next implicit insert while preserving prior reserved
+ranges as valid for merge; reset below old bands gets fresh bands. Existing non-main Git branch
+updates with a WordPress SQLite database now validate DB merge base, filesystem merge base, and
+branch-birth metadata before replacing branch storage, so pushes cannot write into an ID-bearing
+branch that is missing its band reservation. Explicit source IDs outside the reserved branch
+band are review-held instead of applied automatically for core WordPress and plugin
+AUTOINCREMENT tables, paired source deletes in the same AUTOINCREMENT table are also held when
+an out-of-band explicit insert or primary-key rewrite is held, and source child `wp_posts`,
+owner/reference `wp_postmeta` including inserted and updated type-aware nav menu object refs,
+inserted or updated scalar/serialized/theme/widget `wp_options` references, inserted or updated
+`wp_comments`, `wp_commentmeta`, inserted or updated `wp_termmeta`, hierarchical and updated
+`wp_term_taxonomy`, inserted or primary-key-rewritten `wp_term_relationships`, inserted or
+updated `wp_usermeta`, inserted or updated post authors, inserted or updated
+reusable/media/avatar/latest-posts/navigation/query block `post_content` refs including
+`taxQuery`, inserted or updated classic attachment refs in `post_content`, inserted or updated
+taxonomy menu-item object refs, or inserted or updated comment user refs pointing at held
+explicit post/term/user IDs are review-held instead of leaving orphan WordPress child rows.
+Focused explicit-ID coverage now includes inserted or updated `wp_posts` rows with
+`post_author`, `core/avatar`, and `core/query` author references plus `wp_usermeta` and
+`wp_comments` rows behind held out-of-band explicit `wp_users` imports, inserted or updated
+`wp_commentmeta` and threaded comments behind held explicit `wp_comments` imports, inserted or
+updated featured-image postmeta, image-block content, classic `wp-image-*` and `[gallery
+ids="..."]` content, `site_icon`, theme-mod `custom_logo`, and media/block/text/custom HTML
+widget options behind held explicit attachment imports, pages-widget options and inserted or
+updated `core/navigation-link`, `core/navigation-submenu`, and `core/navigation` post_content
+refs behind held explicit page/term/`wp_navigation` imports, and inserted or updated
+`wp_termmeta`, `wp_term_taxonomy`, `wp_term_relationships`, serialized theme-mod menu locations,
+nav-menu widgets, and `nav_menu_options` options behind held explicit `wp_terms` imports.
+Non-AUTOINCREMENT `INTEGER PRIMARY KEY` plugin tables are marked non-bandable; non-colliding
+rows merge, while collisions are review-held and auditable. Dependent source child rows are also
+held when their foreign key points at a source parent row whose plain integer key collides with
+a different target parent.
+
+**Missing reliability work**
+
+Expand explicit-ID/import handling beyond covered AUTOINCREMENT row-insert cases and
+reject/review unsafe reuse for more plugin/custom logical identities that are not safely
+bandable.
+
+### Stale audits
+
+**Current state**
+
+Resolution fails if target no longer matches the audited payload. `forkpress branch
+revalidate-reviews` and `forkpress branch merge-audit --revalidate` carry stale reviewed
+conflicts back into `needs-action` while preserving prior reviewer intent, avoiding duplicate
+carried notes, recording revalidated payloads, linking plugin replacement validator conflicts,
+emitting actionable text/JSON summaries of carried and already-open conflict ids, and storing a
+conservative revalidation classifier such as `compatible-target-drift`,
+`compatible-source-drift`, `missing`, no-primary-key rowid-reuse `incompatible`, supported
+WordPress post/postmeta/option/term/term-taxonomy/termmeta/user/usermeta/comment/commentmeta
+primary-key semantic `incompatible`, custom/plugin non-PK `UNIQUE` logical-key `incompatible`,
+plugin `replacement-evidence`, schema `compatible-schema-index-target-drift`,
+`compatible-schema-view-target-drift`, `compatible-schema-trigger-target-drift`,
+`compatible-schema-table-target-drift`, or schema index/view/trigger/table-restore/table-rebuild
+`unclassified` drift. A latest `revalidation-required` event now overrides older unapplied
+validated choices, and bulk `apply-reviewed-resolutions` preflights live staleness, revalidates
+stale validated choices, reports them as skipped, and leaves the target unchanged instead of
+surfacing a raw resolver error or silently applying a stale reviewed choice. If a later
+revalidation shows the source and target payloads are fresh again, the prior `pending` or
+`reviewed` intent is restored and validated choices re-enter the `apply-reviewed` queue. New
+database cell conflicts also retain source/target row-context payloads, so custom/plugin
+logical-key replacement can be detected even when the reviewed scalar cell value is unchanged.
+`forkpress branch merge-audit --resolution-choice source` and `--blocked-resolution-choice
+source` expose the current executable/blocking contract for conflict queues. `forkpress branch
+merge-audit --event-type
+recorded|review-pending|review-needs-action|review-reviewed|resolution-validated|resolution-applied|resolution-blocked|revalidation-required`
+exposes the first-class conflict event history without scraping review notes, including failed
+resolver attempts that leave conflicts open, and `forkpress branch merge-audit --records
+conflict-events --group-by event-type|lifecycle|conflict-key` summarizes that history for UI
+queues. `forkpress branch merge-audit --latest-revalidation-status
+current|source-drifted|target-drifted|source-and-target-drifted|unknown|none` and `--group-by
+latest-revalidation-status` expose whether the latest recorded after-revalidate guard still
+matches live source/target state before the reviewer attempts a guarded resolution. `forkpress
+branch merge-resolve conflict <id> --after-revalidate` can apply reviewed stale database
+row/cell and filesystem conflicts only when the current source/target payloads still match the
+latest revalidation record, the latest classifier is not `incompatible`, and the original
+logical row still exists; source-added view/trigger compatible source drift, source-added schema
+index/view/trigger compatible target drift, compatible table-rebuild source drift, and
+compatible table-rebuild target drift can also source-apply after revalidation only when the
+planner recorded its matching compatible schema class. The fast stale-audit gate now covers
+deleted target rows, no-primary-key rowid reuse, supported WordPress semantic replacement
+classifiers, custom/plugin logical-key replacements inferred from non-PK `UNIQUE` indexes,
+row-context-backed cell conflict identity drift, stale validated choices being excluded or
+preflight-revalidated by batch apply, fresh-again restoration into the batch apply queue, live
+source-applicable/source-blocked audit filters, event-type output/filtering/grouping, latest
+revalidation status output/filtering/grouping, and the direct revalidation output shape. Plugin
+validator conflicts now return to `needs-action` when a validator rerun records changed evidence
+for the same plugin object, including explicit changed plugin `source` payload evidence or
+changed first-class `logical_identity` evidence. Generic source/target resolution remains
+blocked for plugin conflicts, but a plugin driver can resolve the current replacement conflict
+when the previous reviewed conflict has a latest current `replacement-evidence` revalidation
+pointing at that replacement; stale originals, unrevalidated replacements, incompatible
+revalidations, and drifted replacement evidence are rejected. Ordinary cross-run plugin conflict
+lineage remains outside that replacement-evidence guard. Reviewed schema
+index/view/trigger/table-restore/table-rebuild conflicts now return to `needs-action` with
+current SQL and, for table rebuilds, dependency-plan evidence when schema SQL or dependent
+object SQL drifts. Other schema conflicts still need planner-backed guarded resolution before
+they can be applied after revalidation. `docs/stale-audit-workflow.md` maps the current flow and
+the remaining richer classifier model.
+
+**Missing reliability work**
+
+Add more guarded revalidation resolution for plugin and schema conflicts where a plugin or
+schema planner can prove compatibility.
+
+### Release gates
+
+**Current state**
+
+Linux, Windows, x86_64 macOS, and aarch64 macOS production bundle artifacts built in the last
+checked release. macOS and Linux release workflows install static PHP build prerequisites up
+front, `scripts/build-dist.sh` now fails before cloning/building PHP if those tools are missing
+instead of letting `static-php-cli` mutate package-manager state during the release bundle step,
+avoids macOS bash empty-array expansion under `set -u` while wrapping Apple Silicon `spc`
+commands in `arch -arm64`, and the default `static-php-cli` checkout is pinned to a known
+upstream commit with an explicit override for deliberate upgrades. Release-verification PRs now
+run the same production bundle matrix even when the source branch is not `release/v*`, while
+keeping tag-state validation scoped to actual release branches. The last explicitly recorded
+release-gate audit in this matrix is release `v0.1.48`, workflow run `26067459265`; that run
+passed release packaging, artifact smoke checks, tag creation, GitHub release publication, and
+Homebrew formula update for all release targets, including `aarch64-apple-darwin`. Trunk and
+release CI also run APFS sparsebundle E2E on both macOS targets with a bounded product retry and
+e2e-only tolerance for the known transient `hdiutil compact` unavailable condition.
+
+**Missing reliability work**
+
+Keep aarch64 macOS release and APFS sparsebundle E2E green on trunk for future releases. Add a
+separate product check if compact-success itself becomes release-critical.
+
 
 ## Test Direction
 
@@ -423,11 +1178,15 @@ make test-cow-schema-review
 ```
 
 For WordPress upload/media validator changes, including missing required
-attachment metadata rows, missing original, metadata-side original, `original_image`, backup, or generated upload files, missing or empty metadata-side original file fields, invalid serialized attachment
+attachment metadata rows, missing original, metadata-side original,
+`original_image`, backup, or generated upload files, missing or empty
+metadata-side original file fields, invalid serialized attachment
 metadata, duplicate attachment upload metadata rows, duplicate original/generated upload ownership, invalid
 `image_meta`, invalid original/generated/backup dimensions, original/generated/backup filesize drift, attachment
 `post_mime_type` and generated-size/backup `mime-type` drift against known upload file extensions, attached-file metadata drift, generated-size,
-`original_image`, or backup filename drift, unsafe primary/metadata/generated/`original_image`/backup paths including URL-like and Windows drive-letter primary/metadata upload metadata, and malformed or
+`original_image`, or backup filename drift, unsafe
+primary/metadata/generated/`original_image`/backup paths including URL-like
+and Windows drive-letter primary/metadata upload metadata, and malformed or
 incomplete generated-size or backup-size metadata, run:
 
 ```bash
@@ -589,6 +1348,6 @@ should stay focused on these areas:
 - Improve deterministic schema dependency planning for safe view/trigger
   reorderings while keeping cyclic or semantic ambiguity review-only.
 - Keep aarch64 macOS release artifacts and APFS sparsebundle E2E runs green for
-  each release. `v0.1.48` is the current published release after all five
-  production-bundle targets stayed green and the release commit
-  `eb3fe1d390870d3118221221bd4316fe1247fd4a` was published.
+  each release. Refresh release-gate evidence from GitHub releases and workflow
+  runs when this note changes; do not use this page as the source of truth for
+  the current published version.
