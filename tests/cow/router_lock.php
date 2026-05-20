@@ -347,7 +347,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'aria-pressed'), 'out-of-band branch manager exposes active conflict filters accessibly');
         assert_true(str_contains($early_body, 'Unreviewed'), 'out-of-band branch manager labels the pending filter by review state');
         assert_true(str_contains($early_body, 'Accepted'), 'out-of-band branch manager labels the accepted filter by review state');
-        assert_true(str_contains($early_body, 'Conflict check'), 'out-of-band branch manager labels table rows as conflict checks');
+        assert_true(str_contains($early_body, "['Check', 'Item', 'Summary']"), 'out-of-band branch manager keeps the conflict table to scannable columns');
         assert_true(str_contains($early_body, 'Previous check'), 'out-of-band branch manager can move backward through the filtered review queue');
         assert_true(str_contains($early_body, 'Next check'), 'out-of-band branch manager can move forward through the filtered review queue');
         assert_true(str_contains($early_body, 'Conflict check \' + String(selectedIndex + 1) + \' of'), 'out-of-band branch manager labels the selected conflict check position');
@@ -374,13 +374,16 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-conflict-grid'), 'out-of-band branch manager renders conflict values as review fields');
         assert_true(str_contains($early_body, 'decodeAuditPayload'), 'out-of-band branch manager decodes audit payloads for review');
         assert_true(str_contains($early_body, 'Review note'), 'out-of-band branch manager exposes editable review notes');
+        assert_true(str_contains($early_body, 'fp-disclosure'), 'out-of-band branch manager progressively discloses secondary conflict details');
+        assert_true(str_contains($early_body, 'Compare values'), 'out-of-band branch manager groups source/base/target values behind one value section');
+        assert_true(str_contains($early_body, 'Plugin details'), 'out-of-band branch manager hides dense plugin metadata behind a disclosure');
         assert_true(str_contains($early_body, 'Apply selected choice'), 'out-of-band branch manager exposes a selected conflict resolution action');
         assert_true(str_contains($early_body, 'fp-conflict-action-row'), 'out-of-band branch manager keeps conflict resolution actions visible in the inspector');
         assert_true(str_contains($early_body, 'fp-conflict-card-head'), 'out-of-band branch manager uses a compact conflict card header');
         assert_true(str_contains($early_body, 'fp-conflict-card-controls'), 'out-of-band branch manager keeps conflict actions outside long payload scrolling');
         assert_true(str_contains($early_body, 'fp-conflict-scroll'), 'out-of-band branch manager gives each conflict card a dedicated scroll body');
-        assert_true(strpos($early_body, 'controls.appendChild(row);') < strpos($early_body, 'scrollBody.appendChild(values);'), 'out-of-band branch manager places review actions before long values');
-        assert_true(strpos($early_body, 'controls.appendChild(noteWrap);') < strpos($early_body, 'if (pluginPanel) scrollBody.appendChild(pluginPanel);'), 'out-of-band branch manager keeps plugin/theme metadata below compact controls');
+        assert_true(strpos($early_body, 'controls.appendChild(row);') < strpos($early_body, 'node.appendChild(scrollBody);'), 'out-of-band branch manager places review actions before scrollable details');
+        assert_true(str_contains($early_body, "disclosure('Plugin details', pluginPanel, false)"), 'out-of-band branch manager keeps plugin/theme metadata in collapsed secondary details');
         assert_true(str_contains($early_body, 'Change applied resolution'), 'out-of-band branch manager exposes applied-resolution changes');
         assert_true(str_contains($early_body, 'prioritizeResolutionChange'), 'out-of-band branch manager surfaces applied-resolution changes before large value previews');
         assert_true(str_contains($early_body, 'replaceApplied'), 'out-of-band branch manager sends replace-applied resolution payloads');

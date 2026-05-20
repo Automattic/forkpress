@@ -2106,11 +2106,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table-layout: fixed;
         width: 100%;
     }
-    .fp-conflict-table th:nth-child(1), .fp-conflict-table td:nth-child(1) { width: 82px; }
-    .fp-conflict-table th:nth-child(2), .fp-conflict-table td:nth-child(2) { width: 16%; }
-    .fp-conflict-table th:nth-child(3), .fp-conflict-table td:nth-child(3) { width: 25%; }
-    .fp-conflict-table th:nth-child(4), .fp-conflict-table td:nth-child(4) { width: 20%; }
-    .fp-conflict-table th:nth-child(5), .fp-conflict-table td:nth-child(5) { width: 34%; }
+    .fp-conflict-table th:nth-child(1), .fp-conflict-table td:nth-child(1) { width: 86px; }
+    .fp-conflict-table th:nth-child(2), .fp-conflict-table td:nth-child(2) { width: 32%; }
+    .fp-conflict-table th:nth-child(3), .fp-conflict-table td:nth-child(3) { width: auto; }
     .fp-conflict-table th {
         background: #f6f7f7;
         border-bottom: 1px solid var(--line);
@@ -2284,6 +2282,26 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         color: var(--muted);
         font-size: 10px;
         text-transform: uppercase;
+    }
+    .fp-disclosure {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        overflow: hidden;
+    }
+    .fp-disclosure summary {
+        background: #f6f7f7;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 8px 10px;
+    }
+    .fp-disclosure[open] summary {
+        border-bottom: 1px solid var(--line);
+    }
+    .fp-disclosure-body {
+        display: grid;
+        gap: 8px;
+        padding: 8px 10px 10px;
     }
     .fp-conflict-plugin {
         background: #f6f7f7;
@@ -3596,6 +3614,21 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         });
         return panel;
     }
+    function disclosure(title, content, open) {
+        var details = document.createElement('details');
+        details.className = 'fp-disclosure';
+        if (open) details.open = true;
+        details.appendChild(textNode('summary', '', title));
+        var body = document.createElement('div');
+        body.className = 'fp-disclosure-body';
+        if (Array.isArray(content)) {
+            content.forEach(function (child) { if (child) body.appendChild(child); });
+        } else if (content) {
+            body.appendChild(content);
+        }
+        details.appendChild(body);
+        return details;
+    }
     function appendTableCell(row, label, parts) {
         var cell = document.createElement('td');
         var tooltip = [];
@@ -3634,7 +3667,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table.className = 'fp-conflict-table';
         var thead = document.createElement('thead');
         var header = document.createElement('tr');
-        ['Conflict check', 'Entity', 'Identifier', 'Field', 'Context'].forEach(function (label) {
+        ['Check', 'Item', 'Summary'].forEach(function (label) {
             header.appendChild(textNode('th', '', label));
         });
         thead.appendChild(header);
@@ -3649,25 +3682,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             row.setAttribute('aria-label', 'Inspect conflict #' + String(record.id || '') + ' ' + String(context.identifier || context.entityLabel || ''));
             if (String(record.id || '') === String(selectedConflictId || '')) row.className = 'is-selected';
             var details = detailsText(context.details);
-            appendTableCell(row, 'Conflict check', [
+            appendTableCell(row, 'Check', [
                 { className: 'fp-table-primary', text: '#' + String(record.id || '') },
                 { className: 'fp-table-muted', text: conflictStateText(record) }
             ]);
-            appendTableCell(row, 'Entity', [
-                { className: 'fp-table-primary', text: context.entityLabel },
-                { className: 'fp-table-muted', text: context.table && context.column ? context.table + '.' + context.column : context.table }
+            appendTableCell(row, 'Item', [
+                { className: 'fp-table-primary', text: context.identifier ? context.entityLabel + ': ' + context.identifier : context.entityLabel },
+                { className: 'fp-table-muted', text: [context.table && context.column ? context.table + '.' + context.column : context.table, context.field].filter(Boolean).join(' / ') }
             ]);
-            appendTableCell(row, 'Identifier', [
-                { className: 'fp-table-primary', text: context.identifier || '(unknown)' },
-                { className: 'fp-table-muted', text: context.entityType }
-            ]);
-            appendTableCell(row, 'Field', [
-                { className: 'fp-table-primary', text: context.field || humanConflictType(record.conflict_type) || '' },
-                { className: 'fp-table-muted', text: humanConflictType(record.conflict_type) || '' }
-            ]);
-            appendTableCell(row, 'Context', [
+            appendTableCell(row, 'Summary', [
                 { className: 'fp-table-primary', text: context.context || details || '(no context)' },
-                { className: 'fp-table-muted', text: context.context && details ? details : '' }
+                { className: 'fp-table-muted', text: [humanConflictType(record.conflict_type), conflictPluginGuidance(record)].filter(Boolean).join(' / ') }
             ]);
             tbody.appendChild(row);
             row.addEventListener('click', function (event) {
@@ -3773,25 +3798,25 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         node.appendChild(header);
         controls.appendChild(row);
         if (isPluginConflict) {
-            scrollBody.appendChild(noteWrap);
+            scrollBody.appendChild(disclosure('Review note', noteWrap, false));
             var guidance = conflictGuidancePanel(record);
             if (guidance) scrollBody.appendChild(guidance);
-            if (pluginPanel) scrollBody.appendChild(pluginPanel);
+            if (pluginPanel) scrollBody.appendChild(disclosure('Plugin details', pluginPanel, false));
             var pluginPayload = conflictValue(record, 'chosen_payload', 'chosen_preview');
             if (pluginPayload) {
                 var pluginValues = document.createElement('div');
                 pluginValues.className = 'fp-conflict-grid';
                 pluginValues.appendChild(conflictValueField('Plugin check payload', pluginPayload));
-                scrollBody.appendChild(pluginValues);
+                scrollBody.appendChild(disclosure('Plugin check payload', pluginValues, false));
             }
         } else if (prioritizeResolutionChange) {
             controls.appendChild(choiceWrap);
-            scrollBody.appendChild(noteWrap);
-            scrollBody.appendChild(values);
+            scrollBody.appendChild(disclosure('Review note', noteWrap, false));
+            scrollBody.appendChild(disclosure('Compare values', values, true));
         } else {
             controls.appendChild(choiceWrap);
-            scrollBody.appendChild(noteWrap);
-            scrollBody.appendChild(values);
+            scrollBody.appendChild(disclosure('Review note', noteWrap, false));
+            scrollBody.appendChild(disclosure('Compare values', values, true));
         }
         node.appendChild(controls);
         node.appendChild(scrollBody);
