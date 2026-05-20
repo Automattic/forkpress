@@ -62,20 +62,20 @@ under `.forkpress-bin/` next to the launcher.
 Pin the installer or launcher to a release:
 
 ```bash
-FORKPRESS_VERSION=0.1.14 ./forkpress serve
+FORKPRESS_VERSION=<version> ./forkpress serve
 ```
 
 The installer also accepts the variable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | FORKPRESS_VERSION=0.1.14 sh
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | FORKPRESS_VERSION=<version> sh
 ```
 
 Useful overrides:
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `FORKPRESS_VERSION` | installer, launcher | Release version, for example `0.1.14` or `v0.1.14`. Defaults to `latest`. |
+| `FORKPRESS_VERSION` | installer, launcher | Release version, with or without a leading `v`. Defaults to `latest`. |
 | `FORKPRESS_INSTALL_DIR` | installer | Destination directory. Defaults to `$HOME/.local/bin`. |
 | `FORKPRESS_CACHE_DIR` | launcher | Binary cache directory. Defaults to `.forkpress-bin` beside the launcher. |
 | `FORKPRESS_REFRESH` | launcher | Set to `1` to re-download even when a cached binary exists. |
@@ -100,11 +100,14 @@ For macOS and Linux:
 
 ```bash
 curl -L -o forkpress.tar.gz \
-  "https://github.com/Automattic/forkpress/releases/download/v0.1.14/forkpress-x86_64-unknown-linux-musl.tar.gz"
+  "https://github.com/Automattic/forkpress/releases/download/<tag>/forkpress-<target>.tar.gz"
 tar -xzf forkpress.tar.gz
 chmod +x forkpress
 ./forkpress --version
 ```
+
+Replace `<tag>` with a release tag like `vX.Y.Z` and `<target>` with one of
+the artifact targets from the table.
 
 Check `SHA256SUMS` from the same release before trusting manually downloaded
 artifacts.
