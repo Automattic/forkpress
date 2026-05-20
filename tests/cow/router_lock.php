@@ -261,6 +261,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-graph'), 'out-of-band branch manager renders the branch graph surface');
         assert_true(str_contains($early_body, 'fp-bottom'), 'out-of-band branch manager renders one persistent bottom workbench');
         assert_true(str_contains($early_body, 'fp-bottom-actions'), 'out-of-band branch manager keeps branch actions in the bottom workbench');
+        assert_true(str_contains($early_body, 'fp-workbench-mode'), 'out-of-band branch manager labels the current workbench mode');
         assert_true(!str_contains($early_body, 'fp-side'), 'out-of-band branch manager no longer alternates through a right sidebar');
         assert_true(str_contains($early_body, '"actionUrl":"/_forkpress/action"'), 'out-of-band branch manager uses same-origin action endpoint');
         assert_true(!str_contains($early_body, 'http://wp.localhost/_forkpress/action'), 'out-of-band branch manager does not hard-code an HTTP action endpoint');
@@ -282,6 +283,9 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'branchLabelText'), 'out-of-band branch manager compacts and staggers branch lane labels');
         assert_true(str_contains($early_body, 'fp-node-merge'), 'out-of-band branch manager renders merge events with a distinct target marker');
         assert_true(str_contains($early_body, 'Merge event #'), 'out-of-band branch manager distinguishes merge events from ordinary revisions');
+        assert_true(str_contains($early_body, 'fp-legend'), 'out-of-band branch manager explains graph symbols with an inline legend');
+        assert_true(str_contains($early_body, 'fp-row-selected'), 'out-of-band branch manager highlights the selected timeline event');
+        assert_true(str_contains($early_body, "graph.addEventListener('keydown'"), 'out-of-band branch manager supports keyboard selection in the graph');
         assert_true(str_contains($early_body, 'seedConflictSummaries'), 'out-of-band branch manager seeds conflict summaries without extra conflict audits');
         assert_true(str_contains($early_body, 'selectedRunId'), 'out-of-band branch manager keeps the selected revision synced after conflict audits load');
         assert_true(str_contains($early_body, 'requestedRun'), 'out-of-band branch manager ignores stale conflict loads after selecting another revision');
@@ -297,6 +301,8 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-conflict-inspector-slot'), 'out-of-band branch manager has a stable selected-conflict inspector slot');
         assert_true(!str_contains($early_body, 'Review conflicts'), 'out-of-band branch manager auto-loads conflicts instead of requiring a separate review button');
         assert_true(str_contains($early_body, 'function renderConflictTable'), 'out-of-band branch manager renders conflict summaries as an entity table');
+        assert_true(str_contains($early_body, 'data-label'), 'out-of-band branch manager can render mobile conflict rows as labeled cards');
+        assert_true(str_contains($early_body, 'fp-summary-chips'), 'out-of-band branch manager renders compact conflict summary chips');
         assert_true(str_contains($early_body, 'function conflictEntityContext'), 'out-of-band branch manager normalizes conflict entity context for review');
         assert_true(str_contains($early_body, 'entityContext'), 'out-of-band branch manager receives enriched conflict entity context from audits');
         assert_true(str_contains(file_get_contents($router), 'forkpress_cow_conflict_row_payload'), 'out-of-band branch manager can enrich stale conflict context from captured row payloads');
