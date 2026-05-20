@@ -22,9 +22,8 @@ FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo build --release --target "$TARGET" -p f
 ls -lh "target/$TARGET/release/forkpress"
 file "target/$TARGET/release/forkpress" || true
 
-echo "--- :fastlane: bundle install + cert install"
-bundle install
-bundle exec fastlane set_up_signing
+# shellcheck source=_lib/setup-fastlane.sh
+source "$(dirname "$0")/_lib/setup-fastlane.sh"
 
 # Sign as a smoke check on the codesign chain, but skip notarization —
 # this binary has no embedded runtime (built with FORKPRESS_RUNTIME_BUNDLE=

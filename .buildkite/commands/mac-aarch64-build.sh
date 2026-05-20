@@ -26,9 +26,8 @@ FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
 echo "--- :crab: cargo build --release forkpress ($TARGET)"
 cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
 
-echo "--- :fastlane: bundle install + cert install"
-bundle install
-bundle exec fastlane set_up_signing
+# shellcheck source=_lib/setup-fastlane.sh
+source "$(dirname "$0")/_lib/setup-fastlane.sh"
 
 # Sign before the e2e so the test exercises the same hardened-runtime
 # binary the artifact upload ships.
