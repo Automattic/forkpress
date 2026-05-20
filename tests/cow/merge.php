@@ -16839,6 +16839,7 @@ SQL);
     $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
     $db->exec('ALTER TABLE wp_posts ADD COLUMN post_author INTEGER NOT NULL DEFAULT 0');
     $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_mime_type TEXT NOT NULL DEFAULT ''");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0, user_id INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
@@ -16915,6 +16916,7 @@ SQL);
         $stmt->bindValue(':file', '2026/05/' . basename($file_path), SQLITE3_TEXT);
         $stmt->bindValue(':metadata', $attachment_metadata, SQLITE3_TEXT);
         $stmt->execute();
+        $db->exec("UPDATE wp_posts SET post_mime_type = 'image/jpeg' WHERE ID = $attachment_id");
 
         $page_content = '<!-- wp:block {"ref":' . $block_id . '} /-->' .
             '<!-- wp:image {"id":' . $attachment_id . ',"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-' . $attachment_id . '"/></figure><!-- /wp:image -->';
@@ -17134,6 +17136,7 @@ SQL);
     $db = open_db($wp_media_base);
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
     $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_mime_type TEXT NOT NULL DEFAULT ''");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->close();
     write_test_file($wp_media_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
@@ -17713,6 +17716,7 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-duplicate-b.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_duplicate_b_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("UPDATE wp_posts SET post_mime_type = 'image/jpeg' WHERE post_type = 'attachment'");
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -17728,7 +17732,7 @@ PHP);
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
     $wp_media_semantic_conflicts = (int)($wp_media_result['wordpress_semantic_validator_conflicts'] ?? 0);
-    assert_same($wp_media_semantic_conflicts, 13, 'built-in WordPress semantic validators record upload coherence conflicts');
+    assert_same($wp_media_semantic_conflicts, 17, 'built-in WordPress semantic validators record upload coherence conflicts');
     assert_same(
         (int)($wp_media_result['plugin_validator_conflicts'] ?? 0) - $wp_media_semantic_conflicts,
         17,
