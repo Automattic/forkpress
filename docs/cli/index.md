@@ -1,8 +1,8 @@
-# CLI
+# CLI commands
 
 The ForkPress CLI creates local WordPress branch previews, serves them over HTTP, exposes them as Git branches, and coordinates storage, merge, and diagnostic workflows.
 
-Start with `init`, run the preview server with `serve`, create branches, then use the Git or merge commands that match your workflow.
+Start with `forkpress init`, run the preview server with `forkpress serve`, create branches, then use the Git or merge commands that match your workflow.
 
 ## Primary flow
 

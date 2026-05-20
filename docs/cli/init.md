@@ -67,4 +67,4 @@ Production ForkPress always initializes the materialized COW strategy. The exper
 
 ## Next Steps
 
-Start previews with [`forkpress serve`](./serve.md), then create branches with [`forkpress branch create`](./branch.md#create-a-branch).
+Start previews with [`forkpress serve`](./serve.md), then create branches with [`forkpress branch create`](./branch.md#create).

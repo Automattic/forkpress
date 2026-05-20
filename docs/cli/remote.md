@@ -17,7 +17,7 @@ forkpress remote [--work-dir <path>] [--php-bin <path>] <command> [options]
 | `--work-dir <path>` | `.forkpress` | Site state directory where remote-site cache metadata is stored. |
 | `--php-bin <path>` | Embedded PHP | PHP binary used for MySQL import and branch creation helpers. |
 
-Remote-site caches live under `.forkpress/cow/remote-sites/` for production COW sites.
+`remote clone` writes its default cache and manifest under `.forkpress/cow/remote-sites/` for production COW sites. `remote add` can register an external cache path without moving it.
 
 ## Subcommands
 
