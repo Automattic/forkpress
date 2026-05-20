@@ -347,11 +347,12 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'aria-pressed'), 'out-of-band branch manager exposes active conflict filters accessibly');
         assert_true(str_contains($early_body, 'Unreviewed'), 'out-of-band branch manager labels the pending filter by review state');
         assert_true(str_contains($early_body, 'Accepted'), 'out-of-band branch manager labels the accepted filter by review state');
-        assert_true(str_contains($early_body, "['Check', 'Item', 'Summary']"), 'out-of-band branch manager keeps the conflict table to scannable columns');
-        assert_true(str_contains($early_body, 'Previous check'), 'out-of-band branch manager can move backward through the filtered review queue');
-        assert_true(str_contains($early_body, 'Next check'), 'out-of-band branch manager can move forward through the filtered review queue');
-        assert_true(str_contains($early_body, 'Conflict check \' + String(selectedIndex + 1) + \' of'), 'out-of-band branch manager labels the selected conflict check position');
+        assert_true(str_contains($early_body, "['Check', 'DB table', 'ID', 'Summary']"), 'out-of-band branch manager keeps DB table and entity IDs visible in the conflict table');
+        assert_true(str_contains($early_body, "button('Prev'"), 'out-of-band branch manager can move backward through the filtered review queue');
+        assert_true(str_contains($early_body, "button('Next'"), 'out-of-band branch manager can move forward through the filtered review queue');
+        assert_true(str_contains($early_body, 'fp-review-progress'), 'out-of-band branch manager labels the selected conflict check position compactly');
         assert_true(str_contains($early_body, 'Check for changes'), 'out-of-band branch manager exposes a clear stale-conflict refresh action near the review queue');
+        assert_true(str_contains($early_body, 'fp-toolbar-more'), 'out-of-band branch manager moves source/target/review-link actions into a compact secondary menu');
         assert_true(str_contains($early_body, 'humanConflictType'), 'out-of-band branch manager translates internal conflict type labels before rendering them');
         assert_true(str_contains($early_body, '.fp-buttons .fp-conflict-meta'), 'out-of-band branch manager keeps inline action labels from stretching mobile controls');
         assert_true(str_contains($early_body, 'overflow-x: auto'), 'out-of-band branch manager keeps mobile conflict actions compact');

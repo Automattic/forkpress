@@ -2106,9 +2106,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table-layout: fixed;
         width: 100%;
     }
-    .fp-conflict-table th:nth-child(1), .fp-conflict-table td:nth-child(1) { width: 86px; }
-    .fp-conflict-table th:nth-child(2), .fp-conflict-table td:nth-child(2) { width: 32%; }
-    .fp-conflict-table th:nth-child(3), .fp-conflict-table td:nth-child(3) { width: auto; }
+    .fp-conflict-table th:nth-child(1), .fp-conflict-table td:nth-child(1) { width: 74px; }
+    .fp-conflict-table th:nth-child(2), .fp-conflict-table td:nth-child(2) { width: 20%; }
+    .fp-conflict-table th:nth-child(3), .fp-conflict-table td:nth-child(3) { width: 25%; }
+    .fp-conflict-table th:nth-child(4), .fp-conflict-table td:nth-child(4) { width: auto; }
     .fp-conflict-table th {
         background: #f6f7f7;
         border-bottom: 1px solid var(--line);
@@ -2149,6 +2150,57 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-conflict-table .fp-table-primary { -webkit-line-clamp: 3; }
     .fp-conflict-table .fp-table-muted { -webkit-line-clamp: 2; }
+    .fp-review-progress {
+        align-items: center;
+        color: var(--muted);
+        display: inline-flex;
+        font-size: 12px;
+        font-weight: 700;
+        min-height: 32px;
+        padding: 0 2px;
+        white-space: nowrap;
+    }
+    .fp-toolbar-more {
+        position: relative;
+    }
+    .fp-toolbar-more summary {
+        align-items: center;
+        background: #fff;
+        border: 1px solid #8c8f94;
+        border-radius: 6px;
+        color: var(--ink);
+        cursor: pointer;
+        display: inline-flex;
+        font-size: 13px;
+        font-weight: 600;
+        list-style: none;
+        min-height: 32px;
+        padding: 6px 10px;
+    }
+    .fp-toolbar-more summary::-webkit-details-marker { display: none; }
+    .fp-toolbar-more[open] summary {
+        border-color: var(--accent);
+        color: var(--accent-strong);
+    }
+    .fp-toolbar-more-body {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, .14);
+        display: grid;
+        gap: 6px;
+        padding: 8px;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 6px);
+        width: 220px;
+        z-index: 5;
+    }
+    .fp-toolbar-more-body .fp-button,
+    .fp-toolbar-more-body button {
+        justify-content: flex-start;
+        width: 100%;
+    }
     .fp-conflict-details {
         display: grid;
         gap: 10px;
@@ -3230,6 +3282,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             });
         }));
     }
+    function appendReviewMoreActions(container, source, target) {
+        var details = document.createElement('details');
+        details.className = 'fp-toolbar-more';
+        details.appendChild(textNode('summary', '', 'More'));
+        var body = document.createElement('div');
+        body.className = 'fp-toolbar-more-body';
+        appendBranchPreviewLinks(body, source, target);
+        appendReviewLinkAction(body);
+        details.appendChild(body);
+        container.appendChild(details);
+    }
     function button(label, fn, extraClass) {
         var b = document.createElement('button');
         b.type = 'button';
@@ -3278,10 +3341,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         wrap.className = 'fp-summary-chips';
         if (flow) wrap.appendChild(textNode('span', 'fp-chip strong', flow));
         if (summary && summary.total !== undefined) {
-            wrap.appendChild(textNode('span', 'fp-chip', 'merge result exists'));
-            wrap.appendChild(textNode('span', 'fp-chip warn', String(conflictUnreviewedCount(summary)) + ' unreviewed checks'));
-            wrap.appendChild(textNode('span', 'fp-chip', String(conflictAcceptedCount(summary)) + ' accepted checks'));
-            wrap.appendChild(textNode('span', 'fp-chip', String(summary.total || 0) + ' conflict checks'));
+            var total = Number(summary.total || 0);
+            var unreviewed = conflictUnreviewedCount(summary);
+            var accepted = conflictAcceptedCount(summary);
+            wrap.appendChild(textNode('span', 'fp-chip warn', String(unreviewed) + ' unreviewed'));
+            if (accepted > 0) wrap.appendChild(textNode('span', 'fp-chip ok', String(accepted) + ' accepted'));
+            wrap.appendChild(textNode('span', 'fp-chip', String(total) + ' checks'));
         }
         conflictSummaryText.appendChild(wrap);
     }
@@ -3667,7 +3732,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table.className = 'fp-conflict-table';
         var thead = document.createElement('thead');
         var header = document.createElement('tr');
-        ['Check', 'Item', 'Summary'].forEach(function (label) {
+        ['Check', 'DB table', 'ID', 'Summary'].forEach(function (label) {
             header.appendChild(textNode('th', '', label));
         });
         thead.appendChild(header);
@@ -3686,9 +3751,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 { className: 'fp-table-primary', text: '#' + String(record.id || '') },
                 { className: 'fp-table-muted', text: conflictStateText(record) }
             ]);
-            appendTableCell(row, 'Item', [
-                { className: 'fp-table-primary', text: context.identifier ? context.entityLabel + ': ' + context.identifier : context.entityLabel },
-                { className: 'fp-table-muted', text: [context.table && context.column ? context.table + '.' + context.column : context.table, context.field].filter(Boolean).join(' / ') }
+            appendTableCell(row, 'DB table', [
+                { className: 'fp-table-primary', text: context.table || context.entityType || '(none)' },
+                { className: 'fp-table-muted', text: context.column || context.field || '' }
+            ]);
+            appendTableCell(row, 'ID', [
+                { className: 'fp-table-primary', text: context.identifier || '(unknown)' },
+                { className: 'fp-table-muted', text: context.entityLabel }
             ]);
             appendTableCell(row, 'Summary', [
                 { className: 'fp-table-primary', text: context.context || details || '(no context)' },
@@ -3905,8 +3974,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         }
         if (!list.length) {
             conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
-            appendBranchPreviewLinks(conflictActions, source, target);
-            appendReviewLinkAction(conflictActions);
+            appendReviewMoreActions(conflictActions, source, target);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflict checks found for this revision.'));
             return;
         }
@@ -3916,8 +3984,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             selectedConflictId = null;
             syncReviewUrl();
             conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
-            appendBranchPreviewLinks(conflictActions, source, target);
-            appendReviewLinkAction(conflictActions);
+            appendReviewMoreActions(conflictActions, source, target);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No ' + conflictFilterLabel(selectedConflictFilter) + ' match this filter.'));
             return;
         }
@@ -3927,25 +3994,24 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var selected = filteredList.find(function (record) { return String(record.id || '') === String(selectedConflictId); }) || filteredList[0];
         syncReviewUrl();
         var selectedIndex = filteredList.indexOf(selected);
-        var previous = button('Previous check', function () {
+        var previous = button('Prev', function () {
             var prior = filteredList[Math.max(0, selectedIndex - 1)];
             if (prior) setSelectedConflict(payload, prior);
         });
         previous.disabled = selectedIndex <= 0;
-        var next = button('Next check', function () {
+        var next = button('Next', function () {
             var following = filteredList[Math.min(filteredList.length - 1, selectedIndex + 1)];
             if (following) setSelectedConflict(payload, following);
         });
         next.disabled = selectedIndex >= filteredList.length - 1;
         conflictActions.appendChild(previous);
+        conflictActions.appendChild(textNode('span', 'fp-review-progress', String(selectedIndex + 1) + ' of ' + String(filteredList.length)));
         conflictActions.appendChild(next);
-        conflictActions.appendChild(textNode('span', 'fp-conflict-meta', 'Conflict check ' + String(selectedIndex + 1) + ' of ' + String(filteredList.length)));
         conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
         if (Number(summary.resolved || 0) > 0) {
             conflictActions.appendChild(button('Apply reviewed choices', function () { applyReviewedConflicts(payload.run); }, 'primary'));
         }
-        appendBranchPreviewLinks(conflictActions, source, target);
-        appendReviewLinkAction(conflictActions);
+        appendReviewMoreActions(conflictActions, source, target);
         var reviewGrid = document.createElement('div');
         reviewGrid.className = 'fp-conflict-review-grid';
         reviewGrid.appendChild(renderConflictTable(payload, filteredList));
