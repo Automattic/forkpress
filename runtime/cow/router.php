@@ -1972,6 +1972,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         padding: 12px 14px;
     }
     .fp-bottom-actions {
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
         margin-left: auto;
         position: relative;
     }
@@ -1983,6 +1987,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         border-radius: 6px;
         min-height: 32px;
         padding: 6px 10px;
+        white-space: nowrap;
+    }
+    .fp-bottom-actions details.fp-actions[open] summary {
+        border-color: var(--accent);
+        color: var(--accent-strong);
     }
     .fp-bottom-actions .fp-actions-body {
         background: #fff;
@@ -2020,8 +2029,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-conflicts {
         display: grid;
         gap: 10px;
+        grid-template-rows: auto minmax(0, 1fr);
         min-height: 0;
         min-width: 0;
+        overflow: hidden;
     }
     .fp-conflict-workbench {
         display: none;
@@ -2039,6 +2050,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         min-height: 0;
         overflow: hidden;
         padding: 10px 12px;
+    }
+    body.fp-reviewing .fp-conflict-workbench-body {
+        overflow: auto;
+        overscroll-behavior: contain;
     }
     .fp-filterbar {
         align-items: center;
@@ -2066,14 +2081,15 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         margin-left: 4px;
     }
     .fp-conflict-review-grid {
-        align-items: start;
+        align-items: stretch;
         display: grid;
         gap: 12px;
         grid-template-columns: minmax(560px, 1.35fr) minmax(300px, .75fr);
         min-height: 0;
         min-width: 0;
+        overflow: hidden;
     }
-    .fp-conflict-review-grid > * { min-width: 0; }
+    .fp-conflict-review-grid > * { min-height: 0; min-width: 0; }
     .fp-conflict-table-wrap {
         border: 1px solid var(--line);
         border-radius: 6px;
@@ -2146,6 +2162,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-conflict-inspector {
         max-height: none;
         overflow: auto;
+    }
+    #fp-conflict-inspector-slot {
+        min-height: 0;
+        overflow: hidden;
     }
     .fp-conflict-inspector-empty {
         background: #f6f7f7;
@@ -2281,7 +2301,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         }
         .fp-bottom-body { grid-template-columns: 1fr; overflow: visible; }
         .fp-bottom-primary { grid-column: auto; }
-        .fp-bottom-actions { margin-left: 0; }
+        .fp-bottom-actions { margin-left: 0; width: 100%; }
+        .fp-bottom-actions .fp-actions { flex: 1 1 100%; }
         .fp-bottom-actions details.fp-actions summary { width: 100%; }
         .fp-bottom-actions .fp-actions-body { position: static; width: 100%; box-shadow: none; }
         .fp-conflict-review-grid { grid-template-columns: 1fr; }
@@ -2400,14 +2421,19 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     <div class="fp-muted" id="fp-workbench-mode" aria-live="polite">Select a branch, revision, or merge event.</div>
                 </div>
                 <section class="fp-bottom-actions">
-                <details class="fp-actions" aria-label="Branch creation and merge actions">
-                    <summary>Create / merge</summary>
+                <details class="fp-actions" id="fp-fork-actions" aria-label="Fork a branch from the selected context">
+                    <summary>Fork from here</summary>
                     <div class="fp-actions-body">
                         <form class="fp-form" id="fp-create">
                             <div class="fp-field"><label for="fp-create-name">New branch</label><input id="fp-create-name" name="branch" pattern="[A-Za-z0-9_-]{1,63}" autocomplete="off" required></div>
                             <div class="fp-field"><label for="fp-create-from">From</label><select id="fp-create-from" name="from"></select></div>
                             <button class="primary" type="submit">Create branch</button>
                         </form>
+                    </div>
+                </details>
+                <details class="fp-actions" id="fp-merge-actions" aria-label="Merge the selected revision branch">
+                    <summary>Merge this revision</summary>
+                    <div class="fp-actions-body">
                         <form class="fp-form" id="fp-merge">
                             <div class="fp-field"><label for="fp-merge-source">Source</label><select id="fp-merge-source" name="source"></select></div>
                             <div class="fp-field"><label for="fp-merge-target">Target</label><select id="fp-merge-target" name="target"></select></div>
@@ -2464,6 +2490,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var status = document.getElementById('fp-status');
     var current = document.getElementById('fp-current');
     var adminLink = document.getElementById('fp-admin-link');
+    var forkActions = document.getElementById('fp-fork-actions');
+    var mergeActions = document.getElementById('fp-merge-actions');
     var createForm = document.getElementById('fp-create');
     var mergeForm = document.getElementById('fp-merge');
     var createName = document.getElementById('fp-create-name');
@@ -2557,6 +2585,45 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var firstNonMain = state.branches.find(function (item) { return item.name !== 'main'; });
         optionList(mergeSource, state.currentBranch === 'main' && firstNonMain ? firstNonMain.name : state.currentBranch);
         optionList(mergeTarget, 'main');
+    }
+    function setSelectValue(select, value) {
+        value = String(value || '');
+        if (!select || !value) return;
+        Array.prototype.slice.call(select.options || []).forEach(function (option) {
+            option.selected = option.value === value;
+        });
+    }
+    function selectedContextRun() {
+        return selectedRunId ? runById(selectedRunId) : null;
+    }
+    function selectedContextBranch() {
+        var run = selectedContextRun();
+        if (run) return String(run.target_branch || run.source_branch || state.currentBranch || 'main');
+        return String(state.currentBranch || 'main');
+    }
+    function configureForkAction() {
+        setSelectValue(createFrom, selectedContextBranch());
+        createName.focus();
+    }
+    function configureMergeAction() {
+        var run = selectedContextRun();
+        var firstNonMain = state.branches.find(function (item) { return item.name !== 'main'; });
+        var source = selectedContextBranch();
+        var target = 'main';
+        if (run && isMergeRun(run)) {
+            source = String(run.source_branch || source);
+            target = String(run.target_branch || target);
+        } else if (source === 'main' && firstNonMain) {
+            source = firstNonMain.name;
+        }
+        setSelectValue(mergeSource, source);
+        setSelectValue(mergeTarget, target);
+        mergeSource.focus();
+    }
+    function closeActionDetails(except) {
+        [forkActions, mergeActions].forEach(function (node) {
+            if (node && node !== except) node.open = false;
+        });
     }
     function svg(tag, attrs) {
         var el = document.createElementNS('http://www.w3.org/2000/svg', tag);
@@ -3528,7 +3595,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         noteLabel.textContent = 'Review note';
         var note = document.createElement('textarea');
         note.value = record.review_note || '';
-        note.placeholder = 'Record why this choice is correct, what still needs action, or what changed after revalidation.';
+        note.placeholder = 'Record why this choice is correct, what follow-up is needed, or what changed after revalidation.';
         noteWrap.appendChild(noteLabel);
         noteWrap.appendChild(note);
         var choiceWrap = document.createElement('div');
@@ -3554,11 +3621,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (pluginDriver) {
                 row.appendChild(button('Run plugin driver', function () { runPluginDriver(record.id, payload.run, pluginDriver.key); }, 'primary'));
             }
-            row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
+            row.appendChild(button('Flag follow-up', function () { flagConflictForFollowUp(record.id, payload.run, note.value); }));
             row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
             row.appendChild(textNode('span', 'fp-conflict-meta', (pluginDriver ? '' : ('No approved driver found for ' + String(record.plugin || 'this plugin') + '. ')) + (conflictPluginGuidance(record) || 'Use the suggested action or configure a plugin merge driver.')));
         } else if (record.id && record.lifecycle_state !== 'resolved') {
-            row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
+            row.appendChild(button('Flag follow-up', function () { flagConflictForFollowUp(record.id, payload.run, note.value); }));
             row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
             row.appendChild(button('Apply selected choice', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
         } else if (prioritizeResolutionChange) {
@@ -3825,6 +3892,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             setStatus('error', error.message || 'Could not load conflicts.');
         });
     }
+    function flagConflictForFollowUp(id, run, note) {
+        if (!String(note || '').trim()) {
+            setStatus('warn', 'Add a review note explaining the follow-up before flagging this conflict check.');
+            return Promise.resolve();
+        }
+        return reviewConflict(id, 'needs-action', run, note);
+    }
     function reviewConflict(id, value, run, note) {
         return post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function (payload) {
             setStatus('ok', payload.message || 'Conflict review updated.');
@@ -3906,6 +3980,16 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 if (payload.run && Number(payload.conflicts || 0) > 0) return loadConflicts(payload.run, { refresh: true });
             });
         }).catch(function (error) { setStatus('error', error.message || 'Merge failed.'); }).then(function () { setButtonBusy(submit, false); });
+    });
+    forkActions.addEventListener('toggle', function () {
+        if (!forkActions.open) return;
+        closeActionDetails(forkActions);
+        configureForkAction();
+    });
+    mergeActions.addEventListener('toggle', function () {
+        if (!mergeActions.open) return;
+        closeActionDetails(mergeActions);
+        configureMergeAction();
     });
     document.getElementById('fp-refresh').addEventListener('click', loadTree);
     document.getElementById('fp-focus-selected').addEventListener('click', scrollSelectedRunIntoView);

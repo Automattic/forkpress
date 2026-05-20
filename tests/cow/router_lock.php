@@ -395,8 +395,17 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'No approved driver found'), 'out-of-band branch manager explains plugin conflicts without configured drivers');
         assert_true(str_contains($early_body, 'function runPluginDriver'), 'out-of-band branch manager can run approved plugin drivers from conflict review');
         assert_true(str_contains($early_body, 'Run the approved plugin driver'), 'out-of-band branch manager confirms before running plugin driver automation');
-        assert_true(str_contains($early_body, 'Create / merge'), 'out-of-band branch manager keeps create and merge actions available without over-promoting them');
-        assert_true(str_contains($early_body, 'Branch creation and merge actions'), 'out-of-band branch manager labels collapsed branch actions accessibly');
+        assert_true(str_contains($early_body, 'Fork from here'), 'out-of-band branch manager exposes branch creation as a direct contextual action');
+        assert_true(str_contains($early_body, 'Merge this revision'), 'out-of-band branch manager exposes branch merging as a direct contextual action');
+        assert_true(str_contains($early_body, 'Fork a branch from the selected context'), 'out-of-band branch manager labels the fork action accessibly');
+        assert_true(str_contains($early_body, 'Merge the selected revision branch'), 'out-of-band branch manager labels the merge action accessibly');
+        assert_true(str_contains($early_body, 'function configureForkAction'), 'out-of-band branch manager points fork actions at the selected branch context');
+        assert_true(str_contains($early_body, 'function configureMergeAction'), 'out-of-band branch manager points merge actions at the selected revision context');
+        assert_true(str_contains($early_body, 'function closeActionDetails'), 'out-of-band branch manager keeps one branch action popover open at a time');
+        assert_true(str_contains($early_body, 'Flag follow-up'), 'out-of-band branch manager gives needs-action review state a clearer user action');
+        assert_true(str_contains($early_body, 'Add a review note explaining the follow-up'), 'out-of-band branch manager requires context before flagging follow-up work');
+        assert_true(str_contains($early_body, 'body.fp-reviewing .fp-conflict-workbench-body'), 'out-of-band branch manager gives conflict review panes their own scroll container');
+        assert_true(str_contains($early_body, 'overscroll-behavior: contain'), 'out-of-band branch manager keeps conflict-pane scrolling contained');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
 
         flock($lock, LOCK_UN);
