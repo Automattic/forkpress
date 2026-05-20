@@ -165,6 +165,11 @@ $fqdb = getenv('FORKPRESS_TEST_FQDB');
 if (is_string($fqdb) && $fqdb !== '' && !defined('FQDB')) {
     define('FQDB', $fqdb);
 }
+if (getenv('FORKPRESS_TEST_PREDEFINE_SQLITE_IDENTIFIER') === '1' && !function_exists('forkpress_cow_sqlite_identifier')) {
+    function forkpress_cow_sqlite_identifier(string $name): string {
+        return '"' . str_replace('"', '""', $name) . '"';
+    }
+}
 
 $async = getenv('FORKPRESS_TEST_ASYNC') !== '0';
 $_SERVER = [
@@ -172,6 +177,10 @@ $_SERVER = [
     'HTTP_ACCEPT' => $async ? 'application/json' : 'text/html',
     'REQUEST_URI' => '/wp-admin/',
 ];
+$forwarded_proto = getenv('FORKPRESS_TEST_FORWARDED_PROTO');
+if (is_string($forwarded_proto) && $forwarded_proto !== '') {
+    $_SERVER['HTTP_X_FORWARDED_PROTO'] = $forwarded_proto;
+}
 if ($async) {
     $_SERVER['HTTP_X_FORKPRESS_ASYNC'] = '1';
 }
@@ -305,6 +314,18 @@ function decode_branch_ui_payload(array $result): array {
     return is_array($payload) ? $payload : [];
 }
 
+$predeclared_helper_admin_page = run_branch_ui_action(
+    ['action' => 'forkpress_branch_admin_page'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_PREDEFINE_SQLITE_IDENTIFIER' => '1']
+);
+$predeclared_helper_payload = decode_branch_ui_payload($predeclared_helper_admin_page);
+assert_same($predeclared_helper_admin_page['status'], 0, 'branch manager plugin loads when router already declared shared SQLite helpers');
+assert_true(str_contains($predeclared_helper_payload['html'] ?? '', '/_forkpress/branches'), 'branch manager plugin still renders admin page after shared helper predeclaration');
+
 $create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'feature'],
     ['main', 'feature']
@@ -314,12 +335,29 @@ assert_same($create['status'], 0, 'branch create admin action exits cleanly');
 assert_same($create_payload['success'] ?? null, true, 'branch create admin action returns JSON success');
 assert_same($create_payload['message'] ?? null, 'Created branch new_feature.', 'branch create admin action reports the created branch');
 assert_same($create_payload['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create admin action redirects to the new branch admin');
+assert_same($create_payload['branches'][0]['name'] ?? null, 'new_feature', 'branch create response marks the new branch as current in refreshed switcher data');
+assert_same($create_payload['branches'][0]['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create response gives the new branch a usable admin URL');
+assert_same($create_payload['branches'][1]['url'] ?? null, 'http://wp.localhost:18080/wp-admin/', 'branch create response gives main its own admin URL');
+assert_same($create_payload['branches'][2]['url'] ?? null, 'http://feature.wp.localhost:18080/wp-admin/', 'branch create response keeps existing branch URLs distinct');
 assert_same(count($create['argv']), 1, 'branch create admin action invokes ForkPress CLI once');
 assert_same(
     array_slice($create['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'create', 'new_feature', '--from', 'feature'],
     'branch create admin action uses safe branch birth CLI path'
 );
+
+$forwarded_create = run_branch_ui_action(
+    ['action' => 'forkpress_branch_create', 'branch' => 'forwarded_feature', 'from' => 'feature'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_FORWARDED_PROTO' => 'https']
+);
+$forwarded_create_payload = decode_branch_ui_payload($forwarded_create);
+assert_same($forwarded_create['status'], 0, 'branch create respects forwarded HTTPS proxy headers');
+assert_same($forwarded_create_payload['url'] ?? null, 'https://forwarded_feature.wp.localhost:18080/wp-admin/', 'branch create returns HTTPS branch admin URL behind a proxy');
+assert_same($forwarded_create_payload['branches'][1]['url'] ?? null, 'https://wp.localhost:18080/wp-admin/', 'branch create returns HTTPS main URL behind a proxy');
 
 $non_async_create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'no_async_feature', 'from' => 'feature'],
@@ -407,6 +445,9 @@ assert_same($tree_payload['message'] ?? null, 'Loaded 1 branch tree edge.', 'bra
 assert_same($tree_payload['recordCount'] ?? null, 1, 'branch tree admin action reports record count');
 assert_same($tree_payload['records'][0]['source_branch'] ?? null, 'feature', 'branch tree admin action exposes source branch');
 assert_same($tree_payload['records'][0]['target_branch'] ?? null, 'main', 'branch tree admin action exposes target branch');
+assert_same($tree_payload['records'][0]['conflictSummary']['total'] ?? null, 3, 'branch tree admin action includes conflict totals for fast graph badges');
+assert_same($tree_payload['records'][0]['conflictSummary']['unresolved'] ?? null, 3, 'branch tree admin action seeds unresolved conflict count without extra audits');
+assert_same($tree_payload['records'][0]['conflictSummary']['estimated'] ?? null, true, 'branch tree admin action marks seeded conflict summaries as estimated');
 assert_same($tree_payload['treeCommand'] ?? null, 'forkpress branch tree --limit 5 --format json', 'branch tree admin action exposes the matching CLI command');
 assert_same(count($tree['argv']), 1, 'branch tree admin action invokes ForkPress CLI once');
 assert_same(
@@ -414,6 +455,43 @@ assert_same(
     ['branch', '--work-dir', $work_dir, 'tree', '--limit', '5', '--format', 'json'],
     'branch tree admin action uses audited branch tree CLI path'
 );
+
+$metadata_db = $tmp . '/metadata.sqlite';
+$metadata = new SQLite3($metadata_db);
+$metadata->exec('CREATE TABLE merge_conflicts (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL)');
+$metadata->exec('CREATE TABLE merge_conflict_events (id INTEGER PRIMARY KEY, conflict_id INTEGER NOT NULL, lifecycle_state TEXT NOT NULL)');
+$metadata->exec('CREATE TABLE merge_resolutions (id INTEGER PRIMARY KEY, conflict_id INTEGER NOT NULL, applied INTEGER NOT NULL)');
+$metadata->exec('INSERT INTO merge_conflicts (id, run_id) VALUES (1, 42), (2, 42), (3, 42)');
+$metadata->exec("INSERT INTO merge_conflict_events (id, conflict_id, lifecycle_state) VALUES (1, 1, 'resolved'), (2, 2, 'unreviewed')");
+$metadata->exec('INSERT INTO merge_resolutions (id, conflict_id, applied) VALUES (1, 3, 1)');
+$metadata->close();
+$tree_with_metadata_json = json_encode([
+    'metadata_db' => $metadata_db,
+    'runs' => [
+        [
+            'id' => 42,
+            'source_branch' => 'feature',
+            'target_branch' => 'main',
+            'status' => 'completed_with_conflicts',
+            'decision_count' => 9,
+            'conflict_count' => 3,
+            'finished_at' => '2026-05-18 12:00:00',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+$tree_with_metadata = run_branch_ui_action(
+    ['action' => 'forkpress_branch_tree', 'limit' => '5'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $tree_with_metadata_json]
+);
+$tree_with_metadata_payload = decode_branch_ui_payload($tree_with_metadata);
+assert_same($tree_with_metadata_payload['records'][0]['conflictSummary']['total'] ?? null, 3, 'branch tree admin action reads conflict summary totals from metadata');
+assert_same($tree_with_metadata_payload['records'][0]['conflictSummary']['resolved'] ?? null, 2, 'branch tree admin action reads resolved conflict counts from metadata');
+assert_same($tree_with_metadata_payload['records'][0]['conflictSummary']['unresolved'] ?? null, 1, 'branch tree admin action reads unresolved conflict counts from metadata');
+assert_same(isset($tree_with_metadata_payload['records'][0]['conflictSummary']['estimated']), false, 'branch tree admin action does not mark metadata-backed conflict summaries as estimated');
 
 $conflicted_merge_output = "forkpress: merged feature into main\\n  run:       42\\n  status:    completed_with_conflicts\\n  applied:   yes\\n  conflicts: 3\\n";
 $conflicted_merge = run_branch_ui_action(
@@ -554,6 +632,17 @@ assert_same(
     'branch conflict review admin action records a first-class merge review note'
 );
 
+$custom_conflict_review = run_branch_ui_action(
+    ['action' => 'forkpress_branch_review_conflict', 'conflict' => '7', 'run' => '42', 'status' => 'needs-action', 'note' => 'Check the source value with the editor before applying.'],
+    ['main', 'feature']
+);
+assert_same($custom_conflict_review['status'], 0, 'branch conflict review accepts editable notes');
+assert_same(
+    array_slice($custom_conflict_review['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-review', 'conflict', '7', '--status', 'needs-action', '--note', 'Check the source value with the editor before applying.', '--reviewer', 'wordpress-ui'],
+    'branch conflict review passes editable branch-manager notes to the CLI'
+);
+
 $invalid_conflict_review = run_branch_ui_action(
     ['action' => 'forkpress_branch_review_conflict', 'conflict' => '7', 'status' => 'done'],
     ['main', 'feature']
@@ -576,6 +665,35 @@ assert_same(
     array_slice($conflict_resolution['argv'][0] ?? [], 1),
     ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'source', '--apply', '--note', 'Applied source choice from the WordPress branch switcher.', '--reviewer', 'wordpress-ui'],
     'branch conflict resolution admin action applies a first-class merge resolution'
+);
+
+$custom_conflict_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'target', 'note' => 'Keep the production copy because the source branch is stale.'],
+    ['main', 'feature']
+);
+assert_same($custom_conflict_resolution['status'], 0, 'branch conflict resolution accepts editable notes');
+assert_same(
+    array_slice($custom_conflict_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'target', '--apply', '--note', 'Keep the production copy because the source branch is stale.', '--reviewer', 'wordpress-ui'],
+    'branch conflict resolution passes editable branch-manager notes to the CLI'
+);
+
+$change_applied_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'target', 'replaceApplied' => '1', 'note' => 'Switch the already applied resolution back to target.'],
+    ['main', 'feature']
+);
+$change_applied_resolution_payload = decode_branch_ui_payload($change_applied_resolution);
+assert_same($change_applied_resolution_payload['success'] ?? null, true, 'branch conflict resolution can request an applied-resolution change');
+assert_same($change_applied_resolution_payload['replaceApplied'] ?? null, true, 'branch conflict resolution reports applied-resolution replacement mode');
+assert_same(
+    $change_applied_resolution_payload['message'] ?? null,
+    'Changed conflict #7 to target.',
+    'branch conflict resolution explains applied-resolution replacement'
+);
+assert_same(
+    array_slice($change_applied_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'target', '--apply', '--replace-applied', '--note', 'Switch the already applied resolution back to target.', '--reviewer', 'wordpress-ui'],
+    'branch conflict resolution passes replace-applied mode to the CLI'
 );
 
 $invalid_conflict_resolution = run_branch_ui_action(
@@ -649,6 +767,14 @@ $mixed_conflict_resolution = run_branch_ui_action(
 $mixed_conflict_resolution_payload = decode_branch_ui_payload($mixed_conflict_resolution);
 assert_same($mixed_conflict_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects mixed choice and apply-reviewed');
 assert_same(count($mixed_conflict_resolution['argv']), 0, 'branch conflict resolution rejects mixed apply modes before invoking CLI');
+
+$mixed_replace_applied_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'applyReviewed' => '1', 'replaceApplied' => '1'],
+    ['main', 'feature']
+);
+$mixed_replace_applied_resolution_payload = decode_branch_ui_payload($mixed_replace_applied_resolution);
+assert_same($mixed_replace_applied_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects mixed apply-reviewed and replace-applied');
+assert_same(count($mixed_replace_applied_resolution['argv']), 0, 'branch conflict resolution rejects replace-applied apply modes before invoking CLI');
 
 $after_revalidate_resolution = run_branch_ui_action(
     ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'source', 'afterRevalidate' => '1'],
@@ -830,9 +956,11 @@ $revalidation = run_branch_ui_action(
 $revalidation_payload = decode_branch_ui_payload($revalidation);
 assert_same($revalidation_payload['success'] ?? null, true, 'branch conflict revalidation returns JSON success');
 assert_same($revalidation_payload['type'] ?? null, 'warning', 'branch conflict revalidation returns warning type');
+assert_same($revalidation_payload['message'] ?? null, 'Checked merge run 42 for changes: 4 checked, 2 changed, 1 unchanged.', 'branch conflict change check uses clear user-facing wording');
 assert_same($revalidation_payload['checked'] ?? null, 4, 'branch conflict revalidation exposes checked count');
 assert_same($revalidation_payload['stale'] ?? null, 2, 'branch conflict revalidation exposes stale count');
 assert_same($revalidation_payload['carried'] ?? null, 1, 'branch conflict revalidation exposes carried count');
+assert_same($revalidation_payload['changeCheck']['checked'] ?? null, 4, 'branch conflict change check exposes structured change-check details');
 assert_same(
     $revalidation_payload['auditCommand'] ?? null,
     'forkpress branch merge-audit --revalidate --run 42 --reviewer wordpress-ui --format json',
@@ -1020,7 +1148,7 @@ $invalid_revalidation = run_branch_ui_action(
 );
 $invalid_revalidation_payload = decode_branch_ui_payload($invalid_revalidation);
 assert_same($invalid_revalidation_payload['success'] ?? null, false, 'branch conflict revalidation rejects invalid run ids');
-assert_same($invalid_revalidation_payload['message'] ?? null, 'Choose a merge run to revalidate.', 'branch conflict revalidation explains invalid run ids');
+assert_same($invalid_revalidation_payload['message'] ?? null, 'Choose a merge run to check for changes.', 'branch conflict revalidation explains invalid run ids');
 assert_same(count($invalid_revalidation['argv']), 0, 'branch conflict revalidation does not invoke CLI for invalid run ids');
 
 $invalid_apply_reviewed = run_branch_ui_action(
@@ -1042,7 +1170,7 @@ $invalid_revalidation_json = run_branch_ui_action(
 );
 $invalid_revalidation_json_payload = decode_branch_ui_payload($invalid_revalidation_json);
 assert_same($invalid_revalidation_json_payload['success'] ?? null, false, 'branch conflict revalidation rejects invalid CLI JSON');
-assert_same($invalid_revalidation_json_payload['message'] ?? null, 'ForkPress returned invalid revalidation JSON.', 'branch conflict revalidation explains invalid CLI JSON');
+assert_same($invalid_revalidation_json_payload['message'] ?? null, 'ForkPress returned invalid conflict change-check JSON.', 'branch conflict revalidation explains invalid CLI JSON');
 
 $invalid_json_audit = run_branch_ui_action(
     ['action' => 'forkpress_branch_conflicts', 'run' => '42'],
@@ -1148,7 +1276,8 @@ $switcher_render = run_branch_ui_action(
 $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
 assert_true(str_contains($switcher_html, 'Open branch manager'), 'branch switcher links to the full branch manager page');
-assert_true(str_contains($switcher_html, '/wp-admin/admin.php?page=forkpress-branches'), 'branch switcher uses the wp-admin branch manager URL');
+assert_true(str_contains($switcher_html, '/_forkpress/branches'), 'branch switcher uses the out-of-band branch manager URL');
+assert_true(str_contains($switcher_html, "window.location.assign(payload.url)"), 'branch switcher navigates to the new branch after create');
 assert_true(str_contains($switcher_html, 'forkpress_branch_history'), 'branch switcher renders branch history action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_history'), 'branch switcher renders branch history nonce');
 assert_true(str_contains($switcher_html, 'Show merge history'), 'branch switcher renders branch history button text');
@@ -1180,6 +1309,8 @@ assert_true(str_contains($switcher_html, "fetchConflictAudit(run, payload.messag
 assert_true(str_contains($switcher_html, 'forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_revalidate_conflicts'), 'branch switcher renders conflict revalidation nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictRevalidation'), 'branch switcher renders conflict revalidation client handler');
+assert_true(str_contains($switcher_html, 'Check for changes'), 'branch switcher labels conflict rechecks without internal validation wording');
+assert_true(str_contains($switcher_html, 'Checked conflicts for changes.'), 'branch switcher reports conflict rechecks without internal validation wording');
 assert_true(str_contains($switcher_html, 'forkpress_branch_review_conflict'), 'branch switcher renders conflict review action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_review_conflict'), 'branch switcher renders conflict review nonce');
 assert_true(str_contains($switcher_html, 'function fetchConflictReview'), 'branch switcher renders conflict review client handler');
@@ -1191,11 +1322,14 @@ assert_true(str_contains($switcher_html, 'function fetchConflictResolution'), 'b
 assert_true(str_contains($switcher_html, 'function conflictResolutionChoiceAvailable'), 'branch switcher checks conflict resolution availability');
 assert_true(str_contains($switcher_html, 'function conflictApplyReviewedAvailable'), 'branch switcher checks apply-reviewed availability');
 assert_true(str_contains($switcher_html, 'function conflictResolutionAfterRevalidate'), 'branch switcher detects after-revalidate resolution guards');
+assert_true(str_contains($switcher_html, 'function conflictResolutionChangeAvailable'), 'branch switcher detects replace-applied resolution guards');
 assert_true(str_contains($switcher_html, 'Use source'), 'branch switcher renders source resolution action');
 assert_true(str_contains($switcher_html, 'Keep target'), 'branch switcher renders target resolution action');
+assert_true(str_contains($switcher_html, 'Change applied resolution'), 'branch switcher renders applied-resolution change action');
 assert_true(str_contains($switcher_html, 'Apply reviewed'), 'branch switcher renders apply-reviewed action');
 assert_true(str_contains($switcher_html, "body.append('applyReviewed', '1')"), 'branch switcher sends apply-reviewed resolution payloads');
 assert_true(str_contains($switcher_html, "body.append('afterRevalidate', '1')"), 'branch switcher sends after-revalidate resolution payloads');
+assert_true(str_contains($switcher_html, "body.append('replaceApplied', '1')"), 'branch switcher sends replace-applied resolution payloads');
 assert_true(str_contains($switcher_html, 'forkpress_branch_apply_reviewed_conflicts'), 'branch switcher renders reviewed-resolution apply action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_apply_reviewed_conflicts'), 'branch switcher renders reviewed-resolution apply nonce');
 assert_true(str_contains($switcher_html, 'function fetchApplyReviewedConflicts'), 'branch switcher renders reviewed-resolution apply client handler');
@@ -1204,6 +1338,7 @@ assert_true(str_contains($switcher_html, 'function conflictPluginMeta'), 'branch
 assert_true(str_contains($switcher_html, 'record.plugin_object'), 'branch switcher renders plugin conflict object metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_severity'), 'branch switcher renders plugin conflict severity metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_validator'), 'branch switcher renders plugin conflict validator metadata');
+assert_true(str_contains($switcher_html, 'plugin check: '), 'branch switcher labels plugin validator metadata as plugin checks');
 assert_true(str_contains($switcher_html, 'function conflictPluginGuidance'), 'branch switcher renders plugin conflict guidance metadata');
 assert_true(str_contains($switcher_html, 'record.plugin_resolution_policy'), 'branch switcher renders plugin conflict resolution policy');
 assert_true(str_contains($switcher_html, 'record.plugin_suggested_action'), 'branch switcher renders plugin conflict suggested action');
@@ -1224,59 +1359,10 @@ $admin_page_html = (string)($admin_page_payload['html'] ?? '');
 $admin_page_menus = $admin_page_payload['menus'] ?? [];
 assert_same($admin_page['status'], 0, 'branch manager admin page renders cleanly');
 assert_true(str_contains($admin_page_html, '<h1>ForkPress Branches</h1>'), 'branch manager admin page has a wp-admin page title');
-assert_true(str_contains($admin_page_html, 'action="\/wp-admin\/admin-post.php"') || str_contains($admin_page_html, 'action="/wp-admin/admin-post.php"'), 'branch manager admin page posts to admin-post.php');
-assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_create"'), 'branch manager admin page renders create form action');
-assert_true(str_contains($admin_page_html, 'id="forkpress-branch-create-name"'), 'branch manager admin page renders branch name input');
-assert_true(str_contains($admin_page_html, 'name="from"'), 'branch manager admin page renders source branch selector for creates');
-assert_true(str_contains($admin_page_html, 'name="action" value="forkpress_branch_merge"'), 'branch manager admin page renders merge form action');
-assert_true(str_contains($admin_page_html, 'name="source"'), 'branch manager admin page renders merge source selector');
-assert_true(str_contains($admin_page_html, 'name="target"'), 'branch manager admin page renders merge target selector');
-assert_true(str_contains($admin_page_html, 'id="forkpress-branch-history-load"'), 'branch manager admin page renders merge history button');
-assert_true(str_contains($admin_page_html, 'id="forkpress-branch-tree-load"'), 'branch manager admin page renders branch tree button');
-assert_true(str_contains($admin_page_html, 'forkpress_branch_history'), 'branch manager admin page renders merge history action');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_history'), 'branch manager admin page renders merge history nonce');
-assert_true(str_contains($admin_page_html, 'forkpress_branch_tree'), 'branch manager admin page renders branch tree action');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_tree'), 'branch manager admin page renders branch tree nonce');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-history-list'), 'branch manager admin page renders merge history list target');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-tree-list'), 'branch manager admin page renders branch tree list target');
-assert_true(str_contains($admin_page_html, "source + ' -> ' + target"), 'branch manager admin page renders source-to-target history rows');
-assert_true(str_contains($admin_page_html, "target + ' <- ' + branches[target].join(', ')"), 'branch manager admin page renders target-to-source branch tree rows');
-assert_true(str_contains($admin_page_html, 'forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit action');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_conflicts'), 'branch manager admin page renders conflict audit nonce');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-review-conflicts'), 'branch manager admin page renders conflict drilldown buttons');
-assert_true(str_contains($admin_page_html, 'function fetchConflicts'), 'branch manager admin page renders conflict drilldown fetch handler');
-assert_true(str_contains($admin_page_html, 'function renderConflicts'), 'branch manager admin page renders conflict drilldown display handler');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-list'), 'branch manager admin page renders conflict list target');
-assert_true(str_contains($admin_page_html, 'forkpress-branch-conflict-actions'), 'branch manager admin page renders conflict action controls');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_review_conflict'), 'branch manager admin page renders conflict review nonce');
-assert_true(str_contains($admin_page_html, 'nonce-forkpress_branch_resolve_conflict'), 'branch manager admin page renders conflict resolution nonce');
-assert_true(str_contains($admin_page_html, 'function fetchConflictReview'), 'branch manager admin page renders conflict review handler');
-assert_true(str_contains($admin_page_html, 'function fetchConflictResolution'), 'branch manager admin page renders conflict resolution handler');
-assert_true(str_contains($admin_page_html, 'function conflictResolutionChoiceAvailable'), 'branch manager admin page checks conflict resolution availability');
-assert_true(str_contains($admin_page_html, 'function conflictApplyReviewedAvailable'), 'branch manager admin page checks apply-reviewed availability');
-assert_true(str_contains($admin_page_html, 'Use source'), 'branch manager admin page renders source resolution action');
-assert_true(str_contains($admin_page_html, 'Keep target'), 'branch manager admin page renders target resolution action');
-assert_true(str_contains($admin_page_html, 'Apply reviewed'), 'branch manager admin page renders apply-reviewed action');
+assert_true(str_contains($admin_page_html, 'Open ForkPress branch manager'), 'wp-admin branch page links to the out-of-band manager');
+assert_true(str_contains($admin_page_html, '/_forkpress/branches'), 'wp-admin branch page points at the out-of-band manager URL');
+assert_true(!str_contains($admin_page_html, 'id="forkpress-branch-create-name"'), 'wp-admin branch page no longer owns branch creation UI');
 assert_same($admin_page_menus[0]['menu_slug'] ?? null, 'forkpress-branches', 'branch manager registers a wp-admin menu page');
-
-$admin_page_with_driver = run_branch_ui_action(
-    ['action' => 'forkpress_branch_admin_page'],
-    ['main', 'feature'],
-    false,
-    true,
-    true,
-    ['FORKPRESS_PLUGIN_MERGE_DRIVERS' => json_encode(['forkpress-plugin-graph' => realpath($plugin_driver)], JSON_UNESCAPED_SLASHES)]
-);
-$admin_page_with_driver_payload = decode_branch_ui_payload($admin_page_with_driver);
-$admin_page_with_driver_html = (string)($admin_page_with_driver_payload['html'] ?? '');
-assert_same($admin_page_with_driver['status'], 0, 'branch manager admin page with plugin driver renders cleanly');
-assert_true(str_contains($admin_page_with_driver_html, 'forkpress_branch_run_plugin_driver'), 'branch manager admin page renders plugin driver action');
-assert_true(str_contains($admin_page_with_driver_html, 'nonce-forkpress_branch_run_plugin_driver'), 'branch manager admin page renders plugin driver nonce');
-assert_true(str_contains($admin_page_with_driver_html, 'pluginDrivers'), 'branch manager admin page exposes approved plugin driver metadata');
-assert_true(str_contains($admin_page_with_driver_html, $driver_key), 'branch manager admin page exposes the approved plugin driver key');
-assert_true(str_contains($admin_page_with_driver_html, 'function driverForConflict'), 'branch manager admin page renders plugin driver matching helper');
-assert_true(str_contains($admin_page_with_driver_html, 'function fetchPluginDriver'), 'branch manager admin page renders plugin driver client handler');
-assert_true(str_contains($admin_page_with_driver_html, 'Run plugin driver'), 'branch manager admin page renders plugin driver button text');
 
 $forbidden = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'main'],

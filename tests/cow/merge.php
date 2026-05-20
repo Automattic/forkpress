@@ -218,6 +218,63 @@ try {
         'independent target cell preservation is auditable'
     );
 
+    $replace_base = $tmp . '/replace-applied-base.sqlite';
+    $replace_source = $tmp . '/replace-applied-source.sqlite';
+    $replace_target = $tmp . '/replace-applied-target.sqlite';
+    $replace_metadata = $tmp . '/.forkpress/cow/merge/replace-applied-metadata.sqlite';
+    create_base_db($replace_base);
+    copy($replace_base, $replace_source);
+    copy($replace_base, $replace_target);
+    $db = open_db($replace_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source conflict content' WHERE ID = 1");
+    $db->close();
+    $db = open_db($replace_target);
+    $db->exec("UPDATE wp_posts SET post_content = 'Target conflict content' WHERE ID = 1");
+    $db->close();
+    $replace_result = cow_merge_databases($replace_base, $replace_source, $replace_target, $replace_metadata, 'feature-replace-resolution', 'main');
+    assert_same($replace_result['status'], 'completed_with_conflicts', 'conflicting cell edits are audited before applied-resolution replacement');
+    $replace_conflict_id = (int)scalar($replace_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_content' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    $replace_source_resolution = cow_merge_resolve_conflict(
+        $replace_metadata,
+        $replace_conflict_id,
+        'source',
+        true,
+        'Apply source before changing the applied resolution.',
+        'cow-test'
+    );
+    assert_same($replace_source_resolution['status'], 'applied', 'source cell conflict resolution applies normally');
+    assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Source conflict content', 'source cell resolution mutates the target cell');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($replace_metadata, $replace_conflict_id, 'target', true, 'Changing without explicit replace should fail.', 'cow-test'),
+        'already resolved',
+        'applied cell conflict resolution cannot be changed without an explicit replace flag'
+    );
+    $replace_target_resolution = cow_merge_resolve_conflict(
+        $replace_metadata,
+        $replace_conflict_id,
+        'target',
+        true,
+        'Change the already applied resolution back to target.',
+        'cow-test',
+        false,
+        true
+    );
+    assert_same($replace_target_resolution['status'], 'applied', 'replace-applied cell conflict resolution records applied status');
+    assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Target conflict content', 'replace-applied cell resolution can restore the audited target value');
+    assert_same(
+        (int)scalar($replace_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $replace_conflict_id AND applied = 1"),
+        2,
+        'replace-applied cell conflict keeps both applied resolution records'
+    );
+    $db = open_db($replace_target);
+    $db->exec("UPDATE wp_posts SET post_content = 'Manual post-resolution edit' WHERE ID = 1");
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($replace_metadata, $replace_conflict_id, 'source', true, 'Do not overwrite later target drift.', 'cow-test', false, true),
+        'target cell no longer matches the latest applied resolution',
+        'replace-applied cell resolution refuses to overwrite target drift'
+    );
+
     $volatile_base = $tmp . '/volatile-usermeta-base.sqlite';
     $volatile_source = $tmp . '/volatile-usermeta-source.sqlite';
     $volatile_target = $tmp . '/volatile-usermeta-target.sqlite';
@@ -16782,6 +16839,7 @@ SQL);
     $db->exec('ALTER TABLE wp_posts ADD COLUMN post_parent INTEGER NOT NULL DEFAULT 0');
     $db->exec('ALTER TABLE wp_posts ADD COLUMN post_author INTEGER NOT NULL DEFAULT 0');
     $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_mime_type TEXT NOT NULL DEFAULT ''");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->exec('CREATE TABLE wp_comments (comment_ID INTEGER PRIMARY KEY AUTOINCREMENT, comment_post_ID INTEGER NOT NULL, comment_content TEXT NOT NULL, comment_parent INTEGER NOT NULL DEFAULT 0, user_id INTEGER NOT NULL DEFAULT 0)');
     $db->exec('CREATE TABLE wp_commentmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, comment_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
@@ -16858,6 +16916,7 @@ SQL);
         $stmt->bindValue(':file', '2026/05/' . basename($file_path), SQLITE3_TEXT);
         $stmt->bindValue(':metadata', $attachment_metadata, SQLITE3_TEXT);
         $stmt->execute();
+        $db->exec("UPDATE wp_posts SET post_mime_type = 'image/jpeg' WHERE ID = $attachment_id");
 
         $page_content = '<!-- wp:block {"ref":' . $block_id . '} /-->' .
             '<!-- wp:image {"id":' . $attachment_id . ',"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img class="wp-image-' . $attachment_id . '"/></figure><!-- /wp:image -->';
@@ -17077,6 +17136,7 @@ SQL);
     $db = open_db($wp_media_base);
     $db->exec("ALTER TABLE wp_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'post'");
     $db->exec("ALTER TABLE wp_posts ADD COLUMN guid TEXT NOT NULL DEFAULT ''");
+    $db->exec("ALTER TABLE wp_posts ADD COLUMN post_mime_type TEXT NOT NULL DEFAULT ''");
     $db->exec('CREATE TABLE wp_postmeta (meta_id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL, meta_key TEXT NOT NULL, meta_value TEXT NOT NULL)');
     $db->close();
     write_test_file($wp_media_base_root . '/wp-content/mu-plugins/forkpress-merge-validator.php', <<<'PHP'
@@ -17656,6 +17716,7 @@ PHP);
     $stmt->bindValue(':file', '2026/05/source-duplicate-b.jpg', SQLITE3_TEXT);
     $stmt->bindValue(':metadata', $wp_media_duplicate_b_metadata, SQLITE3_TEXT);
     $stmt->execute();
+    $db->exec("UPDATE wp_posts SET post_mime_type = 'image/jpeg' WHERE post_type = 'attachment'");
     $db->close();
     $wp_media_result = cow_merge_branch_state(
         $wp_media_base,
@@ -17671,7 +17732,7 @@ PHP);
     assert_same($wp_media_result['status'], 'completed_with_conflicts', 'WordPress media validator holds missing generated upload files for review');
     assert_same((int)($wp_media_result['plugin_validators'] ?? 0), 1, 'WordPress media validator is discovered from mu-plugins during merge');
     $wp_media_semantic_conflicts = (int)($wp_media_result['wordpress_semantic_validator_conflicts'] ?? 0);
-    assert_same($wp_media_semantic_conflicts, 13, 'built-in WordPress semantic validators record upload coherence conflicts');
+    assert_same($wp_media_semantic_conflicts, 17, 'built-in WordPress semantic validators record upload coherence conflicts');
     assert_same(
         (int)($wp_media_result['plugin_validator_conflicts'] ?? 0) - $wp_media_semantic_conflicts,
         17,

@@ -531,7 +531,7 @@ $invalid_revalidation = router_branch_action_request(
     ['action' => 'forkpress_branch_revalidate_conflicts', 'run' => 'abc']
 );
 assert_same($invalid_revalidation['status'], 400, 'async router branch conflict revalidation rejects invalid run ids before CLI');
-assert_same($invalid_revalidation['json']['message'] ?? null, 'Choose a merge run to revalidate.', 'async router branch conflict revalidation explains invalid run ids');
+assert_same($invalid_revalidation['json']['message'] ?? null, 'Choose a merge run to check for changes.', 'async router branch conflict revalidation explains invalid run ids');
 assert_true(!str_contains($invalid_revalidation['body'], 'WORDPRESS'), 'invalid async router branch conflict revalidation does not reach WordPress admin-post');
 
 $invalid_apply_reviewed = router_branch_action_request(
