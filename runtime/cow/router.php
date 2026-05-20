@@ -169,6 +169,19 @@ function forkpress_cow_branch_post_value(string $key): string {
     return trim((string)$value);
 }
 
+function forkpress_cow_branch_post_has_value(string $key): bool {
+    $value = $_POST[$key] ?? $_REQUEST[$key] ?? null;
+    return $value !== null && !is_array($value);
+}
+
+function forkpress_cow_branch_post_raw_value(string $key): string {
+    $value = $_POST[$key] ?? $_REQUEST[$key] ?? '';
+    if (is_array($value)) {
+        return '';
+    }
+    return (string)$value;
+}
+
 function forkpress_cow_branch_post_int(string $key): ?int {
     $value = $_POST[$key] ?? $_REQUEST[$key] ?? '';
     if (is_array($value)) {
@@ -467,7 +480,9 @@ function forkpress_cow_branch_conflict_report_from_metadata(string $branches_dir
             $row['run_id'] = (int)($row['run_id'] ?? 0);
             $row['latest_resolution_id'] = isset($row['latest_resolution_id']) ? (int)$row['latest_resolution_id'] : null;
             $row['latest_resolution_applied'] = isset($row['latest_resolution_applied']) ? (int)$row['latest_resolution_applied'] : 0;
-            $row['resolution_choices'] = ['source', 'target'];
+            $row['resolution_choices'] = ((string)($row['conflict_type'] ?? '') === 'cell-conflict' && (string)($row['table_name'] ?? '') !== '__plugins__')
+                ? ['source', 'target', 'custom']
+                : ['source', 'target'];
             $conflicts[] = $row;
         }
         $rows->finalize();
@@ -1547,24 +1562,42 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         $replace_applied = forkpress_cow_branch_post_value('replaceApplied') === '1';
         $after_revalidate = forkpress_cow_branch_post_value('afterRevalidate') === '1';
         $choice = forkpress_cow_branch_post_value('choice');
+        $custom_value = forkpress_cow_branch_post_raw_value('customValue');
+        $has_custom_value = forkpress_cow_branch_post_has_value('customValue');
         if ($apply_reviewed && $choice !== '') {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'Apply reviewed cannot be combined with a new source or target choice.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Apply reviewed cannot be combined with a new source, target, or custom choice.');
+            return true;
+        }
+        if ($apply_reviewed && $custom_value !== '') {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Apply reviewed cannot be combined with a custom value.');
             return true;
         }
         if ($apply_reviewed && $replace_applied) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution requires a new source or target choice.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution requires a new source, target, or custom choice.');
             return true;
         }
         if ($apply_reviewed && $after_revalidate) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'Checking again requires a source or target choice.');
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Checking again requires a source, target, or custom choice.');
             return true;
         }
         if ($replace_applied && $after_revalidate) {
             forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution cannot be combined with checking again.');
             return true;
         }
-        if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
-            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose source or target for the conflict resolution.');
+        if (!$apply_reviewed && !in_array($choice, ['source', 'target', 'custom'], true)) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Choose source, target, or custom for the conflict resolution.');
+            return true;
+        }
+        if (!$apply_reviewed && $choice === 'custom' && !$has_custom_value) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Enter a custom value for the conflict resolution.');
+            return true;
+        }
+        if (!$apply_reviewed && $choice === 'custom' && str_contains($custom_value, "\0")) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Custom conflict values cannot contain NUL bytes.');
+            return true;
+        }
+        if (!$apply_reviewed && $choice !== 'custom' && $has_custom_value && $custom_value !== '') {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Custom values can only be used with the custom conflict resolution choice.');
             return true;
         }
 
@@ -1607,6 +1640,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         $notes = [
             'source' => 'Applied source choice from the WordPress branch switcher.',
             'target' => 'Applied target choice from the WordPress branch switcher.',
+            'custom' => 'Applied custom value from the WordPress branch switcher.',
             'reviewed' => 'Applied reviewed choice from the WordPress branch switcher.',
         ];
         $resolve_args = [
@@ -1620,6 +1654,10 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         } else {
             $resolve_args[] = '--choice';
             $resolve_args[] = $choice;
+            if ($choice === 'custom') {
+                $resolve_args[] = '--custom-value';
+                $resolve_args[] = $custom_value;
+            }
             $resolve_args[] = '--apply';
             if ($after_revalidate) {
                 $resolve_args[] = '--after-revalidate';
@@ -1648,6 +1686,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
                 'run' => $run,
                 'conflict' => $conflict,
                 'resolutionChoice' => $apply_reviewed ? 'reviewed' : $choice,
+                'customValue' => $choice === 'custom' ? $custom_value : null,
                 'afterRevalidate' => $after_revalidate,
                 'replaceApplied' => $replace_applied,
             ]
@@ -3856,7 +3895,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         return choices.indexOf('source') !== -1 && choices.indexOf('target') !== -1;
     }
     function conflictResolutionAppliedLabel(record) {
-        if (!record || !record.latest_resolution_id) return 'Current applied resolution can be changed by selecting source or target.';
+        if (!record || !record.latest_resolution_id) return 'Current applied resolution can be changed by selecting source, target, or a custom value.';
         return 'Current applied resolution #' + String(record.latest_resolution_id) + ' used ' + conflictChoiceLabel(record.latest_resolution_choice || '') + '.';
     }
     function appendConflictPill(parent, text, tone) {
@@ -4070,12 +4109,25 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         (Array.isArray(record.resolution_choices) ? record.resolution_choices : ['source', 'target']).forEach(function (value) {
             var option = document.createElement('option');
             option.value = value;
-            option.textContent = value === 'source' ? 'Use source value' : (value === 'target' ? 'Keep target value' : value);
+            option.textContent = value === 'source' ? 'Use source value' : (value === 'target' ? 'Keep target value' : (value === 'custom' ? 'Enter custom value' : value));
             option.selected = record.latest_resolution_choice === value;
             choice.appendChild(option);
         });
         choiceWrap.appendChild(choiceLabel);
         choiceWrap.appendChild(choice);
+        var customWrap = document.createElement('div');
+        customWrap.className = 'fp-conflict-note';
+        var customLabel = document.createElement('label');
+        customLabel.textContent = 'Custom value';
+        var customValue = document.createElement('textarea');
+        customValue.placeholder = 'Use this when neither branch value is correct.';
+        customWrap.appendChild(customLabel);
+        customWrap.appendChild(customValue);
+        function updateCustomValueVisibility() {
+            customWrap.style.display = choice.value === 'custom' ? '' : 'none';
+        }
+        choice.addEventListener('change', updateCustomValueVisibility);
+        updateCustomValueVisibility();
         var row = document.createElement('div');
         row.className = 'fp-buttons fp-conflict-action-row';
         var controls = document.createElement('div');
@@ -4091,9 +4143,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             }
             if (!pluginDriver) row.appendChild(textNode('span', 'fp-conflict-meta', pluginDriverMissingMessage(record)));
         } else if (record.id && record.lifecycle_state !== 'resolved') {
-            row.appendChild(button('Apply selected choice', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
+            row.appendChild(button('Apply selected choice', function () { resolveConflict(record.id, choice.value, payload.run, note.value, false, false, customValue.value); }, 'primary'));
         } else if (prioritizeResolutionChange) {
-            row.appendChild(button('Change applied resolution', function () { resolveConflict(record.id, choice.value, payload.run, note.value, false, true); }, 'primary'));
+            row.appendChild(button('Change applied resolution', function () { resolveConflict(record.id, choice.value, payload.run, note.value, false, true, customValue.value); }, 'primary'));
             row.appendChild(textNode('span', 'fp-conflict-meta', conflictResolutionAppliedLabel(record)));
         } else if (record.id && Number(record.latest_resolution_applied || 0) === 1) {
             row.appendChild(textNode('span', 'fp-conflict-meta', 'Resolved; changing this conflict type requires a fresh merge audit.'));
@@ -4117,10 +4169,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             }
         } else if (prioritizeResolutionChange) {
             controls.appendChild(choiceWrap);
+            controls.appendChild(customWrap);
             scrollBody.appendChild(disclosure('Resolution note', noteWrap, false));
             scrollBody.appendChild(disclosure('Compare values', values, true));
         } else {
             controls.appendChild(choiceWrap);
+            controls.appendChild(customWrap);
             scrollBody.appendChild(disclosure('Resolution note', noteWrap, false));
             scrollBody.appendChild(disclosure('Compare values', values, true));
         }
@@ -4357,9 +4411,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             setStatus('error', error.message || 'Could not load conflicts.');
         });
     }
-    function resolveConflict(id, choice, run, note, applyReviewed, replaceApplied) {
+    function resolveConflict(id, choice, run, note, applyReviewed, replaceApplied, customValue) {
         if (replaceApplied && !window.confirm('Change the already-applied resolution for conflict #' + String(id || '') + '?')) return;
-        return post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function (payload) {
+        return post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', customValue: customValue || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function (payload) {
             setStatus('ok', payload.message || 'Conflict resolution applied.');
             return refreshAfterConflictAction(run);
         }).catch(function (error) { setStatus('error', error.message); });

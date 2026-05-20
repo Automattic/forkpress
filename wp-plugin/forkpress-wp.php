@@ -710,6 +710,22 @@ function forkpress_branch_post_value(string $key): string {
     return function_exists('sanitize_text_field') ? sanitize_text_field($value) : (preg_replace('/[^a-zA-Z0-9_\-]/', '', $value) ?? '');
 }
 
+function forkpress_branch_post_has_value(string $key): bool {
+    $value = $_POST[$key] ?? null;
+    return $value !== null && !is_array($value);
+}
+
+function forkpress_branch_post_raw_value(string $key): string {
+    $value = $_POST[$key] ?? '';
+    if (function_exists('wp_unslash')) {
+        $value = wp_unslash($value);
+    }
+    if (is_array($value)) {
+        return '';
+    }
+    return (string) $value;
+}
+
 function forkpress_branch_post_int(string $key): ?int {
     $value = $_POST[$key] ?? '';
     if (function_exists('wp_unslash')) {
@@ -1829,20 +1845,34 @@ function forkpress_handle_branch_resolve_conflict(): void {
     $replace_applied = forkpress_branch_post_value('replaceApplied') === '1';
     $after_revalidate = forkpress_branch_post_value('afterRevalidate') === '1';
     $choice = forkpress_branch_post_value('choice');
+    $custom_value = forkpress_branch_post_raw_value('customValue');
+    $has_custom_value = forkpress_branch_post_has_value('customValue');
     if ($apply_reviewed && $choice !== '') {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Apply reviewed cannot be combined with a new source or target choice.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Apply reviewed cannot be combined with a new source, target, or custom choice.');
+    }
+    if ($apply_reviewed && $custom_value !== '') {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Apply reviewed cannot be combined with a custom value.');
     }
     if ($apply_reviewed && $replace_applied) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution requires a new source or target choice.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution requires a new source, target, or custom choice.');
     }
     if ($apply_reviewed && $after_revalidate) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Checking again requires a source or target choice.');
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Checking again requires a source, target, or custom choice.');
     }
     if ($replace_applied && $after_revalidate) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution cannot be combined with checking again.');
     }
-    if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose source or target for the conflict resolution.');
+    if (!$apply_reviewed && !in_array($choice, ['source', 'target', 'custom'], true)) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose source, target, or custom for the conflict resolution.');
+    }
+    if (!$apply_reviewed && $choice === 'custom' && !$has_custom_value) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Enter a custom value for the conflict resolution.');
+    }
+    if (!$apply_reviewed && $choice === 'custom' && str_contains($custom_value, "\0")) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Custom conflict values cannot contain NUL bytes.');
+    }
+    if (!$apply_reviewed && $choice !== 'custom' && $has_custom_value && $custom_value !== '') {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Custom values can only be used with the custom conflict resolution choice.');
     }
 
     $review_note = forkpress_branch_post_value('note');
@@ -1880,6 +1910,7 @@ function forkpress_handle_branch_resolve_conflict(): void {
     $notes = [
         'source' => 'Applied source choice from the WordPress branch switcher.',
         'target' => 'Applied target choice from the WordPress branch switcher.',
+        'custom' => 'Applied custom value from the WordPress branch switcher.',
         'reviewed' => 'Applied reviewed choice from the WordPress branch switcher.',
     ];
     $resolve_args = [
@@ -1893,6 +1924,10 @@ function forkpress_handle_branch_resolve_conflict(): void {
     } else {
         $resolve_args[] = '--choice';
         $resolve_args[] = $choice;
+        if ($choice === 'custom') {
+            $resolve_args[] = '--custom-value';
+            $resolve_args[] = $custom_value;
+        }
         $resolve_args[] = '--apply';
         if ($after_revalidate) {
             $resolve_args[] = '--after-revalidate';
@@ -1919,6 +1954,7 @@ function forkpress_handle_branch_resolve_conflict(): void {
             'run' => $run,
             'conflict' => $conflict,
             'resolutionChoice' => $apply_reviewed ? 'reviewed' : $choice,
+            'customValue' => $choice === 'custom' ? $custom_value : null,
             'afterRevalidate' => $after_revalidate,
             'replaceApplied' => $replace_applied,
         ]
