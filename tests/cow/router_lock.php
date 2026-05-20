@@ -248,9 +248,11 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'laneActivity'), 'out-of-band branch manager computes finite branch lifetimes from revision rows');
         assert_true(str_contains($early_body, 'branchForkParents'), 'out-of-band branch manager infers branch fork parents for timeline rendering');
         assert_true(str_contains($early_body, 'isBranchForkRun'), 'out-of-band branch manager treats branch setup rows as fork points');
-        assert_true(str_contains($early_body, 'fp-lane-end'), 'out-of-band branch manager renders branch line end caps');
+        assert_true(str_contains($early_body, 'fp-lane-boundary'), 'out-of-band branch manager renders branch line boundaries as ticks, not extra revision dots');
         assert_true(str_contains($early_body, 'fp-timeline-merge'), 'out-of-band branch manager renders merge curves between lanes');
         assert_true(str_contains($early_body, 'marker-end'), 'out-of-band branch manager renders merge direction arrows into the target branch');
+        assert_true(str_contains($early_body, 'arrowEndX'), 'out-of-band branch manager points merge arrows at the target revision node edge');
+        assert_true(str_contains($early_body, 'badgeWidth'), 'out-of-band branch manager renders conflict counts as badges rather than extra revision nodes');
         assert_true(str_contains($early_body, 'merge into'), 'out-of-band branch manager labels merge revisions by target branch');
         assert_true(str_contains($early_body, 'fp-row-title'), 'out-of-band branch manager renders revisions as timeline rows');
         assert_true(str_contains($early_body, 'sortedRunEntries'), 'out-of-band branch manager sorts real revision records, not one row per branch');
@@ -258,6 +260,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'interleaved timeline revisions / newest first'), 'out-of-band branch manager labels interleaved revision timeline direction');
         assert_true(str_contains($early_body, 'seedConflictSummaries'), 'out-of-band branch manager seeds conflict summaries without extra conflict audits');
         assert_true(str_contains($early_body, 'selectedRunId'), 'out-of-band branch manager keeps the selected revision synced after conflict audits load');
+        assert_true(str_contains($early_body, 'requestedRun'), 'out-of-band branch manager ignores stale conflict loads after selecting another revision');
         assert_true(str_contains($early_body, 'refreshSelectedRunConflictState'), 'out-of-band branch manager refreshes selected revision conflict totals after audit details load');
         assert_true(!str_contains($early_body, 'Promise.all(conflictRuns.map'), 'out-of-band branch manager avoids N+1 conflict audit loading');
         assert_true(str_contains($early_body, 'renderConflictLoading'), 'out-of-band branch manager renders an immediate conflict loader');
@@ -266,6 +269,9 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-conflict-workbench'), 'out-of-band branch manager renders conflicts in a full-page workbench');
         assert_true(str_contains($early_body, 'fp-conflict-review-grid'), 'out-of-band branch manager keeps conflict table and inspector on one screen');
         assert_true(str_contains($early_body, 'fp-conflict-inspector'), 'out-of-band branch manager renders one selected conflict inspector instead of every detail card');
+        assert_true(str_contains($early_body, 'setSelectedConflict'), 'out-of-band branch manager changes selected conflicts without rerendering the whole workbench');
+        assert_true(str_contains($early_body, 'fp-conflict-inspector-slot'), 'out-of-band branch manager has a stable selected-conflict inspector slot');
+        assert_true(!str_contains($early_body, 'Review conflicts'), 'out-of-band branch manager auto-loads conflicts instead of requiring a separate review button');
         assert_true(str_contains($early_body, 'function renderConflictTable'), 'out-of-band branch manager renders conflict summaries as an entity table');
         assert_true(str_contains($early_body, 'function conflictEntityContext'), 'out-of-band branch manager normalizes conflict entity context for review');
         assert_true(str_contains($early_body, 'entityContext'), 'out-of-band branch manager receives enriched conflict entity context from audits');

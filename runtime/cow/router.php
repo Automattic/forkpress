@@ -1710,17 +1710,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-row-hit:hover { fill: transparent; stroke: #cfe7ff; }
     .fp-timeline-lane { fill: none; stroke-linecap: round; stroke-width: 4; }
     .fp-timeline-fork { fill: none; stroke-linecap: round; stroke-width: 4; }
-    .fp-timeline-merge { fill: none; stroke-linecap: round; stroke-width: 4.5; }
+    .fp-timeline-merge { fill: none; stroke-linecap: round; stroke-width: 3; }
     .fp-timeline-merge.is-conflict { stroke: var(--conflict); stroke-dasharray: 7 5; }
     .fp-timeline-merge.is-resolved { stroke: var(--ok); }
     .fp-row-divider { stroke: #f0f0f1; stroke-width: 1; }
     .fp-row-title { fill: #1d2327; font-size: 12px; font-weight: 700; pointer-events: none; }
     .fp-row-meta { fill: #646970; font-size: 11px; pointer-events: none; }
-    .fp-lane-cap { fill: #fff; stroke-width: 2.5; }
-    .fp-lane-end { fill: #f6f7f7; stroke-width: 2; }
+    .fp-lane-boundary { stroke-linecap: round; stroke-width: 2; opacity: .76; }
     .fp-lane-label { fill: #50575e; font-size: 10px; font-weight: 700; pointer-events: none; }
-    .fp-branch-pill { fill: #f6f7f7; stroke: #dcdcde; stroke-width: 1; }
-    .fp-branch-pill-text { fill: #50575e; font-size: 10px; font-weight: 650; pointer-events: none; }
     .fp-node { cursor: pointer; stroke: #fff; stroke-width: 3; }
     .fp-node.is-current { stroke: #1d2327; stroke-width: 4; }
     .fp-node.is-conflict { fill: var(--conflict); }
@@ -1840,17 +1837,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         align-items: start;
         display: grid;
         gap: 12px;
-        grid-template-columns: minmax(540px, 1.05fr) minmax(360px, .95fr);
+        grid-template-columns: minmax(520px, 1.08fr) minmax(360px, .92fr);
     }
     .fp-conflict-table-wrap {
         border: 1px solid var(--line);
         border-radius: 6px;
-        max-height: 36vh;
+        max-height: 34vh;
         overflow: auto;
     }
     .fp-conflict-table {
         border-collapse: collapse;
-        min-width: 980px;
+        table-layout: fixed;
         width: 100%;
     }
     .fp-conflict-table th {
@@ -1877,6 +1874,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         vertical-align: top;
     }
     .fp-conflict-table tbody tr:hover { background: #f6fbff; }
+    .fp-conflict-table tbody tr { cursor: pointer; }
     .fp-conflict-table tbody tr.is-selected { background: #eaf4ff; box-shadow: inset 3px 0 0 var(--accent); }
     .fp-table-primary { font-weight: 700; }
     .fp-table-muted {
@@ -1884,6 +1882,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         font-size: 11px;
         margin-top: 3px;
     }
+    .fp-conflict-table .fp-table-primary,
+    .fp-conflict-table .fp-table-muted {
+        display: -webkit-box;
+        overflow: hidden;
+        -webkit-box-orient: vertical;
+    }
+    .fp-conflict-table .fp-table-primary { -webkit-line-clamp: 3; }
+    .fp-conflict-table .fp-table-muted { -webkit-line-clamp: 2; }
     .fp-conflict-details {
         display: grid;
         gap: 10px;
@@ -1897,7 +1903,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         padding: 9px;
     }
     .fp-conflict-inspector {
-        max-height: 42vh;
+        max-height: 38vh;
         overflow: auto;
     }
     .fp-conflict-inspector-empty {
@@ -1991,8 +1997,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         .fp-conflict-grid { grid-template-columns: 1fr; }
     }
     body.fp-reviewing .fp-layout { gap: 10px; padding: 10px; }
-    body.fp-reviewing .fp-graph-wrap { height: min(30vh, 330px); min-height: 220px; }
-    body.fp-reviewing .fp-conflict-table-wrap { max-height: 32vh; }
+    body.fp-reviewing .fp-layout { grid-template-columns: 1fr; }
+    body.fp-reviewing .fp-side { display: none; }
+    body.fp-reviewing .fp-graph-wrap { height: min(24vh, 240px); min-height: 190px; }
+    body.fp-reviewing .fp-conflict-table-wrap,
+    body.fp-reviewing .fp-conflict-inspector { max-height: 36vh; }
 </style>
 </head>
 <body>
@@ -2054,6 +2063,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     <h2 id="fp-conflict-title">Conflict Review</h2>
                     <div class="fp-muted" id="fp-conflict-summary">Select a conflicting revision to inspect entity-level details.</div>
                 </div>
+                <div class="fp-buttons" id="fp-conflict-actions"></div>
             </div>
             <div class="fp-conflict-workbench-body">
                 <div class="fp-conflicts" id="fp-conflicts"></div>
@@ -2073,6 +2083,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var conflictWorkbench = document.getElementById('fp-conflict-workbench');
     var conflictTitle = document.getElementById('fp-conflict-title');
     var conflictSummaryText = document.getElementById('fp-conflict-summary');
+    var conflictActions = document.getElementById('fp-conflict-actions');
     var conflicts = document.getElementById('fp-conflicts');
     var raw = document.getElementById('fp-raw');
     var status = document.getElementById('fp-status');
@@ -2109,6 +2120,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         document.body.classList.remove('fp-reviewing');
         conflictWorkbench.className = 'fp-panel fp-conflict-workbench';
         conflicts.innerHTML = '';
+        conflictActions.innerHTML = '';
         conflictSummaryText.textContent = 'Select a conflicting revision to inspect entity-level details.';
     }
     function post(action, fields) {
@@ -2260,16 +2272,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (when) parts.push(when);
         return parts.filter(Boolean).join('  ·  ');
     }
-    function drawPill(text, x, y, color, layer) {
-        var parent = layer || graph;
-        var width = Math.max(46, Math.min(150, 14 + String(text).length * 6.3));
-        var rect = svg('rect', { x: x, y: y - 12, width: width, height: 18, rx: 9, class: 'fp-branch-pill', stroke: color });
-        var label = svg('text', { x: x + 8, y: y + 1, class: 'fp-branch-pill-text' });
-        label.textContent = text.length > 20 ? text.slice(0, 18) + '...' : text;
-        parent.appendChild(rect);
-        parent.appendChild(label);
-        return width;
-    }
     function laneActivity(entries, lanes) {
         var activity = {};
         var forkParents = branchForkParents(entries);
@@ -2333,14 +2335,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var entries = sortedRunEntries();
         var lanes = laneNames(entries);
         var forkParents = branchForkParents(entries);
-        var graphLeft = 58;
-        var laneGap = 48;
+        var graphLeft = 44;
+        var laneGap = 30;
         var graphWidth = Math.max(1, lanes.length) * laneGap;
-        var textX = graphLeft + graphWidth + 46;
-        var top = 42;
-        var rowGap = 50;
-        var rowHeight = 44;
-        var width = Math.max(980, textX + 620);
+        var textX = graphLeft + graphWidth + 30;
+        var top = 38;
+        var rowGap = 46;
+        var rowHeight = 40;
+        var width = Math.max(900, textX + 460);
         var height = Math.max(320, top + Math.max(entries.length, 1) * rowGap + 24);
         graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
         graph.setAttribute('width', width);
@@ -2349,14 +2351,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var defs = svg('defs', {});
         var marker = svg('marker', {
             id: 'fp-merge-arrow',
-            markerHeight: 8,
-            markerWidth: 9,
+            markerHeight: 5,
+            markerWidth: 6,
             orient: 'auto',
-            refX: 8,
-            refY: 4,
-            viewBox: '0 0 9 8'
+            refX: 5.5,
+            refY: 2.5,
+            viewBox: '0 0 6 5'
         });
-        marker.appendChild(svg('path', { d: 'M 0 0 L 9 4 L 0 8 z', fill: '#1d2327' }));
+        marker.appendChild(svg('path', { d: 'M 0 0 L 6 2.5 L 0 5 z', fill: '#50575e' }));
         defs.appendChild(marker);
         graph.appendChild(defs);
         var rowLayer = svg('g', { class: 'fp-row-layer' });
@@ -2387,10 +2389,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 stroke: color,
                 opacity: name === 'main' ? '.72' : '.58'
             }));
-            var cap = svg('circle', { cx: x[name], cy: startY, r: 4, class: 'fp-lane-cap', stroke: color });
+            var cap = svg('line', { x1: x[name] - 5, x2: x[name] + 5, y1: startY, y2: startY, class: 'fp-lane-boundary', stroke: color });
             cap.appendChild(svg('title', {})).textContent = name + ' latest visible revision';
             nodeLayer.appendChild(cap);
-            var end = svg('circle', { cx: x[name], cy: endY, r: 4, class: 'fp-lane-end', stroke: color });
+            var end = svg('line', { x1: x[name] - 5, x2: x[name] + 5, y1: endY, y2: endY, class: 'fp-lane-boundary', stroke: color });
             end.appendChild(svg('title', {})).textContent = name + ' oldest visible revision';
             nodeLayer.appendChild(end);
             if (span.first < 6) {
@@ -2428,8 +2430,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             }
             if (isMerge) {
                 var bend = Math.max(32, Math.abs(tx - sx) / 2);
+                var arrowEndX = tx + (sx < tx ? -13 : 13);
+                var arrowControlX = arrowEndX + (sx < tx ? -bend : bend);
                 var mergePath = svg('path', {
-                    d: 'M ' + sx + ' ' + y + ' C ' + sx + ' ' + (y - 24) + ', ' + (tx + (sx < tx ? -bend : bend)) + ' ' + (y - 24) + ', ' + tx + ' ' + y,
+                    d: 'M ' + sx + ' ' + y + ' C ' + sx + ' ' + (y - 24) + ', ' + arrowControlX + ' ' + (y - 24) + ', ' + arrowEndX + ' ' + y,
                     class: 'fp-timeline-merge' + (visual.indexOf('is-conflict') !== -1 ? ' is-conflict' : '') + (visual.indexOf('is-resolved') !== -1 ? ' is-resolved' : ''),
                     stroke: visual.indexOf('is-conflict') !== -1 ? '#b35c00' : (visual.indexOf('is-resolved') !== -1 ? '#008a20' : sourceColor),
                     'marker-end': 'url(#fp-merge-arrow)',
@@ -2456,29 +2460,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var meta = svg('text', { x: textX, y: y + 12, class: 'fp-row-meta' });
             meta.textContent = runMeta(run);
             textLayer.appendChild(meta);
-            var pillX = textX + 260;
-            if (isFork) {
-                pillX += drawPill(forkParent, pillX, y - 7, branchColor(forkParent, lanes), textLayer) + 8;
-                var forkText = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
-                forkText.textContent = 'forks';
-                textLayer.appendChild(forkText);
-                pillX += 34;
-                drawPill(source, pillX, y - 7, sourceColor, textLayer);
-            } else {
-                var sourceLabel = isMerge ? ('from ' + source) : source;
-                pillX += drawPill(sourceLabel, pillX, y - 7, sourceColor, textLayer) + 8;
-            }
-            if (isMerge) {
-                var arrow = svg('text', { x: pillX, y: y - 6, class: 'fp-row-meta' });
-                arrow.textContent = '->';
-                textLayer.appendChild(arrow);
-                pillX += 20;
-                drawPill('target ' + target, pillX, y - 7, targetColor, textLayer);
-            }
             if (conflict.total > 0) {
-                nodeLayer.appendChild(svg('circle', { cx: tx + 16, cy: y - 17, r: 9, class: 'fp-conflict-badge' + (conflict.unresolved === 0 && hasConflictSummary(run) ? ' is-resolved' : '') }));
-                var badge = svg('text', { x: tx + 16, y: y - 13, class: 'fp-badge-text', 'text-anchor': 'middle' });
-                badge.textContent = String(conflict.unresolved === 0 && hasConflictSummary(run) ? conflict.total : conflict.unresolved);
+                var badgeText = String(conflict.unresolved === 0 && hasConflictSummary(run) ? conflict.total : conflict.unresolved);
+                var badgeWidth = Math.max(28, 14 + badgeText.length * 7);
+                var badgeX = tx + 10;
+                var badgeY = y - 27;
+                nodeLayer.appendChild(svg('rect', { x: badgeX, y: badgeY, width: badgeWidth, height: 16, rx: 5, class: 'fp-conflict-badge' + (conflict.unresolved === 0 && hasConflictSummary(run) ? ' is-resolved' : '') }));
+                var badge = svg('text', { x: badgeX + badgeWidth / 2, y: badgeY + 11, class: 'fp-badge-text', 'text-anchor': 'middle' });
+                badge.textContent = badgeText;
                 nodeLayer.appendChild(badge);
             }
             hitLayer.appendChild(svg('rect', {
@@ -2590,12 +2579,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (typeof value === 'object') value = JSON.stringify(value);
             return key + ': ' + String(value);
         }).filter(Boolean).join(' / ');
-    }
-    function shortPreview(value) {
-        var text = cleanPreview(value);
-        text = String(text || '').replace(/\s+/g, ' ').trim();
-        if (text.length > 140) return text.slice(0, 137) + '...';
-        return text;
     }
     function decodeAuditPayload(value) {
         if (value === undefined || value === null || value === '') return '';
@@ -2770,17 +2753,15 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             record.stale_status ? 'stale: ' + record.stale_status : ''
         ].filter(Boolean).join(' / ');
     }
-    function conflictValueSummary(record) {
-        if (conflictIsPluginRecord(record)) {
-            return [
-                record.plugin_reason || '',
-                record.plugin_suggested_action ? 'suggested: ' + record.plugin_suggested_action : ''
-            ].filter(Boolean).join(' / ');
-        }
-        return [
-            conflictValue(record, 'source_payload', 'source_preview') ? 'source: ' + shortPreview(conflictValue(record, 'source_payload', 'source_preview')) : '',
-            conflictValue(record, 'target_payload', 'target_preview') ? 'target: ' + shortPreview(conflictValue(record, 'target_payload', 'target_preview')) : ''
-        ].filter(Boolean).join(' / ');
+    function setSelectedConflict(payload, record) {
+        selectedConflictId = String(record && record.id || '');
+        Array.prototype.slice.call(conflicts.querySelectorAll('tr[data-conflict-id]')).forEach(function (row) {
+            row.className = row.getAttribute('data-conflict-id') === selectedConflictId ? 'is-selected' : '';
+        });
+        var slot = document.getElementById('fp-conflict-inspector-slot');
+        if (!slot) return;
+        slot.innerHTML = '';
+        slot.appendChild(renderConflictInspector(payload, record));
     }
     function renderConflictTable(payload, list) {
         var wrap = document.createElement('div');
@@ -2789,7 +2770,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table.className = 'fp-conflict-table';
         var thead = document.createElement('thead');
         var header = document.createElement('tr');
-        ['Conflict', 'Entity', 'Identifier', 'Field', 'Context', 'Values', 'Action'].forEach(function (label) {
+        ['Conflict', 'Entity', 'Identifier', 'Field', 'Context', 'State'].forEach(function (label) {
             header.appendChild(textNode('th', '', label));
         });
         thead.appendChild(header);
@@ -2798,6 +2779,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         list.forEach(function (record) {
             var context = conflictEntityContext(record);
             var row = document.createElement('tr');
+            row.setAttribute('data-conflict-id', String(record.id || ''));
             if (String(record.id || '') === String(selectedConflictId || '')) row.className = 'is-selected';
             var details = detailsText(context.details);
             appendTableCell(row, [
@@ -2821,21 +2803,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 { className: 'fp-table-muted', text: context.context && details ? details : '' }
             ]);
             appendTableCell(row, [
-                { className: 'fp-table-primary', text: conflictValueSummary(record) || '(review details below)' },
-                { className: 'fp-table-muted', text: conflictPluginMeta(record) }
+                { className: 'fp-table-primary', text: conflictStateText(record) },
+                { className: 'fp-table-muted', text: record.stale_status ? 'stale: ' + record.stale_status : '' }
             ]);
-            var actionCell = document.createElement('td');
-            var jump = button('Open', function () {
-                selectedConflictId = String(record.id || '');
-                renderConflicts(payload);
-            });
-            actionCell.appendChild(jump);
             tbody.appendChild(row);
-            row.appendChild(actionCell);
             row.addEventListener('click', function (event) {
                 if (event.target && event.target.tagName === 'BUTTON') return;
-                selectedConflictId = String(record.id || '');
-                renderConflicts(payload);
+                setSelectedConflict(payload, record);
             });
         });
         table.appendChild(tbody);
@@ -2955,9 +2929,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             link('Open source', branch(String(run.source_branch || '')).siteUrl),
             link('Open target', branch(String(run.target_branch || '')).siteUrl)
         ];
-        if (Number(run.conflict_count || 0) > 0 && run.id) {
-            actions.push(button('Review conflicts', function () { loadConflicts(run.id); }, 'danger'));
-        }
         setDetail('Revision #' + String(run.id || ''), {
             source: run.source_branch || '',
             target: run.target_branch || '',
@@ -2971,6 +2942,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             decisions: run.decision_count || 0,
             finished: run.finished_at || run.started_at || ''
         }, actions, run);
+        if (Number(run.conflict_count || 0) > 0 && run.id) {
+            loadConflicts(run.id);
+        }
     }
     function renderConflicts(payload) {
         var list = Array.isArray(payload.records) ? payload.records : [];
@@ -2987,7 +2961,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         } else {
             summaryParts.push(String(list.length) + ' listed');
         }
-        showConflictWorkbench('Conflict Review: revision #' + String(payload.run || ''), summaryParts.join(' / '));
+        var run = runById(payload.run) || {};
+        var source = String(run.source_branch || '');
+        var target = String(run.target_branch || '');
+        var flow = source && target && source !== target ? source + ' -> ' + target : (source || target);
+        showConflictWorkbench('Conflict Review: revision #' + String(payload.run || ''), [flow, summaryParts.join(' / ')].filter(Boolean).join(' / '));
+        conflictActions.innerHTML = '';
+        if (source) conflictActions.appendChild(link('Open source', branch(source).siteUrl));
+        if (target) conflictActions.appendChild(link('Open target', branch(target).siteUrl));
         conflicts.innerHTML = '';
         raw.textContent = '';
         raw.style.display = 'none';
@@ -3002,7 +2983,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var reviewGrid = document.createElement('div');
         reviewGrid.className = 'fp-conflict-review-grid';
         reviewGrid.appendChild(renderConflictTable(payload, list));
-        reviewGrid.appendChild(renderConflictInspector(payload, selected));
+        var inspectorSlot = document.createElement('div');
+        inspectorSlot.id = 'fp-conflict-inspector-slot';
+        inspectorSlot.appendChild(renderConflictInspector(payload, selected));
+        reviewGrid.appendChild(inspectorSlot);
         conflicts.appendChild(reviewGrid);
     }
     function loadTree() {
@@ -3015,7 +2999,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var initialRun = firstConflictRun() || records[0] || null;
             if (initialRun) {
                 selectRun(initialRun);
-                if (Number(initialRun.conflict_count || 0) > 0) loadConflicts(initialRun.id, { defaultLoad: true });
             } else {
                 selectBranch(state.currentBranch);
             }
@@ -3047,28 +3030,30 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!item) return;
         item._conflictSummary = payload.conflictSummary || payload.conflict_summary || item._conflictSummary || null;
         item._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
-        if (String(selectedRunId) === String(run)) {
-            selectRun(item);
-        }
     }
     function loadConflicts(run, options) {
+        var requestedRun = String(run || '');
         var item = runById(run);
         if (item && Array.isArray(item._conflictRecords)) {
-            renderConflicts({
-                run: Number(run),
-                records: item._conflictRecords,
-                conflictSummary: item._conflictSummary || null,
-                message: 'Loaded cached conflict details.'
-            });
+            if (String(selectedRunId || '') === requestedRun) {
+                renderConflicts({
+                    run: Number(run),
+                    records: item._conflictRecords,
+                    conflictSummary: item._conflictSummary || null,
+                    message: 'Loaded cached conflict details.'
+                });
+            }
             if (!options || !options.refresh) return Promise.resolve();
-        } else {
+        } else if (String(selectedRunId || '') === requestedRun) {
             renderConflictLoading(run);
         }
         setStatus('warn', 'Loading conflicts...');
         return post('forkpress_branch_conflicts', { run: String(run) }).then(function (payload) {
             cacheConflictPayload(run, payload);
+            if (String(selectedRunId || '') !== requestedRun) return;
             renderConflicts(payload);
             renderGraph();
+            clearStatus();
         }).catch(function (error) {
             setStatus('error', error.message || 'Could not load conflicts.');
         });
