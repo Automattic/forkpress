@@ -268,6 +268,10 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Change applied resolution'), 'out-of-band branch manager exposes applied-resolution changes');
         assert_true(str_contains($early_body, 'prioritizeResolutionChange'), 'out-of-band branch manager surfaces applied-resolution changes before large value previews');
         assert_true(str_contains($early_body, 'replaceApplied'), 'out-of-band branch manager sends replace-applied resolution payloads');
+        assert_true(str_contains($early_body, 'function conflictPluginMeta'), 'out-of-band branch manager renders plugin and theme conflict metadata');
+        assert_true(str_contains($early_body, 'function conflictPluginGuidance'), 'out-of-band branch manager renders plugin and theme conflict guidance');
+        assert_true(str_contains($early_body, 'record.plugin_suggested_action'), 'out-of-band branch manager exposes validator suggested actions');
+        assert_true(str_contains($early_body, 'record.semantic_scope'), 'out-of-band branch manager exposes validator semantic scope');
         assert_true(str_contains($early_body, 'Branch actions'), 'out-of-band branch manager keeps create and merge actions available');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
 

@@ -1516,6 +1516,28 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-conflict-title { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
     .fp-conflict-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .fp-conflict-plugin {
+        background: #f6f7f7;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        display: grid;
+        gap: 6px;
+        padding: 9px 10px;
+    }
+    .fp-conflict-plugin div {
+        display: grid;
+        gap: 2px;
+    }
+    .fp-conflict-plugin span:first-child {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+    }
+    .fp-conflict-plugin span:last-child {
+        font-size: 12px;
+        overflow-wrap: anywhere;
+    }
     .fp-conflict-grid {
         display: grid;
         gap: 8px;
@@ -2104,11 +2126,33 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         return decodeAuditPayload(record[key]);
     }
     function conflictObjectLabel(record) {
+        if (record.table_name === '__plugins__' && record.plugin_object) return record.plugin_object;
         if (record.table_name && record.column_name) return record.table_name + '.' + record.column_name;
         if (record.path) return record.path;
         if (record.file_path) return record.file_path;
         if (record.plugin_object) return record.plugin_object;
         return record.conflict_key || ('Conflict #' + record.id);
+    }
+    function conflictPluginMeta(record) {
+        if (!record || (record.table_name !== '__plugins__' && !record.plugin)) return '';
+        return [
+            record.semantic_scope ? 'scope: ' + String(record.semantic_scope) : '',
+            record.plugin ? 'plugin: ' + String(record.plugin) : '',
+            record.plugin_object ? 'object: ' + String(record.plugin_object) : '',
+            record.plugin_severity ? 'severity: ' + String(record.plugin_severity) : '',
+            record.plugin_validator ? 'validator: ' + String(record.plugin_validator) : ''
+        ].filter(Boolean).join(' / ');
+    }
+    function conflictPluginGuidance(record) {
+        if (!record || (record.table_name !== '__plugins__' && !record.plugin)) return '';
+        return [
+            record.plugin_resolution_policy ? 'policy: ' + String(record.plugin_resolution_policy) : '',
+            record.plugin_suggested_action ? 'action: ' + String(record.plugin_suggested_action) : '',
+            record.plugin_manual_review_reason ? 'manual review: ' + String(record.plugin_manual_review_reason) : ''
+        ].filter(Boolean).join(' / ');
+    }
+    function conflictIsPluginRecord(record) {
+        return !!(record && (record.table_name === '__plugins__' || record.plugin));
     }
     function conflictValueField(label, value) {
         var wrap = document.createElement('div');
@@ -2121,6 +2165,30 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         wrap.appendChild(labelNode);
         wrap.appendChild(textarea);
         return wrap;
+    }
+    function appendConflictInfo(parent, label, value) {
+        if (value === undefined || value === null || value === '') return;
+        var row = document.createElement('div');
+        row.appendChild(textNode('span', '', label));
+        row.appendChild(textNode('span', '', Array.isArray(value) ? value.join(', ') : String(value)));
+        parent.appendChild(row);
+    }
+    function conflictPluginPanel(record) {
+        if (!conflictIsPluginRecord(record)) return null;
+        var panel = document.createElement('div');
+        panel.className = 'fp-conflict-plugin';
+        appendConflictInfo(panel, 'scope', record.semantic_scope || 'plugin');
+        appendConflictInfo(panel, 'plugin', record.plugin);
+        appendConflictInfo(panel, 'object', record.plugin_object);
+        appendConflictInfo(panel, 'severity', record.plugin_severity);
+        appendConflictInfo(panel, 'validator', record.plugin_validator);
+        appendConflictInfo(panel, 'reason', record.plugin_reason);
+        appendConflictInfo(panel, 'policy', record.plugin_resolution_policy);
+        appendConflictInfo(panel, 'manual review', record.plugin_manual_review_reason);
+        appendConflictInfo(panel, 'suggested action', record.plugin_suggested_action);
+        appendConflictInfo(panel, 'tables', record.plugin_tables);
+        appendConflictInfo(panel, 'files', record.plugin_files);
+        return panel.childNodes.length ? panel : null;
     }
     function conflictResolutionChangeAvailable(record) {
         if (!record || !record.id || Number(record.latest_resolution_applied || 0) !== 1) return false;
@@ -2185,9 +2253,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 record.next_action,
                 record.stale_status ? 'stale: ' + record.stale_status : '',
                 record.review_status ? 'review: ' + record.review_status : '',
-                record.latest_resolution_status ? 'resolution: ' + record.latest_resolution_status : ''
+                record.latest_resolution_status ? 'resolution: ' + record.latest_resolution_status : '',
+                conflictPluginMeta(record)
             ].filter(Boolean);
             var meta = textNode('div', 'fp-conflict-meta', metaParts.join(' / '));
+            var pluginPanel = conflictPluginPanel(record);
             var values = document.createElement('div');
             values.className = 'fp-conflict-grid';
             values.appendChild(conflictValueField('Base', conflictValue(record, 'base_payload', 'base_preview')));
@@ -2220,7 +2290,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             var row = document.createElement('div');
             row.className = 'fp-buttons';
             var prioritizeResolutionChange = conflictResolutionChangeAvailable(record);
-            if (record.id && record.lifecycle_state !== 'resolved') {
+            var isPluginConflict = conflictIsPluginRecord(record);
+            if (isPluginConflict && record.id && record.lifecycle_state !== 'resolved') {
+                row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
+                row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
+                row.appendChild(textNode('span', 'fp-conflict-meta', conflictPluginGuidance(record) || 'Plugin and theme validator conflicts are review-only here; use the suggested action or a plugin merge driver.'));
+            } else if (record.id && record.lifecycle_state !== 'resolved') {
                 row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
                 row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
                 row.appendChild(button('Apply selected', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
@@ -2236,7 +2311,18 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             }
             node.appendChild(title);
             node.appendChild(meta);
-            if (prioritizeResolutionChange) {
+            if (pluginPanel) node.appendChild(pluginPanel);
+            if (isPluginConflict) {
+                node.appendChild(noteWrap);
+                node.appendChild(row);
+                var pluginPayload = conflictValue(record, 'chosen_payload', 'chosen_preview');
+                if (pluginPayload) {
+                    var pluginValues = document.createElement('div');
+                    pluginValues.className = 'fp-conflict-grid';
+                    pluginValues.appendChild(conflictValueField('Validator payload', pluginPayload));
+                    node.appendChild(pluginValues);
+                }
+            } else if (prioritizeResolutionChange) {
                 node.appendChild(choiceWrap);
                 node.appendChild(noteWrap);
                 node.appendChild(row);
