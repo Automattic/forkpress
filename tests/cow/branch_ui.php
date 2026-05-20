@@ -680,6 +680,19 @@ assert_same(
     'branch conflict resolution passes editable branch-manager notes to the CLI'
 );
 
+$custom_value_conflict_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'custom', 'customValue' => '<p>Manually reconciled content</p>', 'note' => 'Use a manually reconciled value.'],
+    ['main', 'feature']
+);
+$custom_value_conflict_resolution_payload = decode_branch_ui_payload($custom_value_conflict_resolution);
+assert_same($custom_value_conflict_resolution_payload['success'] ?? null, true, 'branch conflict resolution accepts custom values');
+assert_same($custom_value_conflict_resolution_payload['resolutionChoice'] ?? null, 'custom', 'branch conflict resolution reports custom choice');
+assert_same(
+    array_slice($custom_value_conflict_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'custom', '--custom-value', '<p>Manually reconciled content</p>', '--apply', '--note', 'Use a manually reconciled value.', '--reviewer', 'wordpress-ui'],
+    'branch conflict resolution passes raw custom values to the CLI'
+);
+
 $change_applied_resolution = run_branch_ui_action(
     ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'target', 'replaceApplied' => '1', 'note' => 'Switch the already applied resolution back to target.'],
     ['main', 'feature']

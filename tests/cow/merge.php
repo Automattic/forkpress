@@ -244,6 +244,25 @@ try {
     );
     assert_same($replace_source_resolution['status'], 'applied', 'source cell conflict resolution applies normally');
     assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Source conflict content', 'source cell resolution mutates the target cell');
+    $replace_custom_resolution = cow_merge_resolve_conflict(
+        $replace_metadata,
+        $replace_conflict_id,
+        'custom',
+        true,
+        'Set manually reconciled content.',
+        'cow-test',
+        false,
+        true,
+        'Manually reconciled content'
+    );
+    assert_same($replace_custom_resolution['status'], 'applied', 'custom cell conflict resolution records applied status');
+    assert_same($replace_custom_resolution['choice'], 'custom', 'custom cell conflict resolution records custom choice');
+    assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Manually reconciled content', 'custom cell resolution can apply a value from neither branch');
+    assert_same(
+        cow_merge_decode_payload_json((string)scalar($replace_metadata, "SELECT resolved_payload FROM merge_resolutions WHERE conflict_id = $replace_conflict_id AND choice = 'custom' ORDER BY id DESC LIMIT 1"), 'custom resolution payload'),
+        'Manually reconciled content',
+        'custom cell resolution stores the applied custom payload'
+    );
     assert_throws(
         fn() => cow_merge_resolve_conflict($replace_metadata, $replace_conflict_id, 'target', true, 'Changing without explicit replace should fail.', 'cow-test'),
         'already resolved',
@@ -263,7 +282,7 @@ try {
     assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Target conflict content', 'replace-applied cell resolution can restore the audited target value');
     assert_same(
         (int)scalar($replace_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $replace_conflict_id AND applied = 1"),
-        2,
+        3,
         'replace-applied cell conflict keeps both applied resolution records'
     );
     $db = open_db($replace_target);

@@ -1934,6 +1934,7 @@ pub fn resolve_cow_merge_conflict(
     shared: &SharedPaths,
     conflict_id: &str,
     choice: Option<&str>,
+    custom_value: Option<&str>,
     apply: bool,
     apply_reviewed: bool,
     after_revalidate: bool,
@@ -1952,6 +1953,10 @@ pub fn resolve_cow_merge_conflict(
     if let Some(choice) = choice {
         args.push("--choice".into());
         args.push(choice.into());
+    }
+    if let Some(custom_value) = custom_value {
+        args.push("--custom-value".into());
+        args.push(custom_value.into());
     }
     if apply {
         args.push("--apply".into());
@@ -1989,6 +1994,7 @@ pub fn resolve_cow_merge_conflict_key(
     conflict_key: &str,
     run_id: Option<&str>,
     choice: Option<&str>,
+    custom_value: Option<&str>,
     apply: bool,
     apply_reviewed: bool,
     after_revalidate: bool,
@@ -2010,6 +2016,10 @@ pub fn resolve_cow_merge_conflict_key(
     if let Some(choice) = choice {
         args.push("--choice".into());
         args.push(choice.into());
+    }
+    if let Some(custom_value) = custom_value {
+        args.push("--custom-value".into());
+        args.push(custom_value.into());
     }
     if apply {
         args.push("--apply".into());

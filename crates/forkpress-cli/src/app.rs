@@ -4034,6 +4034,7 @@ fn cow_branch_command(
                 bail!("branch merge-resolve requires a conflict id");
             };
             let mut choice: Option<String> = None;
+            let mut custom_value: Option<String> = None;
             let mut apply = false;
             let mut apply_reviewed = false;
             let mut after_revalidate = false;
@@ -4046,9 +4047,16 @@ fn cow_branch_command(
                 match args.args[index].as_str() {
                     "--choice" => {
                         let Some(value) = args.args.get(index + 1) else {
-                            bail!("--choice requires source or target");
+                            bail!("--choice requires source, target, or custom");
                         };
                         choice = Some(value.clone());
+                        index += 2;
+                    }
+                    "--custom-value" => {
+                        let Some(value) = args.args.get(index + 1) else {
+                            bail!("--custom-value requires text");
+                        };
+                        custom_value = Some(value.clone());
                         index += 2;
                     }
                     "--apply" => {
@@ -4098,8 +4106,8 @@ fn cow_branch_command(
                     "--run can only be used with `forkpress branch merge-resolve conflict-key <key>`"
                 );
             }
-            if apply_reviewed && choice.is_some() {
-                bail!("--apply-reviewed cannot be combined with --choice");
+            if apply_reviewed && (choice.is_some() || custom_value.is_some()) {
+                bail!("--apply-reviewed cannot be combined with --choice or --custom-value");
             }
             if apply_reviewed && apply {
                 bail!(
@@ -4107,7 +4115,13 @@ fn cow_branch_command(
                 );
             }
             if !apply_reviewed && choice.is_none() {
-                bail!("branch merge-resolve requires --choice source|target or --apply-reviewed");
+                bail!("branch merge-resolve requires --choice source|target|custom or --apply-reviewed");
+            }
+            if custom_value.is_some() && choice.as_deref() != Some("custom") {
+                bail!("--custom-value can only be used with --choice custom");
+            }
+            if choice.as_deref() == Some("custom") && custom_value.is_none() {
+                bail!("--choice custom requires --custom-value");
             }
             if replace_applied && record_type != "conflict" {
                 bail!(
@@ -4131,6 +4145,7 @@ fn cow_branch_command(
                     record_id_or_key,
                     run.as_deref(),
                     choice.as_deref(),
+                    custom_value.as_deref(),
                     apply,
                     apply_reviewed,
                     after_revalidate,
@@ -4144,6 +4159,7 @@ fn cow_branch_command(
                     &args.shared,
                     record_id_or_key,
                     choice.as_deref(),
+                    custom_value.as_deref(),
                     apply,
                     apply_reviewed,
                     after_revalidate,
@@ -4235,7 +4251,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
         }
         Some("merge-resolve") => {
-            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--replace-applied] [--note <text>] [--reviewer <name>]\n       forkpress branch merge-resolve conflict-key <key> [--run <id>] (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Resolving by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell, file conflict, or compatible source-added schema index/view/trigger conflict back to needs-action. Use --replace-applied with conflict <id>, --choice source|target, and --apply to change an already-applied DB cell conflict resolution when the target cell still matches the previous applied resolution.\n"
+            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--choice custom --custom-value <text> [--apply]|--apply-reviewed) [--after-revalidate] [--replace-applied] [--note <text>] [--reviewer <name>]\n       forkpress branch merge-resolve conflict-key <key> [--run <id>] (--choice <source|target> [--apply]|--choice custom --custom-value <text> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Resolving by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it. Use --choice custom --custom-value <text> for DB cell conflicts when neither branch has the right value. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell, file conflict, or compatible source-added schema index/view/trigger conflict back to needs-action. Use --replace-applied with conflict <id>, --choice source|target|custom, and --apply to change an already-applied DB cell conflict resolution when the target cell still matches the previous applied resolution.\n"
         }
         Some("merge-apply-reviewed") => {
             "Usage: forkpress branch merge-apply-reviewed [--run <id>] [--limit <n>] [--note <text>] [--reviewer <name>] [--format text|json]\n\nApply every currently validated, unapplied generic conflict resolution in the review queue. Inspect the same queue first with `forkpress branch merge-audit --next-action apply-reviewed-choice`.\n"
@@ -8530,6 +8546,49 @@ mod git_helper_tests {
                 "--apply-reviewed".to_string(),
                 "--note".to_string(),
                 "Apply validated choice".to_string(),
+                "--reviewer".to_string(),
+                "alice".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_branch_merge_resolve_custom_value_args() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "branch",
+            "--work-dir",
+            ".forkpress",
+            "merge-resolve",
+            "conflict",
+            "12",
+            "--choice",
+            "custom",
+            "--custom-value",
+            "Manually reconciled title",
+            "--apply",
+            "--note",
+            "Use reviewed custom title",
+            "--reviewer",
+            "alice",
+        ])
+        .unwrap();
+        let Commands::Branch(args) = cli.command else {
+            panic!("expected branch command");
+        };
+        assert_eq!(
+            args.args,
+            vec![
+                "merge-resolve".to_string(),
+                "conflict".to_string(),
+                "12".to_string(),
+                "--choice".to_string(),
+                "custom".to_string(),
+                "--custom-value".to_string(),
+                "Manually reconciled title".to_string(),
+                "--apply".to_string(),
+                "--note".to_string(),
+                "Use reviewed custom title".to_string(),
                 "--reviewer".to_string(),
                 "alice".to_string(),
             ]

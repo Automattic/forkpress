@@ -648,7 +648,7 @@ $invalid_resolution = router_branch_action_request(
     ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '77', 'choice' => 'target', 'applyReviewed' => '1']
 );
 assert_same($invalid_resolution['status'], 400, 'async router branch resolution rejects mixed apply modes before CLI');
-assert_same($invalid_resolution['json']['message'] ?? null, 'Apply reviewed cannot be combined with a new source or target choice.', 'async router branch resolution explains mixed apply modes');
+assert_same($invalid_resolution['json']['message'] ?? null, 'Apply reviewed cannot be combined with a new source, target, or custom choice.', 'async router branch resolution explains mixed apply modes');
 assert_true(!str_contains($invalid_resolution['body'], 'WORDPRESS'), 'invalid async router branch resolution does not reach WordPress admin-post');
 
 $plugin_driver_output = json_encode([
