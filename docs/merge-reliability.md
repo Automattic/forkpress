@@ -1325,7 +1325,7 @@ should stay focused on these areas:
   conflict-event history on `unreviewed`, `deferred`, `needs-action`,
   `reviewed`, `validated`, or `resolved` records without clients
   reimplementing lifecycle inference, `merge-audit --resolution-choice
-  source|target` and `--blocked-resolution-choice source|target` can focus
+  source|target|plugin-driver` and `--blocked-resolution-choice source|target` can focus
   queues using the same live contract that `merge-resolve` enforces,
   `merge-audit --next-action <action>` can focus queues by the action a UI
   should offer next, `merge-audit --latest-revalidation-status <status>` can
