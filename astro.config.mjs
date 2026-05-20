@@ -94,10 +94,23 @@ export default defineConfig({
 						{ label: 'Branching', slug: 'docs/branching' },
 						{ label: 'Remote sites', slug: 'docs/remote-sites' },
 						{ label: 'Merging', slug: 'docs/merging' },
+						{ label: 'Conflict review', slug: 'docs/conflict-review' },
 						{ label: 'Plugin validator recipes', slug: 'docs/plugin-validator-recipes' },
+						{ label: 'Plugin validator contract', slug: 'docs/plugin-merge-validators' },
 						{ label: 'Top plugin support', slug: 'docs/top-plugin-support' },
 						{ label: 'Git workflow', slug: 'docs/git-workflow' },
 						{ label: 'Agents', slug: 'docs/agents' },
+					],
+				},
+				{
+					label: 'Merge internals',
+					collapsed: true,
+					items: [
+						{ label: 'Reliability matrix', slug: 'docs/merge-reliability' },
+						{ label: 'Stale audit workflow', slug: 'docs/stale-audit-workflow' },
+						{ label: 'Crash consistency', slug: 'docs/merge-crash-consistency' },
+						{ label: 'Repair policy', slug: 'docs/merge-repair-policy' },
+						{ label: 'Test speed', slug: 'docs/merge-test-speed' },
 					],
 				},
 				{

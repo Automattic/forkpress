@@ -160,7 +160,7 @@ chmod +x forkpress
 ./forkpress --version
 ```
 
-Use a tag like `v0.1.14` and a target from the table.
+Use a release tag like `vX.Y.Z` and a target from the table.
 
 See [Installation](docs/installation.md) for install options, pinning, and
 checksum behavior.

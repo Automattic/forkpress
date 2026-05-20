@@ -1,15 +1,17 @@
 # Plugin Merge Validators
 
-Status: partial implementation target
+Status: production validator and review contract. Plugin-driver repairs are
+supported only when explicitly configured and postflight validation proves the
+conflict is cleared.
 
 ForkPress can merge SQLite rows and files, but plugins often store one logical
 object across custom tables, `postmeta`, options, JSON, serialized PHP values,
 and uploaded/generated files. A generic row merge cannot safely infer those
 semantics or rewrite embedded IDs.
 
-Plugin validators are the intended boundary: plugins should be able to inspect
-a merged candidate and either confirm that their object graph is coherent or
-return reviewable conflicts.
+Plugin validators are the ForkPress boundary for plugin-owned semantics:
+plugins inspect a merged candidate and either confirm that their object graph is
+coherent or return reviewable conflicts.
 
 For concrete plugin graph recipes, including WooCommerce HPOS-style orders,
 Gravity Forms-style field maps, ACF field definitions, Elementor widget JSON,
@@ -40,17 +42,17 @@ A validator returns one of:
   `manual_review_reason`. If present, `validator` and review guidance fields
   must be non-empty strings.
   ForkPress records these in the conflict payload so review tools can
-  prioritize findings and distinguish review-only findings from future
-  repairable findings.
+  prioritize findings and distinguish review-only findings from
+  driver-repairable findings.
 - `failed`: the validator could not run; the merge should fail rather than
   silently accept an unchecked plugin graph.
 
-Validators must not rewrite the candidate database or filesystem. A future
+Validators must not rewrite the candidate database or filesystem. A separate
 merge driver may do that, but validators are only a gate.
 
 ## Invariants To Check
 
-The first validator API should support checks for:
+The validator API supports checks for:
 
 - Custom-table rows whose IDs are embedded in JSON or serialized values.
 - Cross-table parent/child rows where the database has no foreign keys.
@@ -77,12 +79,12 @@ invent plugin-specific rewrites.
 Validator findings can carry first-class review guidance. For example, a media
 validator should mark missing generated upload files as `review-only` instead
 of implying that ForkPress may regenerate derivatives during the merge. A
-future merge driver can introduce an automatic repair only when it can prove the
-repair is deterministic and records the chosen repair in audit metadata.
+separate merge driver can introduce an automatic repair only when it can prove
+the repair is deterministic and records the chosen repair in audit metadata.
 
-The current implementation has the metadata/audit foundation for validator
-conflicts: ForkPress can record plugin-scoped findings against a merge run,
-mark that run as `completed_with_conflicts`, filter `merge-audit` output with
+The implementation records validator conflicts in merge audit metadata:
+ForkPress can record plugin-scoped findings against a merge run, mark that run
+as `completed_with_conflicts`, filter `merge-audit` output with
 `scope = plugin`, group plugin findings separately from DB/file findings,
 summarize plugin conflict queues with `merge-audit --scope plugin --group-by plugin`,
 `--group-by plugin-object`, `--group-by plugin-severity`, or
