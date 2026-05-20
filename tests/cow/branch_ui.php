@@ -165,6 +165,11 @@ $fqdb = getenv('FORKPRESS_TEST_FQDB');
 if (is_string($fqdb) && $fqdb !== '' && !defined('FQDB')) {
     define('FQDB', $fqdb);
 }
+if (getenv('FORKPRESS_TEST_PREDEFINE_SQLITE_IDENTIFIER') === '1' && !function_exists('forkpress_cow_sqlite_identifier')) {
+    function forkpress_cow_sqlite_identifier(string $name): string {
+        return '"' . str_replace('"', '""', $name) . '"';
+    }
+}
 
 $async = getenv('FORKPRESS_TEST_ASYNC') !== '0';
 $_SERVER = [
@@ -308,6 +313,18 @@ function decode_branch_ui_payload(array $result): array {
     $payload = json_decode($result['stdout'], true);
     return is_array($payload) ? $payload : [];
 }
+
+$predeclared_helper_admin_page = run_branch_ui_action(
+    ['action' => 'forkpress_branch_admin_page'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_PREDEFINE_SQLITE_IDENTIFIER' => '1']
+);
+$predeclared_helper_payload = decode_branch_ui_payload($predeclared_helper_admin_page);
+assert_same($predeclared_helper_admin_page['status'], 0, 'branch manager plugin loads when router already declared shared SQLite helpers');
+assert_true(str_contains($predeclared_helper_payload['html'] ?? '', '/_forkpress/branches'), 'branch manager plugin still renders admin page after shared helper predeclaration');
 
 $create = run_branch_ui_action(
     ['action' => 'forkpress_branch_create', 'branch' => 'new_feature', 'from' => 'feature'],

@@ -813,8 +813,10 @@ function forkpress_cow_decode_typed_payload($value) {
     return $plain($decoded);
 }
 
-function forkpress_cow_sqlite_identifier(string $name): string {
-    return '"' . str_replace('"', '""', $name) . '"';
+if (!function_exists('forkpress_cow_sqlite_identifier')) {
+    function forkpress_cow_sqlite_identifier(string $name): string {
+        return '"' . str_replace('"', '""', $name) . '"';
+    }
 }
 
 function forkpress_cow_sqlite_columns(SQLite3 $db, string $table): array {

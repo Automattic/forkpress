@@ -191,8 +191,10 @@ function forkpress_db_path(): ?string {
     return null;
 }
 
-function forkpress_cow_sqlite_identifier(string $name): string {
-    return '"' . str_replace('"', '""', $name) . '"';
+if (!function_exists('forkpress_cow_sqlite_identifier')) {
+    function forkpress_cow_sqlite_identifier(string $name): string {
+        return '"' . str_replace('"', '""', $name) . '"';
+    }
 }
 
 function forkpress_cow_sqlite_pdo(): ?PDO {
