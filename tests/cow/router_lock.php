@@ -278,7 +278,10 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-row-title'), 'out-of-band branch manager renders revisions as timeline rows');
         assert_true(str_contains($early_body, 'sortedRunEntries'), 'out-of-band branch manager sorts real revision records, not one row per branch');
         assert_true(str_contains($early_body, 'runTimelineTimestamp'), 'out-of-band branch manager sorts revisions by timestamp before run id');
-        assert_true(str_contains($early_body, 'interleaved timeline revisions / newest first'), 'out-of-band branch manager labels interleaved revision timeline direction');
+        assert_true(str_contains($early_body, 'events / newest first'), 'out-of-band branch manager labels timeline direction');
+        assert_true(str_contains($early_body, 'branchLabelText'), 'out-of-band branch manager compacts and staggers branch lane labels');
+        assert_true(str_contains($early_body, 'fp-node-merge'), 'out-of-band branch manager renders merge events with a distinct target marker');
+        assert_true(str_contains($early_body, 'Merge event #'), 'out-of-band branch manager distinguishes merge events from ordinary revisions');
         assert_true(str_contains($early_body, 'seedConflictSummaries'), 'out-of-band branch manager seeds conflict summaries without extra conflict audits');
         assert_true(str_contains($early_body, 'selectedRunId'), 'out-of-band branch manager keeps the selected revision synced after conflict audits load');
         assert_true(str_contains($early_body, 'requestedRun'), 'out-of-band branch manager ignores stale conflict loads after selecting another revision');
