@@ -371,6 +371,13 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'function branchManagerLink'), 'out-of-band branch manager focuses source and target branches without leaving the manager');
         assert_true(str_contains($early_body, 'initialBranchName'), 'out-of-band branch manager can restore a directly linked branch detail view');
         assert_true(str_contains($early_body, "params.set('branch'"), 'out-of-band branch manager deep-links selected branch detail views');
+        assert_true(str_contains($early_body, 'Current branch details'), 'out-of-band branch manager keeps the header branch action inside the manager');
+        assert_true(str_contains($early_body, 'function copyTextButton'), 'out-of-band branch manager exposes WordPress branch URLs as copy actions');
+        assert_true(str_contains($early_body, 'Copy site URL'), 'out-of-band branch manager lets users copy branch site URLs without navigating into a possible 500');
+        assert_true(str_contains($early_body, 'Copy admin URL'), 'out-of-band branch manager lets users copy branch admin URLs without navigating into a possible 500');
+        assert_true(str_contains($early_body, "adminLink.href = branchManagerHref(state.currentBranch)"), 'out-of-band branch manager header does not link directly to branch WordPress admin');
+        assert_true(!str_contains($early_body, "link('Open site'"), 'out-of-band branch manager does not link branch details directly to branch WordPress sites');
+        assert_true(!str_contains($early_body, "link('Open admin'"), 'out-of-band branch manager does not link branch details directly to branch WordPress admin');
         assert_true(str_contains($early_body, 'Show source:'), 'out-of-band branch manager labels source branch focus actions clearly');
         assert_true(str_contains($early_body, 'Show target:'), 'out-of-band branch manager labels target branch focus actions clearly');
         assert_true(!str_contains($early_body, "link('Open source:"), 'out-of-band branch manager does not link source actions to branch WordPress hosts');
@@ -475,7 +482,8 @@ if (is_resource($process)) {
     assert_same($stderr, '', 'router branch create action produced no stderr');
     assert_true(is_array($payload), 'router branch create action returns JSON');
     assert_same($payload['success'] ?? null, true, 'router branch create action reports success');
-    assert_same($payload['url'] ?? null, 'http://feature.wp.localhost/wp-admin/', 'router branch create action returns the new branch admin URL');
+    assert_same($payload['url'] ?? null, 'http://feature.wp.localhost/_forkpress/branches', 'router branch create action returns the new branch manager URL');
+    assert_same($payload['managerUrl'] ?? null, 'http://feature.wp.localhost/_forkpress/branches', 'router branch create action exposes the new branch manager URL');
     assert_same($payload['branches'][0]['name'] ?? null, 'feature', 'router branch create action marks new branch current');
     assert_same($payload['branches'][0]['url'] ?? null, 'http://feature.wp.localhost/wp-admin/', 'router branch create action returns a branch-specific feature URL');
     assert_same($payload['branches'][1]['url'] ?? null, 'http://wp.localhost/wp-admin/', 'router branch create action returns a distinct main URL');

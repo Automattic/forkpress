@@ -1202,7 +1202,7 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
     }
 
     $action = $_REQUEST['action'] ?? '';
-    $current_url = forkpress_cow_branch_url($current_branch, '/wp-admin/');
+    $current_url = forkpress_cow_branch_manager_url($current_branch);
     $branches = forkpress_cow_branch_names($current_branch);
     if ($action === 'forkpress_branch_create') {
         $branch = forkpress_cow_branch_post_value('branch');
@@ -1223,10 +1223,13 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         }
         forkpress_cow_branch_finish_json(
             200,
-            forkpress_cow_branch_url($branch, '/wp-admin/'),
+            forkpress_cow_branch_manager_url($branch),
             true,
             'Created branch ' . $branch . '.',
-            ['branches' => forkpress_cow_branch_switcher_data($branch, '/wp-admin/', [$branch, 'main'])]
+            [
+                'branches' => forkpress_cow_branch_switcher_data($branch, '/wp-admin/', [$branch, 'main']),
+                'managerUrl' => forkpress_cow_branch_manager_url($branch),
+            ]
         );
         return true;
     }
@@ -1256,12 +1259,13 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             $message = 'Merged ' . $source . ' into ' . $target . ' with ' . $conflicts . ' conflict' . ($conflicts === 1 ? '' : 's') . '. Review them with `' . $audit_command . '`.';
             forkpress_cow_branch_finish_json(
                 200,
-                forkpress_cow_branch_url($target, '/wp-admin/'),
+                forkpress_cow_branch_manager_url($target),
                 true,
                 $message,
                 [
                     'type' => 'warning',
                     'branches' => forkpress_cow_branch_switcher_data($target, '/wp-admin/'),
+                    'managerUrl' => forkpress_cow_branch_manager_url($target),
                     'mergeStatus' => $summary['status'],
                     'conflicts' => $conflicts,
                     'run' => $run,
@@ -1272,10 +1276,13 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         }
         forkpress_cow_branch_finish_json(
             200,
-            forkpress_cow_branch_url($target, '/wp-admin/'),
+            forkpress_cow_branch_manager_url($target),
             true,
             'Merged ' . $source . ' into ' . $target . '.',
-            ['branches' => forkpress_cow_branch_switcher_data($target, '/wp-admin/')]
+            [
+                'branches' => forkpress_cow_branch_switcher_data($target, '/wp-admin/'),
+                'managerUrl' => forkpress_cow_branch_manager_url($target),
+            ]
         );
         return true;
     }
@@ -2687,7 +2694,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     <header class="fp-topbar">
         <div class="fp-brand">ForkPress Branches</div>
         <div class="fp-current" id="fp-current"></div>
-        <a class="fp-open-admin" id="fp-admin-link" href="#">Open WordPress admin</a>
+        <a class="fp-open-admin" id="fp-admin-link" href="#">Current branch details</a>
     </header>
     <main class="fp-layout">
         <section class="fp-panel fp-graph-panel">
@@ -3422,6 +3429,24 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         a.title = label;
         return a;
     }
+    function copyTextButton(label, value, doneMessage) {
+        return button(label, function () {
+            var text = String(value || '');
+            if (!text) {
+                setStatus('warn', 'No URL is available for this branch.');
+                return;
+            }
+            if (!navigator.clipboard || !navigator.clipboard.writeText) {
+                setStatus('warn', text);
+                return;
+            }
+            return navigator.clipboard.writeText(text).then(function () {
+                setStatus('ok', doneMessage || 'URL copied.');
+            }).catch(function () {
+                setStatus('warn', text);
+            });
+        });
+    }
     function branchManagerHref(name) {
         var url = new URL(state.rootUrl || '/_forkpress/branches', window.location.href);
         url.searchParams.set('branch', String(name || ''));
@@ -4126,9 +4151,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         selectedConflictId = null;
         clearStatus();
         setDetail('Branch ' + name, { branch: name, current: name === state.currentBranch ? 'yes' : 'no' }, [
-            link('Open site', item.siteUrl || item.url),
-            link('Open admin', item.adminUrl || item.url),
-            link('Focus manager', item.managerUrl || state.rootUrl)
+            branchManagerLink('Focus in manager', name),
+            copyTextButton('Copy site URL', item.siteUrl || item.url, 'Site URL copied.'),
+            copyTextButton('Copy admin URL', item.adminUrl || item.url, 'Admin URL copied.')
         ], item);
         setWorkbenchMode('Viewing branch ' + name + '.');
         syncReviewUrl();
@@ -4381,7 +4406,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (Array.isArray(payload.branches)) state.branches = payload.branches;
             state.currentBranch = createName.value;
             current.textContent = 'Current: ' + state.currentBranch;
-            adminLink.href = branch(state.currentBranch).adminUrl || '#';
+            adminLink.href = branchManagerHref(state.currentBranch);
             refreshForms();
             renderGraph();
             selectBranch(state.currentBranch);
@@ -4415,7 +4440,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     document.getElementById('fp-focus-selected').addEventListener('click', scrollSelectedRunIntoView);
     document.getElementById('fp-load-history').addEventListener('click', loadHistory);
     current.textContent = 'Current: ' + state.currentBranch;
-    adminLink.href = branch(state.currentBranch).adminUrl || '#';
+    adminLink.href = branchManagerHref(state.currentBranch);
     refreshForms();
     renderGraph();
     selectBranch(state.currentBranch);
