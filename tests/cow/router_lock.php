@@ -30,6 +30,25 @@ function rm_tree(string $path): void {
     }
     @rmdir($path);
 }
+function read_stream_until($stream, string $needle, float $timeout_seconds): string {
+    $body = '';
+    $deadline = microtime(true) + $timeout_seconds;
+    while (microtime(true) < $deadline) {
+        $chunk = stream_get_contents($stream);
+        if ($chunk !== false && $chunk !== '') {
+            $body .= $chunk;
+        }
+        if ($needle !== '' && str_contains($body, $needle)) {
+            break;
+        }
+        usleep(10000);
+    }
+    $chunk = stream_get_contents($stream);
+    if ($chunk !== false && $chunk !== '') {
+        $body .= $chunk;
+    }
+    return $body;
+}
 
 echo "=== COW router operation lock ===\n";
 
@@ -237,8 +256,7 @@ if (is_resource($lock)) {
             usleep(10000);
         }
         assert_true(file_exists($entered), 'out-of-band branch manager reached pre-lock gate');
-        usleep(150000);
-        $early_body = stream_get_contents($pipes[1]);
+        $early_body = read_stream_until($pipes[1], '</html>', 2.0);
         assert_true(str_contains($early_body, 'ForkPress Branches'), 'out-of-band branch manager renders before lock release');
         assert_true(str_contains($early_body, 'fp-graph'), 'out-of-band branch manager renders the branch graph surface');
         assert_true(str_contains($early_body, '"actionUrl":"/_forkpress/action"'), 'out-of-band branch manager uses same-origin action endpoint');
