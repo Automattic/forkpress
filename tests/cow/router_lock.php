@@ -319,8 +319,10 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-conflict-workbench'), 'out-of-band branch manager renders conflicts in the bottom workbench');
         assert_true(str_contains($early_body, 'fp-conflict-review-grid'), 'out-of-band branch manager keeps conflict table and inspector on one screen');
         assert_true(str_contains($early_body, 'body.fp-reviewing .fp-bottom-body'), 'out-of-band branch manager expands conflict review to the full workbench width');
-        assert_true(str_contains($early_body, 'grid-template-rows: minmax(230px, 34vh) minmax(0, 1fr)'), 'out-of-band branch manager gives review mode more vertical room for conflicts');
+        assert_true(str_contains($early_body, 'grid-template-rows: minmax(180px, 26vh) minmax(0, 1fr)'), 'out-of-band branch manager gives review mode more vertical room for conflicts');
         assert_true(str_contains($early_body, 'repeat(auto-fit, minmax(128px, 1fr))'), 'out-of-band branch manager compresses merge metadata into a responsive strip');
+        assert_true(str_contains($early_body, 'body.fp-reviewing .fp-bottom-primary'), 'out-of-band branch manager can hide duplicated run metadata while reviewing conflicts');
+        assert_true(str_contains($early_body, 'grid-template-rows: minmax(0, 1fr)'), 'out-of-band branch manager gives the conflict workbench the full lower pane in review mode');
         assert_true(str_contains($early_body, 'fp-conflict-inspector'), 'out-of-band branch manager renders one selected conflict inspector instead of every detail card');
         assert_true(str_contains($early_body, 'setSelectedConflict'), 'out-of-band branch manager changes selected conflicts without rerendering the whole workbench');
         assert_true(str_contains($early_body, 'fp-conflict-inspector-slot'), 'out-of-band branch manager has a stable selected-conflict inspector slot');
@@ -374,8 +376,11 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Review note'), 'out-of-band branch manager exposes editable review notes');
         assert_true(str_contains($early_body, 'Apply selected choice'), 'out-of-band branch manager exposes a selected conflict resolution action');
         assert_true(str_contains($early_body, 'fp-conflict-action-row'), 'out-of-band branch manager keeps conflict resolution actions visible in the inspector');
-        assert_true(strpos($early_body, 'node.appendChild(row);') < strpos($early_body, 'node.appendChild(noteWrap);'), 'out-of-band branch manager places conflict action buttons before review notes');
-        assert_true(strpos($early_body, 'node.appendChild(row);') < strpos($early_body, 'if (pluginPanel) node.appendChild(pluginPanel);'), 'out-of-band branch manager places review actions before plugin/theme metadata');
+        assert_true(str_contains($early_body, 'fp-conflict-card-head'), 'out-of-band branch manager uses a compact conflict card header');
+        assert_true(str_contains($early_body, 'fp-conflict-card-controls'), 'out-of-band branch manager keeps conflict actions outside long payload scrolling');
+        assert_true(str_contains($early_body, 'fp-conflict-scroll'), 'out-of-band branch manager gives each conflict card a dedicated scroll body');
+        assert_true(strpos($early_body, 'controls.appendChild(row);') < strpos($early_body, 'scrollBody.appendChild(values);'), 'out-of-band branch manager places review actions before long values');
+        assert_true(strpos($early_body, 'controls.appendChild(noteWrap);') < strpos($early_body, 'if (pluginPanel) scrollBody.appendChild(pluginPanel);'), 'out-of-band branch manager keeps plugin/theme metadata below compact controls');
         assert_true(str_contains($early_body, 'Change applied resolution'), 'out-of-band branch manager exposes applied-resolution changes');
         assert_true(str_contains($early_body, 'prioritizeResolutionChange'), 'out-of-band branch manager surfaces applied-resolution changes before large value previews');
         assert_true(str_contains($early_body, 'replaceApplied'), 'out-of-band branch manager sends replace-applied resolution payloads');
@@ -393,7 +398,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'record.semantic_scope'), 'out-of-band branch manager exposes validator semantic scope');
         assert_true(str_contains($early_body, 'function pluginDriverFor'), 'out-of-band branch manager matches plugin conflicts to approved drivers');
         assert_true(str_contains($early_body, 'Run plugin driver'), 'out-of-band branch manager exposes approved plugin driver actions');
-        assert_true(str_contains($early_body, 'No approved driver found'), 'out-of-band branch manager explains plugin conflicts without configured drivers');
+        assert_true(str_contains($early_body, 'No approved driver'), 'out-of-band branch manager explains plugin conflicts without configured drivers');
         assert_true(str_contains($early_body, 'function runPluginDriver'), 'out-of-band branch manager can run approved plugin drivers from conflict review');
         assert_true(str_contains($early_body, 'Run the approved plugin driver'), 'out-of-band branch manager confirms before running plugin driver automation');
         assert_true(str_contains($early_body, 'Fork from here'), 'out-of-band branch manager exposes branch creation as a direct contextual action');
@@ -407,7 +412,8 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'Flag follow-up'), 'out-of-band branch manager gives needs-action review state a clearer user action');
         assert_true(str_contains($early_body, 'Add a review note explaining the follow-up'), 'out-of-band branch manager requires context before flagging follow-up work');
         assert_true(str_contains($early_body, 'renderConflicts(payload);'), 'out-of-band branch manager rerenders conflict navigation after selecting a different check');
-        assert_true(str_contains($early_body, 'body.fp-reviewing .fp-conflict-workbench-body'), 'out-of-band branch manager gives conflict review panes their own scroll container');
+        assert_true(str_contains($early_body, 'body.fp-reviewing .fp-conflict-workbench-body'), 'out-of-band branch manager bounds conflict review panes inside the viewport');
+        assert_true(str_contains($early_body, '.fp-conflict-scroll'), 'out-of-band branch manager locks long card content to an internal scroll region');
         assert_true(str_contains($early_body, 'overscroll-behavior: contain'), 'out-of-band branch manager keeps conflict-pane scrolling contained');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
 
