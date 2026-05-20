@@ -4037,6 +4037,7 @@ fn cow_branch_command(
             let mut apply = false;
             let mut apply_reviewed = false;
             let mut after_revalidate = false;
+            let mut replace_applied = false;
             let mut note: Option<String> = None;
             let mut reviewer: Option<String> = None;
             let mut run: Option<String> = None;
@@ -4060,6 +4061,10 @@ fn cow_branch_command(
                     }
                     "--after-revalidate" => {
                         after_revalidate = true;
+                        index += 1;
+                    }
+                    "--replace-applied" => {
+                        replace_applied = true;
                         index += 1;
                     }
                     "--note" => {
@@ -4104,6 +4109,20 @@ fn cow_branch_command(
             if !apply_reviewed && choice.is_none() {
                 bail!("branch merge-resolve requires --choice source|target or --apply-reviewed");
             }
+            if replace_applied && record_type != "conflict" {
+                bail!(
+                    "--replace-applied can only be used with `forkpress branch merge-resolve conflict <id>`"
+                );
+            }
+            if replace_applied && apply_reviewed {
+                bail!("--replace-applied cannot be combined with --apply-reviewed");
+            }
+            if replace_applied && !apply {
+                bail!("--replace-applied requires --apply");
+            }
+            if replace_applied && after_revalidate {
+                bail!("--replace-applied cannot be combined with --after-revalidate");
+            }
             if record_type == "conflict-key" {
                 resolve_cow_merge_conflict_key(
                     &layout,
@@ -4128,6 +4147,7 @@ fn cow_branch_command(
                     apply,
                     apply_reviewed,
                     after_revalidate,
+                    replace_applied,
                     note.as_deref(),
                     reviewer.as_deref(),
                 )?;
@@ -4215,7 +4235,7 @@ fn branch_help_text(command: Option<&str>) -> &'static str {
             "Usage: forkpress branch merge-review <conflict|decision|resolution> <id> --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n       forkpress branch merge-review conflict-key <key> [--run <id>] --status <pending|needs-action|reviewed> --note <text> [--reviewer <name>]\n\nAttach review metadata to an audit record. Reviewing by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it.\n"
         }
         Some("merge-resolve") => {
-            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n       forkpress branch merge-resolve conflict-key <key> [--run <id>] (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Resolving by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell, file conflict, or compatible source-added schema index/view/trigger conflict back to needs-action.\n"
+            "Usage: forkpress branch merge-resolve conflict <id> (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--replace-applied] [--note <text>] [--reviewer <name>]\n       forkpress branch merge-resolve conflict-key <key> [--run <id>] (--choice <source|target> [--apply]|--apply-reviewed) [--after-revalidate] [--note <text>] [--reviewer <name>]\n\nValidate or apply a reviewed merge conflict choice. Resolving by conflict key is allowed only when the key identifies one unresolved conflict, or when --run disambiguates it. Use --apply-reviewed to apply the latest validated choice. Use --after-revalidate only after merge-audit --revalidate has carried a stale DB row/cell, file conflict, or compatible source-added schema index/view/trigger conflict back to needs-action. Use --replace-applied with conflict <id>, --choice source|target, and --apply to change an already-applied DB cell conflict resolution when the target cell still matches the previous applied resolution.\n"
         }
         Some("merge-apply-reviewed") => {
             "Usage: forkpress branch merge-apply-reviewed [--run <id>] [--limit <n>] [--note <text>] [--reviewer <name>] [--format text|json]\n\nApply every currently validated, unapplied generic conflict resolution in the review queue. Inspect the same queue first with `forkpress branch merge-audit --next-action apply-reviewed-choice`.\n"
@@ -6968,6 +6988,7 @@ mod git_helper_tests {
             branch_help_text(Some("merge-resolve"))
                 .contains("source-added schema index/view/trigger")
         );
+        assert!(branch_help_text(Some("merge-resolve")).contains("--replace-applied"));
         assert!(branch_help_text(None).contains("merge-apply-reviewed"));
         assert!(branch_help_text(Some("merge-apply-reviewed")).contains("apply-reviewed-choice"));
         assert!(branch_help_text(None).contains("conflicts [options]"));

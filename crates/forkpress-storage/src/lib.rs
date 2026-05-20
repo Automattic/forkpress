@@ -1937,6 +1937,7 @@ pub fn resolve_cow_merge_conflict(
     apply: bool,
     apply_reviewed: bool,
     after_revalidate: bool,
+    replace_applied: bool,
     note: Option<&str>,
     reviewer: Option<&str>,
 ) -> Result<()> {
@@ -1960,6 +1961,9 @@ pub fn resolve_cow_merge_conflict(
     }
     if after_revalidate {
         args.push("--after-revalidate".into());
+    }
+    if replace_applied {
+        args.push("--replace-applied".into());
     }
     if let Some(note) = note {
         args.push("--note".into());

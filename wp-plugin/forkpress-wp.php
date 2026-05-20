@@ -1319,14 +1319,72 @@ function forkpress_branch_history_summary(array $report, int $limit): array {
     ];
 }
 
+function forkpress_branch_run_conflict_summaries(array $report, array $records): array {
+    $metadata_db = (string)($report['metadata_db'] ?? '');
+    if ($metadata_db === '' || !is_file($metadata_db) || !class_exists('SQLite3')) {
+        return [];
+    }
+    $run_ids = [];
+    foreach ($records as $record) {
+        if (!is_array($record)) {
+            continue;
+        }
+        $id = (int)($record['id'] ?? 0);
+        if ($id > 0 && (int)($record['conflict_count'] ?? 0) > 0) {
+            $run_ids[$id] = true;
+        }
+    }
+    if ($run_ids === []) {
+        return [];
+    }
+
+    try {
+        $db = new SQLite3($metadata_db, SQLITE3_OPEN_READONLY);
+        $ids = implode(',', array_keys($run_ids));
+        $rows = $db->query(
+            "SELECT c.run_id, COUNT(*) AS total, " .
+            "SUM(CASE WHEN COALESCE((SELECT ce.lifecycle_state FROM merge_conflict_events ce WHERE ce.conflict_id = c.id ORDER BY ce.id DESC LIMIT 1), '') = 'resolved' " .
+            "OR COALESCE((SELECT mr.applied FROM merge_resolutions mr WHERE mr.conflict_id = c.id ORDER BY mr.id DESC LIMIT 1), 0) = 1 " .
+            "THEN 1 ELSE 0 END) AS resolved " .
+            "FROM merge_conflicts c WHERE c.run_id IN ($ids) GROUP BY c.run_id"
+        );
+        if (!$rows instanceof SQLite3Result) {
+            return [];
+        }
+        $summaries = [];
+        while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+            $run = (int)($row['run_id'] ?? 0);
+            $total = max(0, (int)($row['total'] ?? 0));
+            $resolved = max(0, min($total, (int)($row['resolved'] ?? 0)));
+            $summaries[$run] = [
+                'total' => $total,
+                'resolved' => $resolved,
+                'unresolved' => max(0, $total - $resolved),
+            ];
+        }
+        $rows->finalize();
+        $db->close();
+        return $summaries;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
 function forkpress_branch_tree_summary(array $report, int $limit): array {
     $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    $summaries = forkpress_branch_run_conflict_summaries($report, $records);
     foreach ($records as &$record) {
         if (!is_array($record)) {
             continue;
         }
         $conflicts = (int)($record['conflict_count'] ?? 0);
-        if ($conflicts > 0 && !isset($record['conflictSummary']) && !isset($record['conflict_summary'])) {
+        if ($conflicts <= 0 || isset($record['conflictSummary']) || isset($record['conflict_summary'])) {
+            continue;
+        }
+        $id = (int)($record['id'] ?? 0);
+        if (isset($summaries[$id])) {
+            $record['conflictSummary'] = $summaries[$id];
+        } else {
             $record['conflictSummary'] = [
                 'total' => $conflicts,
                 'resolved' => 0,
@@ -1758,13 +1816,20 @@ function forkpress_handle_branch_resolve_conflict(): void {
     }
 
     $apply_reviewed = forkpress_branch_post_value('applyReviewed') === '1';
+    $replace_applied = forkpress_branch_post_value('replaceApplied') === '1';
     $after_revalidate = forkpress_branch_post_value('afterRevalidate') === '1';
     $choice = forkpress_branch_post_value('choice');
     if ($apply_reviewed && $choice !== '') {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Apply reviewed cannot be combined with a new source or target choice.');
     }
+    if ($apply_reviewed && $replace_applied) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution requires a new source or target choice.');
+    }
     if ($apply_reviewed && $after_revalidate) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'After revalidate requires a source or target choice.');
+    }
+    if ($replace_applied && $after_revalidate) {
+        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Changing an applied resolution cannot be combined with after revalidate.');
     }
     if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
         forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose source or target for the conflict resolution.');
@@ -1821,6 +1886,9 @@ function forkpress_handle_branch_resolve_conflict(): void {
         if ($after_revalidate) {
             $resolve_args[] = '--after-revalidate';
         }
+        if ($replace_applied) {
+            $resolve_args[] = '--replace-applied';
+        }
         $note = $notes[$choice];
     }
     $resolve_args[] = '--note';
@@ -1835,12 +1903,13 @@ function forkpress_handle_branch_resolve_conflict(): void {
     forkpress_branch_finish_action(
         forkpress_branch_url($current, '/wp-admin/'),
         'notice',
-        $apply_reviewed ? 'Applied reviewed choice for conflict #' . $conflict . '.' : 'Applied ' . $choice . ' for conflict #' . $conflict . '.',
+        $apply_reviewed ? 'Applied reviewed choice for conflict #' . $conflict . '.' : ($replace_applied ? 'Changed conflict #' . $conflict . ' to ' . $choice . '.' : 'Applied ' . $choice . ' for conflict #' . $conflict . '.'),
         [
             'run' => $run,
             'conflict' => $conflict,
             'resolutionChoice' => $apply_reviewed ? 'reviewed' : $choice,
             'afterRevalidate' => $after_revalidate,
+            'replaceApplied' => $replace_applied,
         ]
     );
 }
@@ -2203,6 +2272,25 @@ function forkpress_render_branch_admin_page(): void {
                             if (actions.childNodes.length) {
                                 item.appendChild(actions);
                             }
+                        } else if (record && record.id && (conflictResolutionChangeAvailable(record, 'source') || conflictResolutionChangeAvailable(record, 'target'))) {
+                            var changeActions = document.createElement('div');
+                            changeActions.className = 'forkpress-branch-conflict-actions';
+                            ['source', 'target'].forEach(function (choice) {
+                                if (!conflictResolutionChangeAvailable(record, choice)) {
+                                    return;
+                                }
+                                var changeButton = document.createElement('button');
+                                changeButton.className = 'button button-small';
+                                changeButton.type = 'button';
+                                changeButton.textContent = choice === 'source' ? 'Change applied resolution to source' : 'Change applied resolution to target';
+                                changeButton.addEventListener('click', function (record, choice, run) {
+                                    return function () {
+                                        fetchConflictResolution(record, choice, run, false, true);
+                                    };
+                                }(record, choice, run));
+                                changeActions.appendChild(changeButton);
+                            });
+                            item.appendChild(changeActions);
                         }
                         list.appendChild(item);
                     });
@@ -2215,6 +2303,22 @@ function forkpress_render_branch_admin_page(): void {
                         return false;
                     }
                     if (!Array.isArray(record.resolution_choices) || record.resolution_choices.indexOf(choice) === -1) {
+                        return false;
+                    }
+                    if (record.blocked_resolution_choices && record.blocked_resolution_choices[choice]) {
+                        return false;
+                    }
+                    return true;
+                }
+                function conflictResolutionChangeAvailable(record, choice) {
+                    if (!record || !record.id || Number(record.latest_resolution_applied || 0) !== 1) {
+                        return false;
+                    }
+                    if (record.conflict_type !== 'cell-conflict') {
+                        return false;
+                    }
+                    var choices = Array.isArray(record.resolution_choices) ? record.resolution_choices : ['source', 'target'];
+                    if (choices.indexOf(choice) === -1) {
                         return false;
                     }
                     if (record.blocked_resolution_choices && record.blocked_resolution_choices[choice]) {
@@ -2290,7 +2394,7 @@ function forkpress_render_branch_admin_page(): void {
                         results.textContent = error && error.message ? error.message : 'ForkPress conflict review failed.';
                     });
                 }
-                function fetchConflictResolution(record, choice, run, afterRevalidate) {
+                function fetchConflictResolution(record, choice, run, afterRevalidate, replaceApplied) {
                     if (!record || !record.id) {
                         return;
                     }
@@ -2304,6 +2408,9 @@ function forkpress_render_branch_admin_page(): void {
                         body.append('choice', String(choice));
                         if (afterRevalidate) {
                             body.append('afterRevalidate', '1');
+                        }
+                        if (replaceApplied) {
+                            body.append('replaceApplied', '1');
                         }
                     }
                     if (run) {
@@ -3121,6 +3228,23 @@ function forkpress_render_branch_switcher(): void {
             return true;
         }
 
+        function conflictResolutionChangeAvailable(record, choice) {
+            if (!record || !record.id || Number(record.latest_resolution_applied || 0) !== 1) {
+                return false;
+            }
+            if (record.conflict_type !== 'cell-conflict') {
+                return false;
+            }
+            var choices = Array.isArray(record.resolution_choices) ? record.resolution_choices : ['source', 'target'];
+            if (choices.indexOf(choice) === -1) {
+                return false;
+            }
+            if (record.blocked_resolution_choices && record.blocked_resolution_choices[choice]) {
+                return false;
+            }
+            return true;
+        }
+
         function conflictApplyReviewedAvailable(record) {
             if (!record || record.lifecycle_state === 'resolved') {
                 return false;
@@ -3252,6 +3376,25 @@ function forkpress_render_branch_switcher(): void {
                         actionsRow.appendChild(driverButton);
                     }
                     row.appendChild(actionsRow);
+                } else if (record.id && (conflictResolutionChangeAvailable(record, 'source') || conflictResolutionChangeAvailable(record, 'target'))) {
+                    var changeRow = document.createElement('div');
+                    changeRow.className = 'forkpress-conflict-actions';
+                    ['source', 'target'].forEach(function (choice) {
+                        if (!conflictResolutionChangeAvailable(record, choice)) {
+                            return;
+                        }
+                        var changeButton = document.createElement('button');
+                        changeButton.className = 'forkpress-switcher-button';
+                        changeButton.type = 'button';
+                        changeButton.textContent = choice === 'source' ? 'Change applied resolution to source' : 'Change applied resolution to target';
+                        changeButton.addEventListener('click', function (record, choice) {
+                            return function () {
+                                fetchConflictResolution(record, choice, payload.run, false, true);
+                            };
+                        }(record, choice));
+                        changeRow.appendChild(changeButton);
+                    });
+                    row.appendChild(changeRow);
                 }
                 conflictList.appendChild(row);
             });
@@ -3713,7 +3856,7 @@ function forkpress_render_branch_switcher(): void {
             });
         }
 
-        function fetchConflictResolution(record, choice, run, afterRevalidate) {
+        function fetchConflictResolution(record, choice, run, afterRevalidate, replaceApplied) {
             if (!actions || !actions.resolveNonce || !window.fetch || !window.FormData || !record || !record.id) {
                 return;
             }
@@ -3727,6 +3870,9 @@ function forkpress_render_branch_switcher(): void {
                 body.append('choice', String(choice));
                 if (afterRevalidate) {
                     body.append('afterRevalidate', '1');
+                }
+                if (replaceApplied) {
+                    body.append('replaceApplied', '1');
                 }
             }
             if (run) {

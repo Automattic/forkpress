@@ -218,6 +218,63 @@ try {
         'independent target cell preservation is auditable'
     );
 
+    $replace_base = $tmp . '/replace-applied-base.sqlite';
+    $replace_source = $tmp . '/replace-applied-source.sqlite';
+    $replace_target = $tmp . '/replace-applied-target.sqlite';
+    $replace_metadata = $tmp . '/.forkpress/cow/merge/replace-applied-metadata.sqlite';
+    create_base_db($replace_base);
+    copy($replace_base, $replace_source);
+    copy($replace_base, $replace_target);
+    $db = open_db($replace_source);
+    $db->exec("UPDATE wp_posts SET post_content = 'Source conflict content' WHERE ID = 1");
+    $db->close();
+    $db = open_db($replace_target);
+    $db->exec("UPDATE wp_posts SET post_content = 'Target conflict content' WHERE ID = 1");
+    $db->close();
+    $replace_result = cow_merge_databases($replace_base, $replace_source, $replace_target, $replace_metadata, 'feature-replace-resolution', 'main');
+    assert_same($replace_result['status'], 'completed_with_conflicts', 'conflicting cell edits are audited before applied-resolution replacement');
+    $replace_conflict_id = (int)scalar($replace_metadata, "SELECT id FROM merge_conflicts WHERE table_name = 'wp_posts' AND column_name = 'post_content' AND conflict_type = 'cell-conflict' ORDER BY id DESC LIMIT 1");
+    $replace_source_resolution = cow_merge_resolve_conflict(
+        $replace_metadata,
+        $replace_conflict_id,
+        'source',
+        true,
+        'Apply source before changing the applied resolution.',
+        'cow-test'
+    );
+    assert_same($replace_source_resolution['status'], 'applied', 'source cell conflict resolution applies normally');
+    assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Source conflict content', 'source cell resolution mutates the target cell');
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($replace_metadata, $replace_conflict_id, 'target', true, 'Changing without explicit replace should fail.', 'cow-test'),
+        'already resolved',
+        'applied cell conflict resolution cannot be changed without an explicit replace flag'
+    );
+    $replace_target_resolution = cow_merge_resolve_conflict(
+        $replace_metadata,
+        $replace_conflict_id,
+        'target',
+        true,
+        'Change the already applied resolution back to target.',
+        'cow-test',
+        false,
+        true
+    );
+    assert_same($replace_target_resolution['status'], 'applied', 'replace-applied cell conflict resolution records applied status');
+    assert_same(scalar($replace_target, "SELECT post_content FROM wp_posts WHERE ID = 1"), 'Target conflict content', 'replace-applied cell resolution can restore the audited target value');
+    assert_same(
+        (int)scalar($replace_metadata, "SELECT COUNT(*) FROM merge_resolutions WHERE conflict_id = $replace_conflict_id AND applied = 1"),
+        2,
+        'replace-applied cell conflict keeps both applied resolution records'
+    );
+    $db = open_db($replace_target);
+    $db->exec("UPDATE wp_posts SET post_content = 'Manual post-resolution edit' WHERE ID = 1");
+    $db->close();
+    assert_throws(
+        fn() => cow_merge_resolve_conflict($replace_metadata, $replace_conflict_id, 'source', true, 'Do not overwrite later target drift.', 'cow-test', false, true),
+        'target cell no longer matches the latest applied resolution',
+        'replace-applied cell resolution refuses to overwrite target drift'
+    );
+
     $volatile_base = $tmp . '/volatile-usermeta-base.sqlite';
     $volatile_source = $tmp . '/volatile-usermeta-source.sqlite';
     $volatile_target = $tmp . '/volatile-usermeta-target.sqlite';

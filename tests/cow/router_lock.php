@@ -252,8 +252,11 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'fp-timeline-merge'), 'out-of-band branch manager renders merge curves between lanes');
         assert_true(str_contains($early_body, 'fp-row-title'), 'out-of-band branch manager renders revisions as timeline rows');
         assert_true(str_contains($early_body, 'sortedRunEntries'), 'out-of-band branch manager sorts real revision records, not one row per branch');
-        assert_true(str_contains($early_body, 'timeline revisions / newest first'), 'out-of-band branch manager labels revision timeline direction');
+        assert_true(str_contains($early_body, 'runTimelineTimestamp'), 'out-of-band branch manager sorts revisions by timestamp before run id');
+        assert_true(str_contains($early_body, 'interleaved timeline revisions / newest first'), 'out-of-band branch manager labels interleaved revision timeline direction');
         assert_true(str_contains($early_body, 'seedConflictSummaries'), 'out-of-band branch manager seeds conflict summaries without extra conflict audits');
+        assert_true(str_contains($early_body, 'selectedRunId'), 'out-of-band branch manager keeps the selected revision synced after conflict audits load');
+        assert_true(str_contains($early_body, 'refreshSelectedRunConflictState'), 'out-of-band branch manager refreshes selected revision conflict totals after audit details load');
         assert_true(!str_contains($early_body, 'Promise.all(conflictRuns.map'), 'out-of-band branch manager avoids N+1 conflict audit loading');
         assert_true(str_contains($early_body, 'renderConflictLoading'), 'out-of-band branch manager renders an immediate conflict loader');
         assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
@@ -262,6 +265,9 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'decodeAuditPayload'), 'out-of-band branch manager decodes audit payloads for review');
         assert_true(str_contains($early_body, 'Review note'), 'out-of-band branch manager exposes editable review notes');
         assert_true(str_contains($early_body, 'Apply selected'), 'out-of-band branch manager exposes a selected conflict resolution action');
+        assert_true(str_contains($early_body, 'Change applied resolution'), 'out-of-band branch manager exposes applied-resolution changes');
+        assert_true(str_contains($early_body, 'prioritizeResolutionChange'), 'out-of-band branch manager surfaces applied-resolution changes before large value previews');
+        assert_true(str_contains($early_body, 'replaceApplied'), 'out-of-band branch manager sends replace-applied resolution payloads');
         assert_true(str_contains($early_body, 'Branch actions'), 'out-of-band branch manager keeps create and merge actions available');
         assert_true(!file_exists($started), 'out-of-band branch manager did not execute branch PHP');
 

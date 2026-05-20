@@ -439,6 +439,43 @@ assert_same(
     'branch tree admin action uses audited branch tree CLI path'
 );
 
+$metadata_db = $tmp . '/metadata.sqlite';
+$metadata = new SQLite3($metadata_db);
+$metadata->exec('CREATE TABLE merge_conflicts (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL)');
+$metadata->exec('CREATE TABLE merge_conflict_events (id INTEGER PRIMARY KEY, conflict_id INTEGER NOT NULL, lifecycle_state TEXT NOT NULL)');
+$metadata->exec('CREATE TABLE merge_resolutions (id INTEGER PRIMARY KEY, conflict_id INTEGER NOT NULL, applied INTEGER NOT NULL)');
+$metadata->exec('INSERT INTO merge_conflicts (id, run_id) VALUES (1, 42), (2, 42), (3, 42)');
+$metadata->exec("INSERT INTO merge_conflict_events (id, conflict_id, lifecycle_state) VALUES (1, 1, 'resolved'), (2, 2, 'unreviewed')");
+$metadata->exec('INSERT INTO merge_resolutions (id, conflict_id, applied) VALUES (1, 3, 1)');
+$metadata->close();
+$tree_with_metadata_json = json_encode([
+    'metadata_db' => $metadata_db,
+    'runs' => [
+        [
+            'id' => 42,
+            'source_branch' => 'feature',
+            'target_branch' => 'main',
+            'status' => 'completed_with_conflicts',
+            'decision_count' => 9,
+            'conflict_count' => 3,
+            'finished_at' => '2026-05-18 12:00:00',
+        ],
+    ],
+], JSON_UNESCAPED_SLASHES);
+$tree_with_metadata = run_branch_ui_action(
+    ['action' => 'forkpress_branch_tree', 'limit' => '5'],
+    ['main', 'feature'],
+    false,
+    true,
+    true,
+    ['FORKPRESS_TEST_CLI_OUTPUT' => $tree_with_metadata_json]
+);
+$tree_with_metadata_payload = decode_branch_ui_payload($tree_with_metadata);
+assert_same($tree_with_metadata_payload['records'][0]['conflictSummary']['total'] ?? null, 3, 'branch tree admin action reads conflict summary totals from metadata');
+assert_same($tree_with_metadata_payload['records'][0]['conflictSummary']['resolved'] ?? null, 2, 'branch tree admin action reads resolved conflict counts from metadata');
+assert_same($tree_with_metadata_payload['records'][0]['conflictSummary']['unresolved'] ?? null, 1, 'branch tree admin action reads unresolved conflict counts from metadata');
+assert_same(isset($tree_with_metadata_payload['records'][0]['conflictSummary']['estimated']), false, 'branch tree admin action does not mark metadata-backed conflict summaries as estimated');
+
 $conflicted_merge_output = "forkpress: merged feature into main\\n  run:       42\\n  status:    completed_with_conflicts\\n  applied:   yes\\n  conflicts: 3\\n";
 $conflicted_merge = run_branch_ui_action(
     ['action' => 'forkpress_branch_merge', 'source' => 'feature', 'target' => 'main'],
@@ -624,6 +661,24 @@ assert_same(
     'branch conflict resolution passes editable branch-manager notes to the CLI'
 );
 
+$change_applied_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'target', 'replaceApplied' => '1', 'note' => 'Switch the already applied resolution back to target.'],
+    ['main', 'feature']
+);
+$change_applied_resolution_payload = decode_branch_ui_payload($change_applied_resolution);
+assert_same($change_applied_resolution_payload['success'] ?? null, true, 'branch conflict resolution can request an applied-resolution change');
+assert_same($change_applied_resolution_payload['replaceApplied'] ?? null, true, 'branch conflict resolution reports applied-resolution replacement mode');
+assert_same(
+    $change_applied_resolution_payload['message'] ?? null,
+    'Changed conflict #7 to target.',
+    'branch conflict resolution explains applied-resolution replacement'
+);
+assert_same(
+    array_slice($change_applied_resolution['argv'][0] ?? [], 1),
+    ['branch', '--work-dir', $work_dir, 'merge-resolve', 'conflict', '7', '--choice', 'target', '--apply', '--replace-applied', '--note', 'Switch the already applied resolution back to target.', '--reviewer', 'wordpress-ui'],
+    'branch conflict resolution passes replace-applied mode to the CLI'
+);
+
 $invalid_conflict_resolution = run_branch_ui_action(
     ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'choice' => 'both'],
     ['main', 'feature']
@@ -695,6 +750,14 @@ $mixed_conflict_resolution = run_branch_ui_action(
 $mixed_conflict_resolution_payload = decode_branch_ui_payload($mixed_conflict_resolution);
 assert_same($mixed_conflict_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects mixed choice and apply-reviewed');
 assert_same(count($mixed_conflict_resolution['argv']), 0, 'branch conflict resolution rejects mixed apply modes before invoking CLI');
+
+$mixed_replace_applied_resolution = run_branch_ui_action(
+    ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'applyReviewed' => '1', 'replaceApplied' => '1'],
+    ['main', 'feature']
+);
+$mixed_replace_applied_resolution_payload = decode_branch_ui_payload($mixed_replace_applied_resolution);
+assert_same($mixed_replace_applied_resolution_payload['success'] ?? null, false, 'branch conflict resolution rejects mixed apply-reviewed and replace-applied');
+assert_same(count($mixed_replace_applied_resolution['argv']), 0, 'branch conflict resolution rejects replace-applied apply modes before invoking CLI');
 
 $after_revalidate_resolution = run_branch_ui_action(
     ['action' => 'forkpress_branch_resolve_conflict', 'conflict' => '7', 'run' => '42', 'choice' => 'source', 'afterRevalidate' => '1'],
@@ -1238,11 +1301,14 @@ assert_true(str_contains($switcher_html, 'function fetchConflictResolution'), 'b
 assert_true(str_contains($switcher_html, 'function conflictResolutionChoiceAvailable'), 'branch switcher checks conflict resolution availability');
 assert_true(str_contains($switcher_html, 'function conflictApplyReviewedAvailable'), 'branch switcher checks apply-reviewed availability');
 assert_true(str_contains($switcher_html, 'function conflictResolutionAfterRevalidate'), 'branch switcher detects after-revalidate resolution guards');
+assert_true(str_contains($switcher_html, 'function conflictResolutionChangeAvailable'), 'branch switcher detects replace-applied resolution guards');
 assert_true(str_contains($switcher_html, 'Use source'), 'branch switcher renders source resolution action');
 assert_true(str_contains($switcher_html, 'Keep target'), 'branch switcher renders target resolution action');
+assert_true(str_contains($switcher_html, 'Change applied resolution'), 'branch switcher renders applied-resolution change action');
 assert_true(str_contains($switcher_html, 'Apply reviewed'), 'branch switcher renders apply-reviewed action');
 assert_true(str_contains($switcher_html, "body.append('applyReviewed', '1')"), 'branch switcher sends apply-reviewed resolution payloads');
 assert_true(str_contains($switcher_html, "body.append('afterRevalidate', '1')"), 'branch switcher sends after-revalidate resolution payloads');
+assert_true(str_contains($switcher_html, "body.append('replaceApplied', '1')"), 'branch switcher sends replace-applied resolution payloads');
 assert_true(str_contains($switcher_html, 'forkpress_branch_apply_reviewed_conflicts'), 'branch switcher renders reviewed-resolution apply action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_apply_reviewed_conflicts'), 'branch switcher renders reviewed-resolution apply nonce');
 assert_true(str_contains($switcher_html, 'function fetchApplyReviewedConflicts'), 'branch switcher renders reviewed-resolution apply client handler');

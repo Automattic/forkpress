@@ -560,14 +560,72 @@ function forkpress_cow_branch_history_summary(array $report, int $limit): array 
     ];
 }
 
+function forkpress_cow_branch_run_conflict_summaries(array $report, array $records): array {
+    $metadata_db = (string)($report['metadata_db'] ?? '');
+    if ($metadata_db === '' || !is_file($metadata_db) || !class_exists('SQLite3')) {
+        return [];
+    }
+    $run_ids = [];
+    foreach ($records as $record) {
+        if (!is_array($record)) {
+            continue;
+        }
+        $id = (int)($record['id'] ?? 0);
+        if ($id > 0 && (int)($record['conflict_count'] ?? 0) > 0) {
+            $run_ids[$id] = true;
+        }
+    }
+    if ($run_ids === []) {
+        return [];
+    }
+
+    try {
+        $db = new SQLite3($metadata_db, SQLITE3_OPEN_READONLY);
+        $ids = implode(',', array_keys($run_ids));
+        $rows = $db->query(
+            "SELECT c.run_id, COUNT(*) AS total, " .
+            "SUM(CASE WHEN COALESCE((SELECT ce.lifecycle_state FROM merge_conflict_events ce WHERE ce.conflict_id = c.id ORDER BY ce.id DESC LIMIT 1), '') = 'resolved' " .
+            "OR COALESCE((SELECT mr.applied FROM merge_resolutions mr WHERE mr.conflict_id = c.id ORDER BY mr.id DESC LIMIT 1), 0) = 1 " .
+            "THEN 1 ELSE 0 END) AS resolved " .
+            "FROM merge_conflicts c WHERE c.run_id IN ($ids) GROUP BY c.run_id"
+        );
+        if (!$rows instanceof SQLite3Result) {
+            return [];
+        }
+        $summaries = [];
+        while ($row = $rows->fetchArray(SQLITE3_ASSOC)) {
+            $run = (int)($row['run_id'] ?? 0);
+            $total = max(0, (int)($row['total'] ?? 0));
+            $resolved = max(0, min($total, (int)($row['resolved'] ?? 0)));
+            $summaries[$run] = [
+                'total' => $total,
+                'resolved' => $resolved,
+                'unresolved' => max(0, $total - $resolved),
+            ];
+        }
+        $rows->finalize();
+        $db->close();
+        return $summaries;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
 function forkpress_cow_branch_tree_summary(array $report, int $limit): array {
     $records = is_array($report['runs'] ?? null) ? array_values($report['runs']) : [];
+    $summaries = forkpress_cow_branch_run_conflict_summaries($report, $records);
     foreach ($records as &$record) {
         if (!is_array($record)) {
             continue;
         }
         $conflicts = (int)($record['conflict_count'] ?? 0);
-        if ($conflicts > 0 && !isset($record['conflictSummary']) && !isset($record['conflict_summary'])) {
+        if ($conflicts <= 0 || isset($record['conflictSummary']) || isset($record['conflict_summary'])) {
+            continue;
+        }
+        $id = (int)($record['id'] ?? 0);
+        if (isset($summaries[$id])) {
+            $record['conflictSummary'] = $summaries[$id];
+        } else {
             $record['conflictSummary'] = [
                 'total' => $conflicts,
                 'resolved' => 0,
@@ -1002,14 +1060,23 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
         }
 
         $apply_reviewed = forkpress_cow_branch_post_value('applyReviewed') === '1';
+        $replace_applied = forkpress_cow_branch_post_value('replaceApplied') === '1';
         $after_revalidate = forkpress_cow_branch_post_value('afterRevalidate') === '1';
         $choice = forkpress_cow_branch_post_value('choice');
         if ($apply_reviewed && $choice !== '') {
             forkpress_cow_branch_finish_json(400, $current_url, false, 'Apply reviewed cannot be combined with a new source or target choice.');
             return true;
         }
+        if ($apply_reviewed && $replace_applied) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution requires a new source or target choice.');
+            return true;
+        }
         if ($apply_reviewed && $after_revalidate) {
             forkpress_cow_branch_finish_json(400, $current_url, false, 'After revalidate requires a source or target choice.');
+            return true;
+        }
+        if ($replace_applied && $after_revalidate) {
+            forkpress_cow_branch_finish_json(400, $current_url, false, 'Changing an applied resolution cannot be combined with after revalidate.');
             return true;
         }
         if (!$apply_reviewed && !in_array($choice, ['source', 'target'], true)) {
@@ -1072,6 +1139,9 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             if ($after_revalidate) {
                 $resolve_args[] = '--after-revalidate';
             }
+            if ($replace_applied) {
+                $resolve_args[] = '--replace-applied';
+            }
             $note = $notes[$choice];
         }
         $resolve_args[] = '--note';
@@ -1088,12 +1158,13 @@ function forkpress_cow_handle_admin_branch_action(string $path, string $current_
             200,
             $current_url,
             true,
-            $apply_reviewed ? 'Applied reviewed choice for conflict #' . $conflict . '.' : 'Applied ' . $choice . ' for conflict #' . $conflict . '.',
+            $apply_reviewed ? 'Applied reviewed choice for conflict #' . $conflict . '.' : ($replace_applied ? 'Changed conflict #' . $conflict . ' to ' . $choice . '.' : 'Applied ' . $choice . ' for conflict #' . $conflict . '.'),
             [
                 'run' => $run,
                 'conflict' => $conflict,
                 'resolutionChoice' => $apply_reviewed ? 'reviewed' : $choice,
                 'afterRevalidate' => $after_revalidate,
+                'replaceApplied' => $replace_applied,
             ]
         );
         return true;
@@ -1573,6 +1644,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var mergeSource = document.getElementById('fp-merge-source');
     var mergeTarget = document.getElementById('fp-merge-target');
     var records = [];
+    var selectedRunId = null;
 
     function branch(name) {
         return state.branches.find(function (item) { return item.name === name; }) || { name: name, url: '#', siteUrl: '#', adminUrl: '#', managerUrl: '#' };
@@ -1626,18 +1698,25 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var id = Number(run && run.id ? run.id : 0);
         return Number.isFinite(id) ? id : 0;
     }
+    function runTimelineTimestamp(run) {
+        var value = String(run && (run.finished_at || run.started_at || run.created_at) || '');
+        if (!value) return 0;
+        var normalized = value.indexOf('T') === -1 ? value.replace(' ', 'T') + 'Z' : value;
+        var parsed = Date.parse(normalized);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
     function sortedRunEntries() {
         return records.map(function (run, index) {
             return { run: run, index: index };
         }).sort(function (a, b) {
-            var byId = runNumber(b.run) - runNumber(a.run);
-            if (byId !== 0) return byId;
-            return String(b.run.finished_at || b.run.started_at || '').localeCompare(String(a.run.finished_at || a.run.started_at || ''));
+            var byTime = runTimelineTimestamp(b.run) - runTimelineTimestamp(a.run);
+            if (byTime !== 0) return byTime;
+            return runNumber(b.run) - runNumber(a.run);
         });
     }
     function conflictSummary(run) {
         var summary = run && (run.conflictSummary || run.conflict_summary || run._conflictSummary);
-        var total = Number(run && run.conflict_count || 0);
+        var total = Number(summary && summary.total || run && run.conflict_count || 0);
         var resolved = Number(summary && summary.resolved || 0);
         var unresolved = Number(summary && summary.unresolved || 0);
         if (!summary && total > 0) unresolved = total;
@@ -1936,7 +2015,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 'data-index': entry.index
             }));
         });
-        summary.textContent = lanes.length + ' graph lanes / ' + entries.length + ' timeline revisions / newest first';
+        summary.textContent = lanes.length + ' graph lanes / ' + entries.length + ' interleaved timeline revisions / newest first';
     }
     function setDetail(title, rows, actions, object) {
         detailTitle.textContent = title;
@@ -1956,6 +2035,18 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         (actions || []).forEach(function (action) { detailActions.appendChild(action); });
         raw.textContent = object ? JSON.stringify(object, null, 2) : '';
         raw.style.display = object ? 'block' : 'none';
+    }
+    function refreshSelectedRunConflictState(run, summary) {
+        var item = runById(run);
+        if (item && summary) item._conflictSummary = summary;
+        if (!summary || String(selectedRunId) !== String(run)) return false;
+        Array.prototype.slice.call(detail.querySelectorAll('div')).some(function (row) {
+            var cells = row.querySelectorAll('span');
+            if (cells.length < 2 || cells[0].textContent !== 'conflict state') return false;
+            cells[1].textContent = String(summary.unresolved || 0) + ' unresolved / ' + String(summary.resolved || 0) + ' resolved / ' + String(summary.total || 0) + ' total';
+            return true;
+        });
+        return true;
     }
     function link(label, href) {
         var a = document.createElement('a');
@@ -2031,8 +2122,19 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         wrap.appendChild(textarea);
         return wrap;
     }
+    function conflictResolutionChangeAvailable(record) {
+        if (!record || !record.id || Number(record.latest_resolution_applied || 0) !== 1) return false;
+        if (record.conflict_type !== 'cell-conflict') return false;
+        var choices = Array.isArray(record.resolution_choices) ? record.resolution_choices : ['source', 'target'];
+        return choices.indexOf('source') !== -1 && choices.indexOf('target') !== -1;
+    }
+    function conflictResolutionAppliedLabel(record) {
+        if (!record || !record.latest_resolution_id) return 'Current applied resolution can be changed by selecting source or target.';
+        return 'Current applied resolution #' + String(record.latest_resolution_id) + ' used ' + String(record.latest_resolution_choice || 'a reviewed') + ' choice.';
+    }
     function selectBranch(name) {
         var item = branch(name);
+        selectedRunId = null;
         clearStatus();
         setDetail('Branch ' + name, { branch: name, current: name === state.currentBranch ? 'yes' : 'no' }, [
             link('Open site', item.siteUrl || item.url),
@@ -2041,6 +2143,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         ], item);
     }
     function selectRun(run) {
+        selectedRunId = String(run && run.id || '');
         clearStatus();
         var actions = [
             link('Open source', branch(String(run.source_branch || '')).siteUrl),
@@ -2065,6 +2168,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function renderConflicts(payload) {
         var list = Array.isArray(payload.records) ? payload.records : [];
+        if (refreshSelectedRunConflictState(payload.run, payload.conflictSummary || payload.conflict_summary || null)) {
+            renderGraph();
+        }
         setStatus(list.length ? 'warn' : 'ok', payload.message || 'Loaded conflict details.');
         conflicts.innerHTML = '';
         raw.textContent = '';
@@ -2113,21 +2219,34 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             choiceWrap.appendChild(choice);
             var row = document.createElement('div');
             row.className = 'fp-buttons';
+            var prioritizeResolutionChange = conflictResolutionChangeAvailable(record);
             if (record.id && record.lifecycle_state !== 'resolved') {
                 row.appendChild(button('Needs action', function () { reviewConflict(record.id, 'needs-action', payload.run, note.value); }));
                 row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
                 row.appendChild(button('Apply selected', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
+            } else if (prioritizeResolutionChange) {
+                row.appendChild(button('Change applied resolution', function () { resolveConflict(record.id, choice.value, payload.run, note.value, false, true); }, 'primary'));
+                row.appendChild(textNode('span', 'fp-conflict-meta', conflictResolutionAppliedLabel(record)));
             } else if (record.id && record.latest_resolution_status && record.latest_resolution_applied !== 1) {
                 row.appendChild(button('Apply reviewed choice', function () { resolveConflict(record.id, '', payload.run, note.value, true); }, 'primary'));
+            } else if (record.id && Number(record.latest_resolution_applied || 0) === 1) {
+                row.appendChild(textNode('span', 'fp-conflict-meta', 'Resolved; changing this conflict type requires a fresh merge audit.'));
             } else {
                 row.appendChild(textNode('span', 'fp-conflict-meta', 'Resolved; no action needed.'));
             }
             node.appendChild(title);
             node.appendChild(meta);
-            node.appendChild(values);
-            node.appendChild(noteWrap);
-            node.appendChild(choiceWrap);
-            node.appendChild(row);
+            if (prioritizeResolutionChange) {
+                node.appendChild(choiceWrap);
+                node.appendChild(noteWrap);
+                node.appendChild(row);
+                node.appendChild(values);
+            } else {
+                node.appendChild(values);
+                node.appendChild(noteWrap);
+                node.appendChild(choiceWrap);
+                node.appendChild(row);
+            }
             conflicts.appendChild(node);
         });
     }
@@ -2172,6 +2291,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!item) return;
         item._conflictSummary = payload.conflictSummary || payload.conflict_summary || item._conflictSummary || null;
         item._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
+        if (String(selectedRunId) === String(run)) {
+            selectRun(item);
+        }
     }
     function loadConflicts(run, options) {
         var item = runById(run);
@@ -2198,8 +2320,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function reviewConflict(id, value, run, note) {
         post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
     }
-    function resolveConflict(id, choice, run, note, applyReviewed) {
-        post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '' }).then(function () { loadConflicts(run); loadTree(); }).catch(function (error) { setStatus('error', error.message); });
+    function resolveConflict(id, choice, run, note, applyReviewed, replaceApplied) {
+        post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function () { loadConflicts(run); loadTree(); }).catch(function (error) { setStatus('error', error.message); });
     }
     graph.addEventListener('click', function (event) {
         var target = event.target.closest ? event.target.closest('[data-kind]') : null;
