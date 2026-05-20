@@ -62,13 +62,13 @@ under `.forkpress-bin/` next to the launcher.
 Pin the installer or launcher to a release:
 
 ```bash
-FORKPRESS_VERSION=<version> ./forkpress serve
+FORKPRESS_VERSION=vX.Y.Z ./forkpress serve
 ```
 
 The installer also accepts the variable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | FORKPRESS_VERSION=<version> sh
+curl -fsSL https://raw.githubusercontent.com/Automattic/forkpress/trunk/scripts/install.sh | FORKPRESS_VERSION=vX.Y.Z sh
 ```
 
 Useful overrides:
