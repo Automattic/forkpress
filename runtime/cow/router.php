@@ -1921,6 +1921,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         flex-wrap: wrap;
         gap: 8px;
     }
+    .fp-buttons .fp-conflict-meta {
+        align-items: center;
+        display: inline-flex;
+        min-height: 32px;
+    }
     button, .fp-button {
         align-items: center;
         background: #fff;
@@ -1940,6 +1945,15 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     button.primary:hover { background: var(--accent-strong); color: #fff; }
     button.danger { border-color: var(--danger); color: var(--danger); }
     button:disabled { cursor: progress; opacity: .68; }
+    button.is-busy::after {
+        content: "";
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        height: 12px;
+        margin-left: 6px;
+        width: 12px;
+    }
     .fp-status {
         border-radius: 6px;
         display: none;
@@ -2149,6 +2163,25 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         font-size: 13px;
         padding: 12px;
     }
+    .fp-crash-recovery {
+        background: #fff8e5;
+        border: 1px solid #dba617;
+        border-left: 4px solid var(--conflict);
+        border-radius: 6px;
+        display: grid;
+        gap: 8px;
+        padding: 12px;
+    }
+    .fp-crash-recovery strong { color: #713f00; }
+    .fp-crash-recovery code {
+        background: rgba(255, 255, 255, .72);
+        border: 1px solid rgba(113, 63, 0, .22);
+        border-radius: 5px;
+        display: block;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        padding: 7px 8px;
+    }
     .fp-conflict-title { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
     .fp-conflict-inspector > .fp-conflict-title {
         background: #fff;
@@ -2312,7 +2345,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             padding-bottom: 2px;
         }
         .fp-conflict-workbench .fp-buttons button,
-        .fp-conflict-workbench .fp-buttons .fp-button {
+        .fp-conflict-workbench .fp-buttons .fp-button,
+        .fp-conflict-workbench .fp-buttons .fp-conflict-meta {
             flex: 0 0 auto;
             justify-content: center;
             white-space: nowrap;
@@ -2442,6 +2476,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     var selectedRunId = null;
     var selectedConflictId = initialParams.get('conflict') || null;
     var selectedConflictFilter = initialParams.get('filter') || 'all';
+    var didRestoreInitialSelection = false;
 
     function branch(name) {
         return state.branches.find(function (item) { return item.name === name; }) || { name: name, url: '#', siteUrl: '#', adminUrl: '#', managerUrl: '#' };
@@ -2456,6 +2491,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function setWorkbenchMode(message) {
         workbenchMode.textContent = message || 'Select a branch, revision, or merge event.';
+    }
+    function statusKindForPayload(payload, fallback) {
+        var type = String(payload && payload.type || '');
+        if (type === 'warning') return 'warn';
+        if (type === 'error') return 'error';
+        if (type === 'notice' || type === 'success') return 'ok';
+        return fallback || 'ok';
     }
     function syncReviewUrl() {
         if (!window.history || !window.history.replaceState) return;
@@ -3005,8 +3047,35 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         b.textContent = label;
         b.title = label;
         if (extraClass) b.className = extraClass;
-        b.addEventListener('click', fn);
+        b.addEventListener('click', function () {
+            return runButtonAction(b, label, function () { return fn(b); });
+        });
         return b;
+    }
+    function setButtonBusy(buttonNode, busy) {
+        if (!buttonNode) return;
+        buttonNode.disabled = !!busy;
+        buttonNode.classList.toggle('is-busy', !!busy);
+        buttonNode.setAttribute('aria-busy', busy ? 'true' : 'false');
+    }
+    function runButtonAction(buttonNode, label, work) {
+        if (buttonNode && buttonNode.disabled) return Promise.resolve();
+        setButtonBusy(buttonNode, true);
+        var result;
+        try {
+            result = work();
+        } catch (error) {
+            setButtonBusy(buttonNode, false);
+            setStatus('error', error && error.message ? error.message : ('Could not run ' + String(label || 'action') + '.'));
+            return Promise.reject(error);
+        }
+        return Promise.resolve(result).then(function (value) {
+            setButtonBusy(buttonNode, false);
+            return value;
+        }, function (error) {
+            setButtonBusy(buttonNode, false);
+            throw error;
+        });
     }
     function textNode(tag, className, text) {
         var node = document.createElement(tag);
@@ -3504,6 +3573,22 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         }
         return node;
     }
+    function renderCrashRecovery(payload, source, target) {
+        var run = String(payload.run || selectedRunId || '');
+        setStatus('warn', payload.message || 'This merge has pending crash recovery.');
+        conflictActions.innerHTML = '';
+        conflictActions.appendChild(button('Restore crash recovery', function () { return restoreCrashRecovery(run); }, 'danger'));
+        appendBranchPreviewLinks(conflictActions, source, target);
+        appendReviewLinkAction(conflictActions);
+        var panel = document.createElement('div');
+        panel.className = 'fp-crash-recovery';
+        panel.appendChild(textNode('strong', '', 'Pending crash recovery blocks conflict review'));
+        panel.appendChild(textNode('div', '', payload.message || ('Merge run #' + run + ' needs target database/files restored before more conflict actions can run.')));
+        if (payload.recoveryCommand) {
+            panel.appendChild(textNode('code', '', payload.recoveryCommand));
+        }
+        conflicts.appendChild(panel);
+    }
     function selectBranch(name) {
         var item = branch(name);
         selectedRunId = null;
@@ -3517,7 +3602,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         setWorkbenchMode('Viewing branch ' + name + '.');
         syncReviewUrl();
     }
-    function selectRun(run) {
+    function selectRun(run, options) {
+        options = options || {};
         var nextRunId = String(run && run.id || '');
         var preserveInitialConflict = initialRunId && nextRunId === String(initialRunId) && selectedConflictId;
         selectedRunId = nextRunId;
@@ -3545,7 +3631,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         setWorkbenchMode(isMerge ? ('Reviewing merge #' + String(run.id || '') + ' into ' + String(run.target_branch || '') + '.') : ('Viewing revision #' + String(run.id || '') + '.'));
         renderGraph();
         scrollSelectedRunIntoView();
-        if (Number(run.conflict_count || 0) > 0 && run.id) {
+        if (!options.skipConflictLoad && Number(run.conflict_count || 0) > 0 && run.id) {
             loadConflicts(run.id);
         } else {
             syncReviewUrl();
@@ -3569,7 +3655,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         conflicts.innerHTML = '';
         raw.textContent = '';
         raw.style.display = 'none';
+        if (Number(payload.crashRecoveryCount || 0) > 0) {
+            renderCrashRecovery(payload, source, target);
+            return;
+        }
         if (!list.length) {
+            conflictActions.appendChild(button('Revalidate conflicts', function () { return revalidateConflicts(payload.run); }));
+            appendBranchPreviewLinks(conflictActions, source, target);
+            appendReviewLinkAction(conflictActions);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflicts found for this revision.'));
             return;
         }
@@ -3578,6 +3671,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!filteredList.length) {
             selectedConflictId = null;
             syncReviewUrl();
+            conflictActions.appendChild(button('Revalidate conflicts', function () { return revalidateConflicts(payload.run); }));
             appendBranchPreviewLinks(conflictActions, source, target);
             appendReviewLinkAction(conflictActions);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No ' + conflictFilterLabel(selectedConflictFilter) + ' conflicts match this filter.'));
@@ -3601,6 +3695,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         next.disabled = selectedIndex >= filteredList.length - 1;
         conflictActions.appendChild(previous);
         conflictActions.appendChild(next);
+        conflictActions.appendChild(textNode('span', 'fp-conflict-meta', 'Conflict ' + String(selectedIndex + 1) + ' of ' + String(filteredList.length)));
+        conflictActions.appendChild(button('Revalidate conflicts', function () { return revalidateConflicts(payload.run); }));
         if (Number(summary.resolved || 0) > 0) {
             conflictActions.appendChild(button('Apply reviewed choices', function () { applyReviewedConflicts(payload.run); }, 'primary'));
         }
@@ -3615,7 +3711,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         reviewGrid.appendChild(inspectorSlot);
         conflicts.appendChild(reviewGrid);
     }
-    function loadTree() {
+    function loadTree(options) {
+        options = options || {};
         setStatus('warn', 'Loading branch graph...');
         return post('forkpress_branch_tree', { limit: '50' }).then(function (payload) {
             records = Array.isArray(payload.records) ? payload.records : [];
@@ -3623,10 +3720,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             renderGraph();
             scrollSelectedRunIntoView();
             clearStatus();
-            var initialRun = initialRunId ? runById(initialRunId) : null;
+            var initialRun = options.preserveSelection && selectedRunId ? runById(selectedRunId) : null;
+            if (!initialRun && initialRunId && !didRestoreInitialSelection) {
+                initialRun = runById(initialRunId);
+                didRestoreInitialSelection = true;
+            }
             initialRun = initialRun || firstConflictRun() || records[0] || null;
             if (initialRun) {
-                selectRun(initialRun);
+                selectRun(initialRun, { skipConflictLoad: !!options.skipConflictReload });
             } else {
                 selectBranch(state.currentBranch);
             }
@@ -3661,6 +3762,18 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         item._conflictSummary = payload.conflictSummary || payload.conflict_summary || item._conflictSummary || null;
         item._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
     }
+    function forgetConflictCache(run) {
+        var item = runById(run);
+        if (!item) return;
+        delete item._conflictSummary;
+        delete item._conflictRecords;
+    }
+    function refreshAfterConflictAction(run) {
+        forgetConflictCache(run);
+        return loadTree({ preserveSelection: true, skipConflictReload: true }).then(function () {
+            return loadConflicts(run, { refresh: true });
+        });
+    }
     function loadConflicts(run, options) {
         var requestedRun = String(run || '');
         var item = runById(run);
@@ -3690,26 +3803,43 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         });
     }
     function reviewConflict(id, value, run, note) {
-        post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function () { loadConflicts(run); }).catch(function (error) { setStatus('error', error.message); });
+        return post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function (payload) {
+            setStatus('ok', payload.message || 'Conflict review updated.');
+            return refreshAfterConflictAction(run);
+        }).catch(function (error) { setStatus('error', error.message); });
     }
     function resolveConflict(id, choice, run, note, applyReviewed, replaceApplied) {
         if (replaceApplied && !window.confirm('Change the already-applied resolution for conflict #' + String(id || '') + '?')) return;
-        post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function () { loadConflicts(run); loadTree(); }).catch(function (error) { setStatus('error', error.message); });
+        return post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function (payload) {
+            setStatus('ok', payload.message || 'Conflict resolution applied.');
+            return refreshAfterConflictAction(run);
+        }).catch(function (error) { setStatus('error', error.message); });
+    }
+    function revalidateConflicts(run) {
+        return post('forkpress_branch_revalidate_conflicts', { run: String(run || '') }).then(function (payload) {
+            setStatus(statusKindForPayload(payload, 'warn'), payload.message || 'Merge conflicts revalidated.');
+            return refreshAfterConflictAction(run);
+        }).catch(function (error) { setStatus('error', error.message || 'Could not revalidate conflicts.'); });
+    }
+    function restoreCrashRecovery(run) {
+        if (!window.confirm('Restore crash recovery artifacts for merge run #' + String(run || '') + '?')) return;
+        return post('forkpress_branch_restore_crash', { run: String(run || '') }).then(function (payload) {
+            setStatus(statusKindForPayload(payload, 'ok'), payload.message || 'Crash recovery restored.');
+            return refreshAfterConflictAction(run);
+        }).catch(function (error) { setStatus('error', error.message || 'Could not restore crash recovery.'); });
     }
     function applyReviewedConflicts(run) {
         if (!window.confirm('Apply all reviewed conflict choices for merge run #' + String(run || '') + '?')) return;
-        post('forkpress_branch_apply_reviewed_conflicts', { run: String(run || '') }).then(function (payload) {
-            setStatus(Number(payload.applied || 0) > 0 ? 'ok' : 'warn', payload.message || 'Reviewed resolutions checked.');
-            loadConflicts(run, { refresh: true });
-            loadTree();
+        return post('forkpress_branch_apply_reviewed_conflicts', { run: String(run || '') }).then(function (payload) {
+            setStatus(statusKindForPayload(payload, Number(payload.applied || 0) > 0 ? 'ok' : 'warn'), payload.message || 'Reviewed resolutions checked.');
+            return refreshAfterConflictAction(run);
         }).catch(function (error) { setStatus('error', error.message || 'Could not apply reviewed choices.'); });
     }
     function runPluginDriver(conflict, run, driverKey) {
         if (!window.confirm('Run the approved plugin driver for conflict #' + String(conflict || '') + '?')) return;
-        post('forkpress_branch_run_plugin_driver', { conflict: String(conflict || ''), run: String(run || ''), driverKey: String(driverKey || '') }).then(function (payload) {
-            setStatus('ok', payload.message || 'Plugin driver finished.');
-            loadConflicts(run, { refresh: true });
-            loadTree();
+        return post('forkpress_branch_run_plugin_driver', { conflict: String(conflict || ''), run: String(run || ''), driverKey: String(driverKey || '') }).then(function (payload) {
+            setStatus(statusKindForPayload(payload, 'ok'), payload.message || 'Plugin driver finished.');
+            return refreshAfterConflictAction(run);
         }).catch(function (error) { setStatus('error', error.message || 'Could not run plugin driver.'); });
     }
     graph.addEventListener('click', function (event) {
@@ -3729,26 +3859,30 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     createForm.addEventListener('submit', function (event) {
         event.preventDefault();
         var submit = createForm.querySelector('button[type=submit]');
-        submit.disabled = true;
+        setButtonBusy(submit, true);
         post('forkpress_branch_create', { branch: createName.value, from: createFrom.value }).then(function (payload) {
             if (Array.isArray(payload.branches)) state.branches = payload.branches;
             state.currentBranch = createName.value;
             current.textContent = 'Current: ' + state.currentBranch;
+            adminLink.href = branch(state.currentBranch).adminUrl || '#';
             refreshForms();
             renderGraph();
+            selectBranch(state.currentBranch);
             setStatus('ok', payload.message || 'Branch created.');
             createForm.reset();
-        }).catch(function (error) { setStatus('error', error.message || 'Branch create failed.'); }).then(function () { submit.disabled = false; });
+        }).catch(function (error) { setStatus('error', error.message || 'Branch create failed.'); }).then(function () { setButtonBusy(submit, false); });
     });
     mergeForm.addEventListener('submit', function (event) {
         event.preventDefault();
         var submit = mergeForm.querySelector('button[type=submit]');
-        submit.disabled = true;
+        setButtonBusy(submit, true);
         post('forkpress_branch_merge', { source: mergeSource.value, target: mergeTarget.value }).then(function (payload) {
             setStatus(payload.type === 'warning' ? 'warn' : 'ok', payload.message || 'Merge completed.');
-            if (payload.run && Number(payload.conflicts || 0) > 0) loadConflicts(payload.run);
-            loadTree();
-        }).catch(function (error) { setStatus('error', error.message || 'Merge failed.'); }).then(function () { submit.disabled = false; });
+            if (payload.run) selectedRunId = String(payload.run);
+            return loadTree({ preserveSelection: !!payload.run, skipConflictReload: true }).then(function () {
+                if (payload.run && Number(payload.conflicts || 0) > 0) return loadConflicts(payload.run, { refresh: true });
+            });
+        }).catch(function (error) { setStatus('error', error.message || 'Merge failed.'); }).then(function () { setButtonBusy(submit, false); });
     });
     document.getElementById('fp-refresh').addEventListener('click', loadTree);
     document.getElementById('fp-focus-selected').addEventListener('click', scrollSelectedRunIntoView);
