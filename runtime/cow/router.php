@@ -1643,10 +1643,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         color: var(--ink);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         margin: 0;
+        overflow: hidden;
     }
     .fp-shell {
-        display: grid;
-        grid-template-rows: auto 1fr;
+        display: flex;
+        flex-direction: column;
         min-height: 100vh;
     }
     .fp-topbar {
@@ -1675,15 +1676,26 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-layout {
         display: grid;
-        gap: 14px;
-        grid-template-columns: minmax(0, 1fr) 330px;
-        padding: 14px;
+        flex: 1;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(360px, 1fr) auto;
+        height: calc(100vh - 54px);
+        min-height: 0;
+        overflow: hidden;
+        padding: 10px;
     }
     .fp-panel {
         background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 8px;
         min-width: 0;
+    }
+    .fp-graph-panel {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
     }
     .fp-graph-head, .fp-detail-head {
         align-items: center;
@@ -1693,13 +1705,15 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         justify-content: space-between;
         padding: 14px 16px;
     }
+    .fp-bottom > .fp-detail-head { padding: 10px 16px; }
     h1, h2 { font-size: 16px; line-height: 1.25; margin: 0; }
-    .fp-muted { color: var(--muted); font-size: 12px; }
+    .fp-muted { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .fp-graph-head > div, .fp-detail-head > div { min-width: 0; }
     .fp-graph-wrap {
-        height: min(44vh, 460px);
-        min-height: 300px;
+        flex: 1 1 0;
+        min-height: 0;
         overflow: auto;
-        padding: 10px;
+        padding: 8px 10px 10px;
     }
     .fp-graph {
         display: block;
@@ -1727,16 +1741,41 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-conflict-badge { fill: var(--danger); }
     .fp-conflict-badge.is-resolved { fill: var(--ok); }
     .fp-badge-text { fill: #fff; font-size: 10px; font-weight: 700; pointer-events: none; }
-    .fp-side {
+    .fp-bottom {
         display: grid;
-        gap: 18px;
+        grid-template-rows: auto minmax(0, 1fr);
+        max-height: 42vh;
+        min-height: 310px;
         min-width: 0;
+    }
+    .fp-bottom-body {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: minmax(250px, 280px) minmax(0, 1fr);
+        min-height: 0;
+        overflow: hidden;
+        padding: 10px 12px 12px;
+    }
+    .fp-bottom-primary {
+        display: grid;
+        grid-column: 1 / -1;
+        grid-template-rows: auto minmax(0, 1fr);
+        min-height: 0;
+        min-width: 0;
+    }
+    body.fp-reviewing .fp-bottom-primary {
+        border-right: 1px solid var(--line);
+        grid-column: auto;
+        padding-right: 12px;
     }
     .fp-detail-body, .fp-actions-body {
         display: grid;
         gap: 12px;
-        padding: 14px 16px;
+        min-height: 0;
+        overflow: auto;
+        padding: 10px 12px;
     }
+    .fp-detail-body { grid-template-rows: auto auto auto minmax(0, 1fr); }
     .fp-kv {
         display: grid;
         gap: 8px;
@@ -1792,10 +1831,35 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     .fp-status.warn { background: #fff4e5; color: #713f00; }
     .fp-status.error { background: #fcf0f1; color: #8a2424; }
     details.fp-actions summary {
+        border-bottom: 1px solid var(--line);
         cursor: pointer;
         font-size: 13px;
         font-weight: 700;
-        padding: 14px 16px;
+        padding: 12px 14px;
+    }
+    .fp-bottom-actions {
+        margin-left: auto;
+        position: relative;
+    }
+    .fp-bottom-actions .fp-actions {
+        position: relative;
+    }
+    .fp-bottom-actions details.fp-actions summary {
+        border: 1px solid #8c8f94;
+        border-radius: 6px;
+        min-height: 32px;
+        padding: 6px 10px;
+    }
+    .fp-bottom-actions .fp-actions-body {
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, .14);
+        position: absolute;
+        right: 0;
+        top: calc(100% + 8px);
+        width: 320px;
+        z-index: 4;
     }
     .fp-form {
         display: grid;
@@ -1825,24 +1889,32 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     .fp-conflict-workbench {
         display: none;
-        grid-column: 1 / -1;
+        min-height: 0;
+        min-width: 0;
+        overflow: hidden;
     }
-    .fp-conflict-workbench.is-visible { display: block; }
+    .fp-conflict-workbench.is-visible {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+    }
     .fp-conflict-workbench-body {
         display: grid;
         gap: 10px;
-        padding: 10px 12px 12px;
+        min-height: 0;
+        overflow: hidden;
+        padding: 10px 12px;
     }
     .fp-conflict-review-grid {
         align-items: start;
         display: grid;
         gap: 12px;
-        grid-template-columns: minmax(520px, 1.08fr) minmax(360px, .92fr);
+        grid-template-columns: minmax(500px, 1.25fr) minmax(320px, .85fr);
+        min-height: 0;
     }
     .fp-conflict-table-wrap {
         border: 1px solid var(--line);
         border-radius: 6px;
-        max-height: 34vh;
+        max-height: none;
         overflow: auto;
     }
     .fp-conflict-table {
@@ -1850,6 +1922,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table-layout: fixed;
         width: 100%;
     }
+    .fp-conflict-table th:nth-child(1), .fp-conflict-table td:nth-child(1) { width: 82px; }
+    .fp-conflict-table th:nth-child(2), .fp-conflict-table td:nth-child(2) { width: 16%; }
+    .fp-conflict-table th:nth-child(3), .fp-conflict-table td:nth-child(3) { width: 25%; }
+    .fp-conflict-table th:nth-child(4), .fp-conflict-table td:nth-child(4) { width: 20%; }
+    .fp-conflict-table th:nth-child(5), .fp-conflict-table td:nth-child(5) { width: 34%; }
     .fp-conflict-table th {
         background: #f6f7f7;
         border-bottom: 1px solid var(--line);
@@ -1903,7 +1980,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         padding: 9px;
     }
     .fp-conflict-inspector {
-        max-height: 38vh;
+        max-height: none;
         overflow: auto;
     }
     .fp-conflict-inspector-empty {
@@ -1984,24 +2061,37 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         border: 1px solid var(--line);
         border-radius: 6px;
         font-size: 12px;
-        max-height: 220px;
+        max-height: 150px;
         overflow: auto;
         padding: 10px;
         white-space: pre-wrap;
     }
     @media (max-width: 980px) {
-        .fp-layout { grid-template-columns: 1fr; padding: 12px; }
-        .fp-topbar { flex-wrap: wrap; padding: 10px 14px; }
-        .fp-open-admin { margin-left: 0; }
+        .fp-layout { grid-template-rows: minmax(340px, 1fr) auto; height: auto; overflow: visible; padding: 8px; }
+        body { overflow: auto; }
+        .fp-topbar { flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; }
+        .fp-open-admin { flex-basis: 100%; margin-left: 0; }
+        .fp-graph-head {
+            align-items: stretch;
+            flex-direction: column;
+        }
+        .fp-graph-head .fp-buttons { width: 100%; }
+        .fp-bottom { max-height: none; }
+        .fp-bottom > .fp-detail-head {
+            align-items: stretch;
+            flex-direction: column;
+        }
+        .fp-bottom-body { grid-template-columns: 1fr; overflow: visible; }
+        .fp-bottom-primary { grid-column: auto; }
+        .fp-bottom-actions { margin-left: 0; }
+        .fp-bottom-actions details.fp-actions summary { width: 100%; }
+        .fp-bottom-actions .fp-actions-body { position: static; width: 100%; box-shadow: none; }
         .fp-conflict-review-grid { grid-template-columns: 1fr; }
         .fp-conflict-grid { grid-template-columns: 1fr; }
     }
-    body.fp-reviewing .fp-layout { gap: 10px; padding: 10px; }
-    body.fp-reviewing .fp-layout { grid-template-columns: 1fr; }
-    body.fp-reviewing .fp-side { display: none; }
-    body.fp-reviewing .fp-graph-wrap { height: min(24vh, 240px); min-height: 190px; }
+    body.fp-reviewing .fp-graph-wrap { min-height: 360px; }
     body.fp-reviewing .fp-conflict-table-wrap,
-    body.fp-reviewing .fp-conflict-inspector { max-height: 36vh; }
+    body.fp-reviewing .fp-conflict-inspector { max-height: calc(42vh - 112px); }
 </style>
 </head>
 <body>
@@ -2012,7 +2102,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         <a class="fp-open-admin" id="fp-admin-link" href="#">Open WordPress admin</a>
     </header>
     <main class="fp-layout">
-        <section class="fp-panel">
+        <section class="fp-panel fp-graph-panel">
             <div class="fp-graph-head">
                 <div>
                     <h1>Branch Graph</h1>
@@ -2027,19 +2117,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 <svg class="fp-graph" id="fp-graph" role="img" aria-label="ForkPress branch graph"></svg>
             </div>
         </section>
-        <aside class="fp-side">
-            <section class="fp-panel">
-                <div class="fp-detail-head">
-                    <h2 id="fp-detail-title">Selection</h2>
+        <section class="fp-panel fp-bottom" id="fp-bottom-pane">
+            <div class="fp-detail-head">
+                <div>
+                    <h2>Branch Workbench</h2>
                 </div>
-                <div class="fp-detail-body">
-                    <div class="fp-status" id="fp-status"></div>
-                    <div class="fp-kv" id="fp-detail"></div>
-                    <div class="fp-buttons" id="fp-detail-actions"></div>
-                    <pre id="fp-raw"></pre>
-                </div>
-            </section>
-            <section class="fp-panel">
+                <section class="fp-bottom-actions">
                 <details class="fp-actions">
                     <summary>Branch actions</summary>
                     <div class="fp-actions-body">
@@ -2055,18 +2138,32 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                         </form>
                     </div>
                 </details>
-            </section>
-        </aside>
-        <section class="fp-panel fp-conflict-workbench" id="fp-conflict-workbench">
-            <div class="fp-detail-head">
-                <div>
-                    <h2 id="fp-conflict-title">Conflict Review</h2>
-                    <div class="fp-muted" id="fp-conflict-summary">Select a conflicting revision to inspect entity-level details.</div>
-                </div>
-                <div class="fp-buttons" id="fp-conflict-actions"></div>
+                </section>
             </div>
-            <div class="fp-conflict-workbench-body">
-                <div class="fp-conflicts" id="fp-conflicts"></div>
+            <div class="fp-bottom-body">
+                <section class="fp-bottom-primary">
+                <div class="fp-detail-head">
+                    <h2 id="fp-detail-title">Selection</h2>
+                </div>
+                <div class="fp-detail-body">
+                    <div class="fp-status" id="fp-status"></div>
+                    <div class="fp-kv" id="fp-detail"></div>
+                    <div class="fp-buttons" id="fp-detail-actions"></div>
+                    <pre id="fp-raw"></pre>
+                </div>
+                </section>
+                <section class="fp-conflict-workbench" id="fp-conflict-workbench">
+                    <div class="fp-detail-head">
+                        <div>
+                            <h2 id="fp-conflict-title">Conflict Review</h2>
+                            <div class="fp-muted" id="fp-conflict-summary">Select a conflicting revision to inspect entity-level details.</div>
+                        </div>
+                        <div class="fp-buttons" id="fp-conflict-actions"></div>
+                    </div>
+                    <div class="fp-conflict-workbench-body">
+                        <div class="fp-conflicts" id="fp-conflicts"></div>
+                    </div>
+                </section>
             </div>
         </section>
     </main>
@@ -2112,13 +2209,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function showConflictWorkbench(title, message) {
         document.body.classList.add('fp-reviewing');
-        conflictWorkbench.className = 'fp-panel fp-conflict-workbench is-visible';
+        conflictWorkbench.className = 'fp-conflict-workbench is-visible';
         conflictTitle.textContent = title || 'Conflict Review';
         conflictSummaryText.textContent = message || '';
     }
     function hideConflictWorkbench() {
         document.body.classList.remove('fp-reviewing');
-        conflictWorkbench.className = 'fp-panel fp-conflict-workbench';
+        conflictWorkbench.className = 'fp-conflict-workbench';
         conflicts.innerHTML = '';
         conflictActions.innerHTML = '';
         conflictSummaryText.textContent = 'Select a conflicting revision to inspect entity-level details.';
@@ -2342,7 +2439,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var top = 38;
         var rowGap = 46;
         var rowHeight = 40;
-        var width = Math.max(900, textX + 460);
+        var availableWidth = graph.parentNode && graph.parentNode.clientWidth ? graph.parentNode.clientWidth - 20 : 0;
+        var width = Math.max(900, availableWidth, textX + 460);
         var height = Math.max(320, top + Math.max(entries.length, 1) * rowGap + 24);
         graph.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
         graph.setAttribute('width', width);
@@ -2770,7 +2868,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table.className = 'fp-conflict-table';
         var thead = document.createElement('thead');
         var header = document.createElement('tr');
-        ['Conflict', 'Entity', 'Identifier', 'Field', 'Context', 'State'].forEach(function (label) {
+        ['Conflict', 'Entity', 'Identifier', 'Field', 'Context'].forEach(function (label) {
             header.appendChild(textNode('th', '', label));
         });
         thead.appendChild(header);
@@ -2801,10 +2899,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             appendTableCell(row, [
                 { className: 'fp-table-primary', text: context.context || details || '(no context)' },
                 { className: 'fp-table-muted', text: context.context && details ? details : '' }
-            ]);
-            appendTableCell(row, [
-                { className: 'fp-table-primary', text: conflictStateText(record) },
-                { className: 'fp-table-muted', text: record.stale_status ? 'stale: ' + record.stale_status : '' }
             ]);
             tbody.appendChild(row);
             row.addEventListener('click', function (event) {

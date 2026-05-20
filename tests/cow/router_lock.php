@@ -259,6 +259,9 @@ if (is_resource($lock)) {
         $early_body = read_stream_until($pipes[1], '</html>', 2.0);
         assert_true(str_contains($early_body, 'ForkPress Branches'), 'out-of-band branch manager renders before lock release');
         assert_true(str_contains($early_body, 'fp-graph'), 'out-of-band branch manager renders the branch graph surface');
+        assert_true(str_contains($early_body, 'fp-bottom'), 'out-of-band branch manager renders one persistent bottom workbench');
+        assert_true(str_contains($early_body, 'fp-bottom-actions'), 'out-of-band branch manager keeps branch actions in the bottom workbench');
+        assert_true(!str_contains($early_body, 'fp-side'), 'out-of-band branch manager no longer alternates through a right sidebar');
         assert_true(str_contains($early_body, '"actionUrl":"/_forkpress/action"'), 'out-of-band branch manager uses same-origin action endpoint');
         assert_true(!str_contains($early_body, 'http://wp.localhost/_forkpress/action'), 'out-of-band branch manager does not hard-code an HTTP action endpoint');
         assert_true(str_contains($early_body, 'fp-timeline-lane'), 'out-of-band branch manager renders compact git-style graph lanes');
@@ -284,7 +287,7 @@ if (is_resource($lock)) {
         assert_true(str_contains($early_body, 'renderConflictLoading'), 'out-of-band branch manager renders an immediate conflict loader');
         assert_true(str_contains($early_body, 'forkpress_branch_tree'), 'out-of-band branch manager can load branch tree data');
         assert_true(str_contains($early_body, 'forkpress_branch_conflicts'), 'out-of-band branch manager can revisit conflicts');
-        assert_true(str_contains($early_body, 'fp-conflict-workbench'), 'out-of-band branch manager renders conflicts in a full-page workbench');
+        assert_true(str_contains($early_body, 'fp-conflict-workbench'), 'out-of-band branch manager renders conflicts in the bottom workbench');
         assert_true(str_contains($early_body, 'fp-conflict-review-grid'), 'out-of-band branch manager keeps conflict table and inspector on one screen');
         assert_true(str_contains($early_body, 'fp-conflict-inspector'), 'out-of-band branch manager renders one selected conflict inspector instead of every detail card');
         assert_true(str_contains($early_body, 'setSelectedConflict'), 'out-of-band branch manager changes selected conflicts without rerendering the whole workbench');
