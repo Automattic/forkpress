@@ -334,7 +334,8 @@ $create_payload = decode_branch_ui_payload($create);
 assert_same($create['status'], 0, 'branch create admin action exits cleanly');
 assert_same($create_payload['success'] ?? null, true, 'branch create admin action returns JSON success');
 assert_same($create_payload['message'] ?? null, 'Created branch new_feature.', 'branch create admin action reports the created branch');
-assert_same($create_payload['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create admin action redirects to the new branch admin');
+assert_same($create_payload['url'] ?? null, 'http://new_feature.wp.localhost:18080/_forkpress/branches', 'branch create admin action redirects to the out-of-band branch manager');
+assert_same($create_payload['managerUrl'] ?? null, 'http://new_feature.wp.localhost:18080/_forkpress/branches', 'branch create response exposes the new branch manager URL');
 assert_same($create_payload['branches'][0]['name'] ?? null, 'new_feature', 'branch create response marks the new branch as current in refreshed switcher data');
 assert_same($create_payload['branches'][0]['url'] ?? null, 'http://new_feature.wp.localhost:18080/wp-admin/', 'branch create response gives the new branch a usable admin URL');
 assert_same($create_payload['branches'][1]['url'] ?? null, 'http://wp.localhost:18080/wp-admin/', 'branch create response gives main its own admin URL');
@@ -356,7 +357,7 @@ $forwarded_create = run_branch_ui_action(
 );
 $forwarded_create_payload = decode_branch_ui_payload($forwarded_create);
 assert_same($forwarded_create['status'], 0, 'branch create respects forwarded HTTPS proxy headers');
-assert_same($forwarded_create_payload['url'] ?? null, 'https://forwarded_feature.wp.localhost:18080/wp-admin/', 'branch create returns HTTPS branch admin URL behind a proxy');
+assert_same($forwarded_create_payload['url'] ?? null, 'https://forwarded_feature.wp.localhost:18080/_forkpress/branches', 'branch create returns HTTPS branch manager URL behind a proxy');
 assert_same($forwarded_create_payload['branches'][1]['url'] ?? null, 'https://wp.localhost:18080/wp-admin/', 'branch create returns HTTPS main URL behind a proxy');
 
 $non_async_create = run_branch_ui_action(
@@ -386,7 +387,8 @@ assert_same($merge['status'], 0, 'branch merge admin action exits cleanly');
 assert_same($merge_payload['success'] ?? null, true, 'branch merge admin action returns JSON success');
 assert_same($merge_payload['type'] ?? null, 'notice', 'branch merge admin action returns notice type for clean merge');
 assert_same($merge_payload['message'] ?? null, 'Merged feature into main.', 'branch merge admin action reports the merge');
-assert_same($merge_payload['url'] ?? null, 'http://wp.localhost:18080/wp-admin/', 'branch merge admin action redirects to target branch admin');
+assert_same($merge_payload['url'] ?? null, 'http://wp.localhost:18080/_forkpress/branches', 'branch merge admin action redirects to the out-of-band branch manager');
+assert_same($merge_payload['managerUrl'] ?? null, 'http://wp.localhost:18080/_forkpress/branches', 'branch merge response exposes the target branch manager URL');
 assert_same(count($merge['argv']), 1, 'branch merge admin action invokes ForkPress CLI once');
 assert_same(
     array_slice($merge['argv'][0] ?? [], 1),
@@ -1277,7 +1279,9 @@ $switcher_render_payload = decode_branch_ui_payload($switcher_render);
 $switcher_html = (string)($switcher_render_payload['html'] ?? '');
 assert_true(str_contains($switcher_html, 'Open branch manager'), 'branch switcher links to the full branch manager page');
 assert_true(str_contains($switcher_html, '/_forkpress/branches'), 'branch switcher uses the out-of-band branch manager URL');
-assert_true(str_contains($switcher_html, "window.location.assign(payload.url)"), 'branch switcher navigates to the new branch after create');
+assert_true(str_contains($switcher_html, "link.href = branch.managerUrl || branch.url"), 'branch switcher branch list links to the manager before falling back to WordPress hosts');
+assert_true(str_contains($switcher_html, "window.location.assign(payload.managerUrl || payload.url)"), 'branch switcher navigates to the branch manager after create');
+assert_true(str_contains(file_get_contents($plugin), '\'href\'  => forkpress_branch_manager_url($branch)'), 'branch switcher admin-bar indicator links to the manager instead of the branch front end');
 assert_true(str_contains($switcher_html, 'forkpress_branch_history'), 'branch switcher renders branch history action');
 assert_true(str_contains($switcher_html, 'nonce-forkpress_branch_history'), 'branch switcher renders branch history nonce');
 assert_true(str_contains($switcher_html, 'Show merge history'), 'branch switcher renders branch history button text');

@@ -1450,7 +1450,7 @@ add_action('admin_notices', 'forkpress_branch_birth_admin_notice');
 
 function forkpress_handle_branch_create(): void {
     if (!forkpress_branch_can_manage()) {
-        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot create ForkPress branches from this site.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url(forkpress_current_branch() ?: 'main'), 'error', 'You cannot create ForkPress branches from this site.');
     }
     if (function_exists('check_admin_referer')) {
         check_admin_referer('forkpress_branch_create');
@@ -1461,28 +1461,31 @@ function forkpress_handle_branch_create(): void {
     $current = forkpress_current_branch() ?: 'main';
     $branches = forkpress_local_branches($current);
     if (!forkpress_branch_name_is_valid($branch)) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Branch names can use letters, numbers, hyphens, and underscores.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url($current), 'error', 'Branch names can use letters, numbers, hyphens, and underscores.');
     }
     if (!in_array($from, $branches, true)) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose an existing source branch.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url($current), 'error', 'Choose an existing source branch.');
     }
 
     [$code, $output] = forkpress_branch_run_cli(['create', $branch, '--from', $from]);
     if ($code !== 0) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not create the branch.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url($current), 'error', $output ?: 'ForkPress could not create the branch.');
     }
     forkpress_branch_finish_action(
-        forkpress_branch_url($branch, '/wp-admin/'),
+        forkpress_branch_manager_url($branch),
         'notice',
         'Created branch ' . $branch . '.',
-        ['branches' => forkpress_branch_switcher_data($branch, '/wp-admin/', [$branch, 'main'])]
+        [
+            'branches' => forkpress_branch_switcher_data($branch, '/wp-admin/', [$branch, 'main']),
+            'managerUrl' => forkpress_branch_manager_url($branch),
+        ]
     );
 }
 add_action('admin_post_forkpress_branch_create', 'forkpress_handle_branch_create');
 
 function forkpress_handle_branch_merge(): void {
     if (!forkpress_branch_can_manage()) {
-        forkpress_branch_finish_action(forkpress_branch_url(forkpress_current_branch() ?: 'main', '/wp-admin/'), 'error', 'You cannot merge ForkPress branches from this site.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url(forkpress_current_branch() ?: 'main'), 'error', 'You cannot merge ForkPress branches from this site.');
     }
     if (function_exists('check_admin_referer')) {
         check_admin_referer('forkpress_branch_merge');
@@ -1493,15 +1496,15 @@ function forkpress_handle_branch_merge(): void {
     $current = forkpress_current_branch() ?: 'main';
     $branches = forkpress_local_branches($current);
     if (!in_array($source, $branches, true) || !in_array($target, $branches, true)) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose existing source and target branches.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url($current), 'error', 'Choose existing source and target branches.');
     }
     if ($source === $target) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', 'Choose two different branches to merge.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url($current), 'error', 'Choose two different branches to merge.');
     }
 
     [$code, $output] = forkpress_branch_run_cli(['merge', $source, '--into', $target]);
     if ($code !== 0) {
-        forkpress_branch_finish_action(forkpress_branch_url($current, '/wp-admin/'), 'error', $output ?: 'ForkPress could not merge the branch.');
+        forkpress_branch_finish_action(forkpress_branch_manager_url($current), 'error', $output ?: 'ForkPress could not merge the branch.');
     }
 
     $summary = forkpress_branch_merge_summary($output);
@@ -1511,11 +1514,12 @@ function forkpress_handle_branch_merge(): void {
         $audit_command = forkpress_branch_merge_audit_command($run);
         $message = 'Merged ' . $source . ' into ' . $target . ' with ' . $conflicts . ' conflict' . ($conflicts === 1 ? '' : 's') . '. Review them with `' . $audit_command . '`.';
         forkpress_branch_finish_action(
-            forkpress_branch_url($target, '/wp-admin/'),
+            forkpress_branch_manager_url($target),
             'warning',
             $message,
             [
                 'branches' => forkpress_branch_switcher_data($target, '/wp-admin/'),
+                'managerUrl' => forkpress_branch_manager_url($target),
                 'mergeStatus' => $summary['status'],
                 'conflicts' => $conflicts,
                 'run' => $run,
@@ -1525,10 +1529,13 @@ function forkpress_handle_branch_merge(): void {
     }
 
     forkpress_branch_finish_action(
-        forkpress_branch_url($target, '/wp-admin/'),
+        forkpress_branch_manager_url($target),
         'notice',
         'Merged ' . $source . ' into ' . $target . '.',
-        ['branches' => forkpress_branch_switcher_data($target, '/wp-admin/')]
+        [
+            'branches' => forkpress_branch_switcher_data($target, '/wp-admin/'),
+            'managerUrl' => forkpress_branch_manager_url($target),
+        ]
     );
 }
 add_action('admin_post_forkpress_branch_merge', 'forkpress_handle_branch_merge');
@@ -2655,7 +2662,7 @@ add_action('admin_bar_menu', function ($wp_admin_bar) {
     $wp_admin_bar->add_node([
         'id'    => 'forkpress-branch-indicator',
         'title' => 'Branch: ' . esc_html($branch),
-        'href'  => forkpress_branch_url($branch),
+        'href'  => forkpress_branch_manager_url($branch),
         'meta'  => ['class' => 'forkpress-branch-indicator'],
     ]);
 }, 100);
@@ -3533,7 +3540,7 @@ function forkpress_render_branch_switcher(): void {
             matches.forEach(function (branch) {
                 var link = document.createElement('a');
                 link.className = 'forkpress-switcher-branch' + (branch.current ? ' is-current' : '');
-                link.href = branch.url;
+                link.href = branch.managerUrl || branch.url;
                 link.role = 'menuitem';
                 link.textContent = branch.name;
                 list.appendChild(link);
@@ -3634,8 +3641,8 @@ function forkpress_render_branch_switcher(): void {
                     if (payload.branches) {
                         setBranches(payload.branches);
                     }
-                    if (actionName === 'forkpress_branch_create' && payload.url) {
-                        window.location.assign(payload.url);
+                    if (actionName === 'forkpress_branch_create' && (payload.managerUrl || payload.url)) {
+                        window.location.assign(payload.managerUrl || payload.url);
                         return;
                     }
                     if (payload.type === 'warning' && payload.run) {
