@@ -2550,7 +2550,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                     <div class="fp-legend" aria-label="Graph legend">
                         <span><i class="revision"></i>revision</span>
                         <span><i class="merge"></i>merge event</span>
-                        <span><i class="conflicts"></i>unreviewed checks</span>
+                        <span><i class="conflicts"></i>conflicts</span>
                         <span><i class="arrow"></i>into target</span>
                     </div>
                 </div>
@@ -2608,7 +2608,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
                 <section class="fp-conflict-workbench" id="fp-conflict-workbench">
                     <div class="fp-detail-head">
                         <div>
-                            <h2 id="fp-conflict-title">Conflict Review</h2>
+                            <h2 id="fp-conflict-title">Conflicts</h2>
                             <div class="fp-muted" id="fp-conflict-summary">Select a conflicting revision to inspect entity-level details.</div>
                         </div>
                         <div class="fp-buttons" id="fp-conflict-actions"></div>
@@ -2692,9 +2692,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function showConflictWorkbench(title, message) {
         document.body.classList.add('fp-reviewing');
         conflictWorkbench.className = 'fp-conflict-workbench is-visible';
-        conflictTitle.textContent = title || 'Conflict Review';
+        conflictTitle.textContent = title || 'Conflicts';
         conflictSummaryText.textContent = message || '';
-        setWorkbenchMode(title || 'Conflict review');
+        setWorkbenchMode(title || 'Conflicts');
     }
     function hideConflictWorkbench() {
         document.body.classList.remove('fp-reviewing');
@@ -2806,7 +2806,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var resolved = Number(summary && summary.resolved || 0);
         var unresolved = Number(summary && summary.unresolved || 0);
         if (!summary && total > 0) unresolved = total;
-        return { total: total, resolved: resolved, unresolved: unresolved };
+        return { total: total, resolved: resolved, unresolved: unresolved, hasResolutionCounts: !!(summary && summary.hasResolutionCounts) };
     }
     function hasConflictSummary(run) {
         return !!(run && (run._conflictSummary || run.conflictSummary || run.conflict_summary));
@@ -2822,7 +2822,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function humanStatus(value) {
         value = String(value || '');
-        if (value === 'completed_with_conflicts') return 'merged; has unreviewed checks';
+        if (value === 'completed_with_conflicts') return 'merged with conflicts';
         if (value === 'revalidate') return 'check again';
         if (value === 'validated') return 'checked';
         return value.replace(/_/g, ' ');
@@ -2833,15 +2833,22 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (value === 'plugin-theme-template-conflict') return 'theme template conflict';
         return humanStatus(value);
     }
-    function conflictUnreviewedCount(summary) {
+    function conflictPendingChoiceCount(summary) {
         return Number(summary && summary.unresolved || 0);
     }
-    function conflictAcceptedCount(summary) {
+    function conflictAppliedChoiceCount(summary) {
         return Number(summary && summary.resolved || 0);
     }
-    function conflictReviewStateText(summary) {
+    function conflictResolutionSummaryText(summary) {
         if (!summary || !Number(summary.total || 0)) return 'none';
-        return String(conflictUnreviewedCount(summary)) + ' unreviewed checks / ' + String(conflictAcceptedCount(summary)) + ' accepted checks / ' + String(summary.total || 0) + ' total conflict checks';
+        var applied = conflictAppliedChoiceCount(summary);
+        var pending = conflictPendingChoiceCount(summary);
+        var parts = [String(summary.total || 0) + ' conflicts'];
+        if (summary.hasResolutionCounts) {
+            if (applied > 0) parts.push(String(applied) + ' choices applied');
+            if (pending > 0) parts.push(String(pending) + ' without explicit choice');
+        }
+        return parts.join(' / ');
     }
     function isSetupRun(run) {
         var status = String(run && run.status || '');
@@ -2931,7 +2938,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var conflict = conflictSummary(run);
         if (conflict.total > 0) {
             parts.push('merge result exists');
-            parts.push(conflictUnreviewedCount(conflict) + ' unreviewed checks / ' + conflict.total + ' total conflict checks');
+            parts.push(String(conflict.total) + ' conflicts');
         } else if (Number(run.decision_count || 0) > 0) {
             parts.push(String(run.decision_count) + ' decisions');
         }
@@ -3181,14 +3188,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             meta.textContent = runMeta(run);
             textLayer.appendChild(meta);
             if (conflict.total > 0) {
-                var unreviewed = conflictUnreviewedCount(conflict);
-                var allAccepted = unreviewed === 0 && hasConflictSummary(run);
-                var badgeText = String(allAccepted ? conflict.total : unreviewed);
+                var allApplied = !!conflict.hasResolutionCounts && conflictPendingChoiceCount(conflict) === 0 && hasConflictSummary(run);
+                var badgeText = String(conflict.total);
                 var badgeWidth = Math.max(28, 14 + badgeText.length * 7);
                 var badgeX = tx + 10;
                 var badgeY = y - 27;
-                var badgeTitle = allAccepted ? (badgeText + ' accepted conflict check' + (badgeText === '1' ? '' : 's')) : (badgeText + ' unreviewed conflict check' + (badgeText === '1' ? '' : 's'));
-                var badgeRect = svg('rect', { x: badgeX, y: badgeY, width: badgeWidth, height: 16, rx: 5, class: 'fp-conflict-badge' + (allAccepted ? ' is-resolved' : '') });
+                var badgeTitle = badgeText + ' conflict' + (badgeText === '1' ? '' : 's') + (allApplied ? ' with applied choices' : '');
+                var badgeRect = svg('rect', { x: badgeX, y: badgeY, width: badgeWidth, height: 16, rx: 5, class: 'fp-conflict-badge' + (allApplied ? ' is-resolved' : '') });
                 badgeRect.appendChild(svg('title', {})).textContent = badgeTitle;
                 nodeLayer.appendChild(badgeRect);
                 var badge = svg('text', { x: badgeX + badgeWidth / 2, y: badgeY + 11, class: 'fp-badge-text', 'text-anchor': 'middle' });
@@ -3250,8 +3256,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!summary || String(selectedRunId) !== String(run)) return false;
         Array.prototype.slice.call(detail.querySelectorAll('div')).some(function (row) {
             var cells = row.querySelectorAll('span');
-            if (cells.length < 2 || cells[0].textContent !== 'review state') return false;
-            cells[1].textContent = conflictReviewStateText(summary);
+            if (cells.length < 2 || cells[0].textContent !== 'resolution state') return false;
+            cells[1].textContent = conflictResolutionSummaryText(summary);
             return true;
         });
         return true;
@@ -3269,14 +3275,14 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (target) container.appendChild(link('Open target: ' + target, branch(target).siteUrl));
     }
     function appendReviewLinkAction(container) {
-        container.appendChild(button('Copy review link', function () {
+        container.appendChild(button('Copy conflict link', function () {
             syncReviewUrl();
             if (!navigator.clipboard || !navigator.clipboard.writeText) {
                 setStatus('warn', 'Copy is not available in this browser. Use the current address bar URL.');
                 return;
             }
             navigator.clipboard.writeText(window.location.href).then(function () {
-                setStatus('ok', 'Review link copied.');
+                setStatus('ok', 'Conflict link copied.');
             }).catch(function () {
                 setStatus('warn', 'Could not copy automatically. Use the current address bar URL.');
             });
@@ -3342,11 +3348,13 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (flow) wrap.appendChild(textNode('span', 'fp-chip strong', flow));
         if (summary && summary.total !== undefined) {
             var total = Number(summary.total || 0);
-            var unreviewed = conflictUnreviewedCount(summary);
-            var accepted = conflictAcceptedCount(summary);
-            wrap.appendChild(textNode('span', 'fp-chip warn', String(unreviewed) + ' unreviewed'));
-            if (accepted > 0) wrap.appendChild(textNode('span', 'fp-chip ok', String(accepted) + ' accepted'));
-            wrap.appendChild(textNode('span', 'fp-chip', String(total) + ' checks'));
+            var pending = conflictPendingChoiceCount(summary);
+            var applied = conflictAppliedChoiceCount(summary);
+            wrap.appendChild(textNode('span', 'fp-chip', String(total) + ' conflicts'));
+            if (summary.hasResolutionCounts) {
+                if (applied > 0) wrap.appendChild(textNode('span', 'fp-chip ok', String(applied) + ' choices applied'));
+                if (pending > 0) wrap.appendChild(textNode('span', 'fp-chip warn', String(pending) + ' without explicit choice'));
+            }
         }
         conflictSummaryText.appendChild(wrap);
     }
@@ -3525,39 +3533,46 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (table) return 'database';
         return 'unknown';
     }
-    function conflictReviewAccepted(record) {
+    function conflictHasAppliedResolution(record) {
         if (!record) return false;
         if (String(record.lifecycle_state || '') === 'resolved') return true;
         if (Number(record.latest_resolution_applied || 0) === 1) return true;
         return false;
     }
     function normalizeConflictFilter(filter) {
-        if (filter === 'open' || filter === 'needsReview') return 'unreviewed';
-        if (filter === 'resolved') return 'accepted';
+        if (filter === 'open' || filter === 'needsReview' || filter === 'unreviewed' || filter === 'pending') return 'all';
+        if (filter === 'resolved' || filter === 'accepted') return 'applied';
         return filter || 'all';
     }
     function conflictMatchesFilter(record, filter) {
         filter = normalizeConflictFilter(filter);
         if (filter === 'all') return true;
-        if (filter === 'unreviewed') return !conflictReviewAccepted(record);
-        if (filter === 'accepted') return conflictReviewAccepted(record);
+        if (filter === 'applied') return conflictHasAppliedResolution(record);
         return conflictScope(record) === filter;
     }
     function conflictFilterCounts(list) {
-        var counts = { all: list.length, unreviewed: 0, accepted: 0, plugin: 0, theme: 0, database: 0, file: 0 };
+        var counts = { all: list.length, applied: 0, plugin: 0, theme: 0, database: 0, file: 0 };
         list.forEach(function (record) {
-            if (conflictReviewAccepted(record)) counts.accepted++;
-            else counts.unreviewed++;
+            if (conflictHasAppliedResolution(record)) counts.applied++;
             var scope = conflictScope(record);
             if (Object.prototype.hasOwnProperty.call(counts, scope)) counts[scope]++;
         });
         return counts;
     }
+    function conflictRecordSummary(list, fallback) {
+        var counts = conflictFilterCounts(Array.isArray(list) ? list : []);
+        var total = counts.all || Number(fallback && fallback.total || 0);
+        return {
+            total: total,
+            resolved: counts.applied,
+            unresolved: Math.max(0, total - counts.applied),
+            hasResolutionCounts: true
+        };
+    }
     function conflictFilterLabel(filter) {
         return {
             all: 'all',
-            unreviewed: 'unreviewed conflict checks',
-            accepted: 'accepted conflict checks',
+            applied: 'conflicts with applied choices',
             plugin: 'plugin',
             theme: 'theme',
             database: 'database',
@@ -3575,8 +3590,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         bar.setAttribute('aria-label', 'Filter conflicts');
         [
             ['all', 'All'],
-            ['unreviewed', 'Unreviewed'],
-            ['accepted', 'Accepted'],
+            ['applied', 'Applied choices'],
             ['plugin', 'Plugins'],
             ['theme', 'Themes'],
             ['database', 'Database'],
@@ -3638,7 +3652,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function conflictResolutionAppliedLabel(record) {
         if (!record || !record.latest_resolution_id) return 'Current applied resolution can be changed by selecting source or target.';
-        return 'Current applied resolution #' + String(record.latest_resolution_id) + ' used ' + String(record.latest_resolution_choice || 'a reviewed') + ' choice.';
+        return 'Current applied resolution #' + String(record.latest_resolution_id) + ' used ' + conflictChoiceLabel(record.latest_resolution_choice || '') + '.';
     }
     function appendConflictPill(parent, text, tone) {
         if (text === undefined || text === null || text === '') return;
@@ -3658,11 +3672,22 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (context.context) parts.push(context.context);
         return parts.filter(Boolean).join(' / ');
     }
-    function conflictReviewLabel(record) {
-        if (conflictReviewAccepted(record)) return 'Accepted';
-        var state = humanStatus(record.lifecycle_state || 'unreviewed');
-        if (state === 'unreviewed') return 'Unreviewed';
-        return state.charAt(0).toUpperCase() + state.slice(1);
+    function conflictChoiceLabel(value) {
+        value = String(value || '');
+        if (value === 'source') return 'source value';
+        if (value === 'target') return 'target value';
+        if (value === 'reviewed') return 'saved choice';
+        if (!value) return 'current target value';
+        return humanStatus(value);
+    }
+    function conflictResolutionLabel(record) {
+        if (Number(record && record.latest_resolution_applied || 0) === 1) {
+            return 'Applied: ' + conflictChoiceLabel(record.latest_resolution_choice || '');
+        }
+        if (record && record.latest_resolution_choice) {
+            return 'Saved: ' + conflictChoiceLabel(record.latest_resolution_choice);
+        }
+        return 'Current target value';
     }
     function conflictGuidancePanel(record) {
         var rows = [];
@@ -3707,13 +3732,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         row.appendChild(cell);
         return cell;
     }
-    function conflictStateText(record) {
+    function conflictResolutionDetail(record) {
         return [
-            humanStatus(record.lifecycle_state || 'unreviewed'),
-            record.next_action ? 'next: ' + humanStatus(record.next_action) : '',
-            record.review_status ? 'review: ' + record.review_status : '',
-            record.latest_resolution_status ? 'resolution: ' + humanStatus(record.latest_resolution_status) : '',
-            record.stale_status ? 'changed: ' + humanStatus(record.stale_status) : ''
+            Number(record && record.latest_resolution_applied || 0) === 1 ? 'written to target' : '',
+            record && record.latest_resolution_status ? humanStatus(record.latest_resolution_status) : '',
+            record && record.stale_status ? 'changed since choice: ' + humanStatus(record.stale_status) : ''
         ].filter(Boolean).join(' / ');
     }
     function setSelectedConflict(payload, record) {
@@ -3721,7 +3744,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         syncReviewUrl();
         if (record && record.id) {
             var run = runById(payload && payload.run) || {};
-            setWorkbenchMode((isMergeRun(run) ? 'Reviewing merge #' : 'Reviewing revision #') + String(payload && payload.run || '') + ', conflict #' + String(record.id) + '.');
+            setWorkbenchMode((isMergeRun(run) ? 'Merge #' : 'Revision #') + String(payload && payload.run || '') + ', conflict #' + String(record.id) + '.');
         }
         renderConflicts(payload);
     }
@@ -3732,7 +3755,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         table.className = 'fp-conflict-table';
         var thead = document.createElement('thead');
         var header = document.createElement('tr');
-        ['Check', 'DB table', 'ID', 'Summary'].forEach(function (label) {
+        ['Conflict', 'DB table', 'ID', 'Resolution', 'Summary'].forEach(function (label) {
             header.appendChild(textNode('th', '', label));
         });
         thead.appendChild(header);
@@ -3747,9 +3770,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             row.setAttribute('aria-label', 'Inspect conflict #' + String(record.id || '') + ' ' + String(context.identifier || context.entityLabel || ''));
             if (String(record.id || '') === String(selectedConflictId || '')) row.className = 'is-selected';
             var details = detailsText(context.details);
-            appendTableCell(row, 'Check', [
+            appendTableCell(row, 'Conflict', [
                 { className: 'fp-table-primary', text: '#' + String(record.id || '') },
-                { className: 'fp-table-muted', text: conflictStateText(record) }
+                { className: 'fp-table-muted', text: humanConflictType(record.conflict_type) }
             ]);
             appendTableCell(row, 'DB table', [
                 { className: 'fp-table-primary', text: context.table || context.entityType || '(none)' },
@@ -3758,6 +3781,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             appendTableCell(row, 'ID', [
                 { className: 'fp-table-primary', text: context.identifier || '(unknown)' },
                 { className: 'fp-table-muted', text: context.entityLabel }
+            ]);
+            appendTableCell(row, 'Resolution', [
+                { className: 'fp-table-primary', text: conflictResolutionLabel(record) },
+                { className: 'fp-table-muted', text: conflictResolutionDetail(record) }
             ]);
             appendTableCell(row, 'Summary', [
                 { className: 'fp-table-primary', text: context.context || details || '(no context)' },
@@ -3795,10 +3822,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         titleRow.appendChild(textNode('span', 'fp-conflict-meta', '#' + String(record.id || '')));
         var chips = document.createElement('div');
         chips.className = 'fp-summary-chips';
-        appendConflictPill(chips, conflictReviewLabel(record), conflictReviewAccepted(record) ? 'ok' : 'danger');
+        appendConflictPill(chips, conflictResolutionLabel(record), conflictHasAppliedResolution(record) ? 'ok' : 'warn');
         appendConflictPill(chips, conflictScope(record));
         appendConflictPill(chips, humanConflictType(record.conflict_type));
-        if (record.next_action && !conflictReviewAccepted(record)) appendConflictPill(chips, 'next: ' + humanStatus(record.next_action));
         if (record.plugin_severity) appendConflictPill(chips, String(record.plugin_severity));
         header.appendChild(titleRow);
         header.appendChild(chips);
@@ -3814,10 +3840,10 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         var noteWrap = document.createElement('div');
         noteWrap.className = 'fp-conflict-note';
         var noteLabel = document.createElement('label');
-        noteLabel.textContent = 'Review note';
+        noteLabel.textContent = 'Resolution note';
         var note = document.createElement('textarea');
         note.value = record.review_note || '';
-        note.placeholder = 'Record why this choice is correct, what follow-up is needed, or what changed after checking again.';
+        note.placeholder = 'Record why this resolution is correct or what changed after refreshing conflicts.';
         noteWrap.appendChild(noteLabel);
         noteWrap.appendChild(note);
         var choiceWrap = document.createElement('div');
@@ -3847,27 +3873,21 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             if (pluginDriver) {
                 row.appendChild(button('Run plugin driver', function () { runPluginDriver(record.id, payload.run, pluginDriver.key); }, 'primary'));
             }
-            row.appendChild(button('Flag follow-up', function () { flagConflictForFollowUp(record.id, payload.run, note.value); }));
-            row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
             if (!pluginDriver) row.appendChild(textNode('span', 'fp-conflict-meta', 'No approved driver'));
         } else if (record.id && record.lifecycle_state !== 'resolved') {
-            row.appendChild(button('Flag follow-up', function () { flagConflictForFollowUp(record.id, payload.run, note.value); }));
-            row.appendChild(button('Mark reviewed', function () { reviewConflict(record.id, 'reviewed', payload.run, note.value); }));
             row.appendChild(button('Apply selected choice', function () { resolveConflict(record.id, choice.value, payload.run, note.value); }, 'primary'));
         } else if (prioritizeResolutionChange) {
             row.appendChild(button('Change applied resolution', function () { resolveConflict(record.id, choice.value, payload.run, note.value, false, true); }, 'primary'));
             row.appendChild(textNode('span', 'fp-conflict-meta', conflictResolutionAppliedLabel(record)));
-        } else if (record.id && record.latest_resolution_status && record.latest_resolution_applied !== 1) {
-            row.appendChild(button('Apply reviewed choice', function () { resolveConflict(record.id, '', payload.run, note.value, true); }, 'primary'));
         } else if (record.id && Number(record.latest_resolution_applied || 0) === 1) {
             row.appendChild(textNode('span', 'fp-conflict-meta', 'Resolved; changing this conflict type requires a fresh merge audit.'));
         } else {
-            row.appendChild(textNode('span', 'fp-conflict-meta', 'Resolved; no action needed.'));
+            row.appendChild(textNode('span', 'fp-conflict-meta', 'No direct change action is available for this conflict type.'));
         }
         node.appendChild(header);
         controls.appendChild(row);
         if (isPluginConflict) {
-            scrollBody.appendChild(disclosure('Review note', noteWrap, false));
+            scrollBody.appendChild(disclosure('Resolution note', noteWrap, false));
             var guidance = conflictGuidancePanel(record);
             if (guidance) scrollBody.appendChild(guidance);
             if (pluginPanel) scrollBody.appendChild(disclosure('Plugin details', pluginPanel, false));
@@ -3880,11 +3900,11 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             }
         } else if (prioritizeResolutionChange) {
             controls.appendChild(choiceWrap);
-            scrollBody.appendChild(disclosure('Review note', noteWrap, false));
+            scrollBody.appendChild(disclosure('Resolution note', noteWrap, false));
             scrollBody.appendChild(disclosure('Compare values', values, true));
         } else {
             controls.appendChild(choiceWrap);
-            scrollBody.appendChild(disclosure('Review note', noteWrap, false));
+            scrollBody.appendChild(disclosure('Resolution note', noteWrap, false));
             scrollBody.appendChild(disclosure('Compare values', values, true));
         }
         node.appendChild(controls);
@@ -3936,12 +3956,12 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             kind: isMerge ? 'merge' : (isBranchForkRun(run) ? 'branch birth' : 'revision'),
             flow: String(run.source_branch || '') + (isMerge ? ' -> ' : ' @ ') + String(run.target_branch || ''),
             state: humanStatus(run.status || ''),
-            review: (function () {
+            'resolution state': (function () {
                 var summary = conflictSummary(run);
-                return conflictReviewStateText(summary);
+                return conflictResolutionSummaryText(summary);
             }())
         }, actions, run);
-        setWorkbenchMode(isMerge ? ('Reviewing merge #' + String(run.id || '') + ' into ' + String(run.target_branch || '') + '.') : ('Viewing revision #' + String(run.id || '') + '.'));
+        setWorkbenchMode(isMerge ? ('Merge #' + String(run.id || '') + ' into ' + String(run.target_branch || '') + '.') : ('Viewing revision #' + String(run.id || '') + '.'));
         renderGraph();
         scrollSelectedRunIntoView();
         if (!options.skipConflictLoad && Number(run.conflict_count || 0) > 0 && run.id) {
@@ -3952,17 +3972,17 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function renderConflicts(payload) {
         var list = Array.isArray(payload.records) ? payload.records : [];
-        if (refreshSelectedRunConflictState(payload.run, payload.conflictSummary || payload.conflict_summary || null)) {
+        var summary = conflictRecordSummary(list, payload.conflictSummary || payload.conflict_summary || {});
+        if (refreshSelectedRunConflictState(payload.run, summary)) {
             renderGraph();
             scrollSelectedRunIntoView();
         }
-        setStatus(list.length ? 'warn' : 'ok', list.length ? 'Loaded conflict checks. The merge result already exists; accept or rework these checks.' : (payload.message || 'No conflict checks found.'));
-        var summary = payload.conflictSummary || payload.conflict_summary || {};
+        setStatus(list.length ? 'warn' : 'ok', list.length ? 'Loaded conflicts. The merge result already exists; inspect the current resolution or change it.' : (payload.message || 'No conflicts found.'));
         var run = runById(payload.run) || {};
         var source = String(run.source_branch || '');
         var target = String(run.target_branch || '');
         var flow = source && target && source !== target ? source + ' -> ' + target : (source || target);
-        showConflictWorkbench((isMergeRun(run) ? 'Merge ' : 'Revision ') + '#' + String(payload.run || '') + ' conflict review', '');
+        showConflictWorkbench((isMergeRun(run) ? 'Merge ' : 'Revision ') + '#' + String(payload.run || '') + ' conflicts', '');
         setConflictSummaryChips(flow, summary.total !== undefined ? summary : { total: list.length, resolved: 0, unresolved: list.length });
         conflictActions.innerHTML = '';
         conflicts.innerHTML = '';
@@ -3973,9 +3993,9 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             return;
         }
         if (!list.length) {
-            conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
+            conflictActions.appendChild(button('Refresh conflicts', function () { return revalidateConflicts(payload.run); }));
             appendReviewMoreActions(conflictActions, source, target);
-            conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflict checks found for this revision.'));
+            conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No conflicts found for this revision.'));
             return;
         }
         conflicts.appendChild(renderConflictFilters(payload, list));
@@ -3983,7 +4003,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         if (!filteredList.length) {
             selectedConflictId = null;
             syncReviewUrl();
-            conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
+            conflictActions.appendChild(button('Refresh conflicts', function () { return revalidateConflicts(payload.run); }));
             appendReviewMoreActions(conflictActions, source, target);
             conflicts.appendChild(textNode('div', 'fp-conflict-loading', 'No ' + conflictFilterLabel(selectedConflictFilter) + ' match this filter.'));
             return;
@@ -4007,10 +4027,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
         conflictActions.appendChild(previous);
         conflictActions.appendChild(textNode('span', 'fp-review-progress', String(selectedIndex + 1) + ' of ' + String(filteredList.length)));
         conflictActions.appendChild(next);
-        conflictActions.appendChild(button('Check for changes', function () { return revalidateConflicts(payload.run); }));
-        if (Number(summary.resolved || 0) > 0) {
-            conflictActions.appendChild(button('Apply reviewed choices', function () { applyReviewedConflicts(payload.run); }, 'primary'));
-        }
+        conflictActions.appendChild(button('Refresh conflicts', function () { return revalidateConflicts(payload.run); }));
         appendReviewMoreActions(conflictActions, source, target);
         var reviewGrid = document.createElement('div');
         reviewGrid.className = 'fp-conflict-review-grid';
@@ -4060,7 +4077,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function renderConflictLoading(run) {
         var item = runById(run) || {};
-        showConflictWorkbench((isMergeRun(item) ? 'Merge ' : 'Revision ') + '#' + String(run || '') + ' conflict review', 'Loading entity-level conflict context...');
+        showConflictWorkbench((isMergeRun(item) ? 'Merge ' : 'Revision ') + '#' + String(run || '') + ' conflicts', 'Loading entity-level conflict context...');
         conflicts.innerHTML = '';
         raw.textContent = '';
         raw.style.display = 'none';
@@ -4069,8 +4086,8 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     function cacheConflictPayload(run, payload) {
         var item = runById(run);
         if (!item) return;
-        item._conflictSummary = payload.conflictSummary || payload.conflict_summary || item._conflictSummary || null;
         item._conflictRecords = Array.isArray(payload.records) ? payload.records : [];
+        item._conflictSummary = conflictRecordSummary(item._conflictRecords, payload.conflictSummary || payload.conflict_summary || item._conflictSummary || null);
     }
     function forgetConflictCache(run) {
         var item = runById(run);
@@ -4112,19 +4129,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             setStatus('error', error.message || 'Could not load conflicts.');
         });
     }
-    function flagConflictForFollowUp(id, run, note) {
-        if (!String(note || '').trim()) {
-            setStatus('warn', 'Add a review note explaining the follow-up before flagging this conflict check.');
-            return Promise.resolve();
-        }
-        return reviewConflict(id, 'needs-action', run, note);
-    }
-    function reviewConflict(id, value, run, note) {
-        return post('forkpress_branch_review_conflict', { conflict: String(id), status: value, run: String(run || ''), note: note || '' }).then(function (payload) {
-            setStatus('ok', payload.message || 'Conflict review updated.');
-            return refreshAfterConflictAction(run);
-        }).catch(function (error) { setStatus('error', error.message); });
-    }
     function resolveConflict(id, choice, run, note, applyReviewed, replaceApplied) {
         if (replaceApplied && !window.confirm('Change the already-applied resolution for conflict #' + String(id || '') + '?')) return;
         return post('forkpress_branch_resolve_conflict', { conflict: String(id), choice: choice || '', run: String(run || ''), note: note || '', applyReviewed: applyReviewed ? '1' : '', replaceApplied: replaceApplied ? '1' : '' }).then(function (payload) {
@@ -4134,7 +4138,7 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
     }
     function revalidateConflicts(run) {
         return post('forkpress_branch_revalidate_conflicts', { run: String(run || '') }).then(function (payload) {
-            setStatus(statusKindForPayload(payload, 'warn'), payload.message || 'Checked merge conflicts for changes.');
+            setStatus(statusKindForPayload(payload, 'warn'), payload.message || 'Refreshed merge conflicts.');
             return refreshAfterConflictAction(run);
         }).catch(function (error) { setStatus('error', error.message || 'Could not check conflicts for changes.'); });
     }
@@ -4144,13 +4148,6 @@ function forkpress_cow_branch_manager_html(string $current_branch): string {
             setStatus(statusKindForPayload(payload, 'ok'), payload.message || 'Crash recovery restored.');
             return refreshAfterConflictAction(run);
         }).catch(function (error) { setStatus('error', error.message || 'Could not restore crash recovery.'); });
-    }
-    function applyReviewedConflicts(run) {
-        if (!window.confirm('Apply all reviewed conflict choices for merge run #' + String(run || '') + '?')) return;
-        return post('forkpress_branch_apply_reviewed_conflicts', { run: String(run || '') }).then(function (payload) {
-            setStatus(statusKindForPayload(payload, Number(payload.applied || 0) > 0 ? 'ok' : 'warn'), payload.message || 'Reviewed resolutions checked.');
-            return refreshAfterConflictAction(run);
-        }).catch(function (error) { setStatus('error', error.message || 'Could not apply reviewed choices.'); });
     }
     function runPluginDriver(conflict, run, driverKey) {
         if (!window.confirm('Run the approved plugin driver for conflict #' + String(conflict || '') + '?')) return;
