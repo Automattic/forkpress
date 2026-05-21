@@ -22,12 +22,27 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/shared/static-php-cli.sh
 spc_doctor_prerun() {
   local dist_name="$1"
   local spc_dir=".build/$dist_name/static-php-cli"
+  local spc_cmd=(./bin/spc)
+
+  if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] && [ "$dist_name" = "x86_64-apple-darwin" ]; then
+    if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+      echo "ERROR: x86_64-apple-darwin spc doctor pre-run requires Rosetta." >&2
+      return 1
+    fi
+    if [ ! -d /usr/local/bin ]; then
+      echo "ERROR: x86_64-apple-darwin spc doctor pre-run requires Intel Homebrew under /usr/local." >&2
+      return 1
+    fi
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+    spc_cmd=(arch -x86_64 ./bin/spc)
+  fi
 
   echo "  → $spc_dir"
   ensure_static_php_cli_checkout "$spc_dir"
   install_static_php_cli_composer_deps "$spc_dir"
   (
     cd "$spc_dir"
-    ./bin/spc doctor --auto-fix
+    "${spc_cmd[@]}" doctor --auto-fix
   )
 }
