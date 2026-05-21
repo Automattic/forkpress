@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
 	BuildkiteArtifactError,
+	findFinishedArtifact,
 	parseArgs,
 	selectArtifact,
 	selectPassedBuild,
@@ -78,5 +79,18 @@ test('selectArtifact rejects missing artifacts', () => {
 	assert.throws(
 		() => selectArtifact([{ path: 'forkpress', state: 'finished' }], 'missing'),
 		(error) => error instanceof BuildkiteArtifactError && error.message.includes('Buildkite artifact not found'),
+	);
+});
+
+test('findFinishedArtifact returns null while the artifact is not available yet', () => {
+	assert.equal(
+		findFinishedArtifact(
+			[
+				{ path: 'target/aarch64-apple-darwin/release/forkpress', state: 'uploading' },
+				{ path: 'target/x86_64-apple-darwin/release/forkpress', state: 'finished' },
+			],
+			'target/aarch64-apple-darwin/release/forkpress',
+		),
+		null,
 	);
 });
