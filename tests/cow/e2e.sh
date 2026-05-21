@@ -1633,6 +1633,21 @@ test -f "$WORK_DIR/cow/merge/file-bases/remote-reprint-branch.json"
 autoinc_runtime_request remote-reprint-branch insert "$TMP/autoinc-remote-reprint-insert.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-reprint-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-reprint-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-reprint-branch/wp-content/database/.ht.sqlite"
 
+log_step "reprint remote clone --force refreshes cache and branch"
+echo "remote reprint boot file v2" > "$REMOTE_REPRINT_SOURCE/wp-content/remote-reprint-source.txt"
+FAKE_REPRINT_SOURCE="$REMOTE_REPRINT_SOURCE" FAKE_REPRINT_LOG="$FAKE_REPRINT_LOG" \
+  "$BIN" remote --work-dir "$WORK_DIR" clone reprint-prod \
+  --reprint-phar "$FAKE_REPRINT" \
+  --reprint-secret test-secret \
+  --url "https://reprint.example.test/" \
+  --branch remote-reprint-branch \
+  --force \
+  > "$TMP/remote-reprint-force.out"
+grep -F "forkpress: replaced existing branch 'remote-reprint-branch' from remote cache 'reprint-prod'" "$TMP/remote-reprint-force.out" >/dev/null
+grep -F "remote reprint boot file v2" "$WORK_DIR/cow/remote-sites/reprint-prod/cache/wp-content/remote-reprint-source.txt" >/dev/null
+grep -F "remote reprint boot file v2" "$WORK/remote-reprint-branch/wp-content/remote-reprint-source.txt" >/dev/null
+test ! -e "$WORK/remote-reprint-branch/wp-content/uploads/2026/05/large-upload.jpg"
+
 log_step "reprint remote clone fetches skipped boot dependencies"
 REMOTE_REPRINT_BOOT_SOURCE="$TMP/remote-reprint-boot-source"
 cp -R "$WORK/main/." "$REMOTE_REPRINT_BOOT_SOURCE/"
