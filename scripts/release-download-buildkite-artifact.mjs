@@ -137,6 +137,9 @@ export async function waitForBuildArtifact(client, options) {
 			if (artifact) {
 				return { build, artifact };
 			}
+			if (artifacts.length > 0) {
+				console.log(`Buildkite build #${build.number} artifacts: ${describeArtifacts(artifacts)}`);
+			}
 		}
 
 		const terminal = matchingBuilds.filter((build) => ['passed', 'failed', 'canceled', 'skipped'].includes(build.state));
@@ -161,7 +164,7 @@ export function selectPassedBuild(builds, commit) {
 }
 
 export function selectArtifact(artifacts, artifactPath) {
-	const matches = artifacts.filter((artifact) => artifact.path === artifactPath && artifact.state === 'finished');
+	const matches = artifacts.filter((artifact) => artifactPathMatches(artifact.path, artifactPath) && artifact.state === 'finished');
 	if (matches.length === 0) {
 		const available = artifacts.map((artifact) => `${artifact.path} (${artifact.state})`).join(', ');
 		throw new BuildkiteArtifactError(`Buildkite artifact not found: ${artifactPath}. Available artifacts: ${available || 'none'}`);
@@ -173,11 +176,25 @@ export function selectArtifact(artifacts, artifactPath) {
 }
 
 export function findFinishedArtifact(artifacts, artifactPath) {
-	const matches = artifacts.filter((artifact) => artifact.path === artifactPath && artifact.state === 'finished');
+	const matches = artifacts.filter((artifact) => artifactPathMatches(artifact.path, artifactPath) && artifact.state === 'finished');
 	if (matches.length > 1) {
 		throw new BuildkiteArtifactError(`Buildkite artifact matched more than once: ${artifactPath}`);
 	}
 	return matches[0] || null;
+}
+
+export function artifactPathMatches(actualPath, expectedPath) {
+	const actual = normalizeArtifactPath(actualPath);
+	const expected = normalizeArtifactPath(expectedPath);
+	return actual === expected || actual.endsWith(`/${expected}`);
+}
+
+export function normalizeArtifactPath(path) {
+	return String(path).replaceAll('\\', '/').replace(/^\.\/+/, '').replace(/^\/+/, '');
+}
+
+export function describeArtifacts(artifacts) {
+	return artifacts.map((artifact) => `${artifact.path} (${artifact.state})`).join(', ');
 }
 
 export async function listBuildsForCommit(client, options) {

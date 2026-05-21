@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	artifactPathMatches,
 	BuildkiteArtifactError,
 	findFinishedArtifact,
 	parseArgs,
@@ -92,5 +93,22 @@ test('findFinishedArtifact returns null while the artifact is not available yet'
 			'target/aarch64-apple-darwin/release/forkpress',
 		),
 		null,
+	);
+});
+
+test('artifactPathMatches accepts Buildkite path normalization differences', () => {
+	assert.equal(
+		artifactPathMatches(
+			'.\\target\\x86_64-pc-windows-msvc\\release\\forkpress.exe',
+			'target/x86_64-pc-windows-msvc/release/forkpress.exe',
+		),
+		true,
+	);
+	assert.equal(
+		artifactPathMatches(
+			'/var/lib/buildkite-agent/builds/forkpress/target/aarch64-apple-darwin/release/forkpress',
+			'target/aarch64-apple-darwin/release/forkpress',
+		),
+		true,
 	);
 });
