@@ -230,6 +230,19 @@ forkpress remote clone production \
   --branch production-main
 ```
 
+For hosts without SSH, use Reprint's WordPress exporter plugin over HTTP:
+
+```bash
+forkpress remote clone production \
+  --reprint-phar ./reprint.phar \
+  --reprint-secret "$REPRINT_SECRET" \
+  --url https://example.com \
+  --branch production-main
+```
+
+The Reprint path uses `--filter=essential-files` by default, so uploads are not
+downloaded before the first local branch can boot.
+
 The first sync is thin by default: uploads, caches, backups, logs, and upgrade
 temp files are skipped so the branch can boot quickly. ForkPress can branch from
 an existing ForkPress SQLite sidecar or import a normal MySQL-backed WordPress
@@ -489,6 +502,7 @@ aliases, and grouped subcommands.
 | `forkpress commit -m "message"` | Commit and push the current Git branch back to ForkPress. |
 | `forkpress pull` | Pull with rebase and autostash. |
 | `forkpress remote clone <name> --ssh <host> --path <wp-root> --branch <branch>` | Thin-clone a boot-ready remote WordPress root over SSH, import MySQL into SQLite when needed, then create a local COW branch. |
+| `forkpress remote clone <name> --reprint-phar <phar> --reprint-secret <secret> --url <url> --branch <branch>` | Clone a remote WordPress site over Reprint HTTP without SSH, using Reprint's essential-files filter by default. |
 | `forkpress logs --file <name>` | Read WordPress, PHP, server, and maintenance logs. |
 | `forkpress storage status` | Show selected storage and mount state. |
 | `forkpress storage mount` | Attach mount-backed storage. |

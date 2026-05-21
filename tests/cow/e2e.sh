@@ -1513,6 +1513,126 @@ test ! -e "$WORK/remote-thin-branch/wp-content/uploads/2026/05/large-upload.jpg"
 autoinc_runtime_request remote-thin-branch insert "$TMP/autoinc-remote-thin-insert.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-thin-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $has_db_base = is_file($argv[4]); $has_file_base = is_file($argv[5]); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $has_db_base && $has_file_base && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-thin-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-thin-branch/wp-content/database/.ht.sqlite" "$WORK_DIR/cow/merge/bases/remote-thin-branch.sqlite" "$WORK_DIR/cow/merge/file-bases/remote-thin-branch.json"
 
+log_step "reprint remote clone uses essential files and branches with birth metadata"
+REMOTE_REPRINT_SOURCE="$TMP/remote-reprint-source"
+FAKE_REPRINT="$TMP/fake-reprint.php"
+FAKE_REPRINT_LOG="$TMP/fake-reprint.log"
+mkdir -p "$REMOTE_REPRINT_SOURCE"
+cp -R "$WORK/main/." "$REMOTE_REPRINT_SOURCE/"
+echo "remote reprint boot file" > "$REMOTE_REPRINT_SOURCE/wp-content/remote-reprint-source.txt"
+mkdir -p "$REMOTE_REPRINT_SOURCE/wp-content/uploads/2026/05"
+echo "large reprint upload should not boot-sync" > "$REMOTE_REPRINT_SOURCE/wp-content/uploads/2026/05/large-upload.jpg"
+cat > "$FAKE_REPRINT" <<'PHP'
+<?php
+$args = $argv;
+array_shift($args);
+$command = array_shift($args);
+$endpoint = array_shift($args);
+$opts = [];
+foreach ($args as $arg) {
+    if (str_starts_with($arg, '--') && str_contains($arg, '=')) {
+        [$key, $value] = explode('=', substr($arg, 2), 2);
+        $opts[$key] = $value;
+    } elseif (str_starts_with($arg, '--')) {
+        $opts[substr($arg, 2)] = true;
+    }
+}
+$log = getenv('FAKE_REPRINT_LOG');
+if ($log) {
+    file_put_contents($log, $command . ' ' . implode(' ', $argv) . "\n", FILE_APPEND);
+}
+$source = getenv('FAKE_REPRINT_SOURCE');
+if (!$source || !is_dir($source)) {
+    fwrite(STDERR, "missing FAKE_REPRINT_SOURCE\n");
+    exit(1);
+}
+function rr_copy(string $source, string $dest, bool $skip_uploads): void {
+    $source = rtrim($source, '/');
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($source, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+    foreach ($it as $entry) {
+        $path = $entry->getPathname();
+        $rel = substr($path, strlen($source) + 1);
+        if ($skip_uploads && ($rel === 'wp-content/uploads' || str_starts_with($rel, 'wp-content/uploads/'))) {
+            continue;
+        }
+        $target = rtrim($dest, '/') . '/' . $rel;
+        if ($entry->isDir()) {
+            if (!is_dir($target)) {
+                mkdir($target, 0777, true);
+            }
+        } else {
+            if (!is_dir(dirname($target))) {
+                mkdir(dirname($target), 0777, true);
+            }
+            copy($path, $target);
+        }
+    }
+}
+switch ($command) {
+    case 'preflight':
+        if (!is_dir($opts['state-dir'])) {
+            mkdir($opts['state-dir'], 0777, true);
+        }
+        file_put_contents($opts['state-dir'] . '/.import-state.json', json_encode(['endpoint' => $endpoint]));
+        exit(0);
+    case 'files-pull':
+        $filter = $opts['filter'] ?? 'none';
+        rr_copy($source, $opts['fs-root'], $filter === 'essential-files');
+        if ($filter === 'essential-files') {
+            file_put_contents($opts['state-dir'] . '/.import-download-list-skipped.jsonl', json_encode(['path' => 'wp-content/uploads/2026/05/large-upload.jpg']) . "\n");
+        }
+        exit(0);
+    case 'db-pull':
+        file_put_contents($opts['state-dir'] . '/db.sql', "-- fake\n");
+        exit(0);
+    case 'flat-docroot':
+        if (is_dir($opts['flatten-to'])) {
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($opts['flatten-to'], FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+            foreach ($it as $entry) {
+                $entry->isDir() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+            }
+        }
+        rr_copy($opts['fs-root'], $opts['flatten-to'], false);
+        exit(0);
+    case 'db-apply':
+        $target = $opts['target-sqlite-path'];
+        if (!is_dir(dirname($target))) {
+            mkdir(dirname($target), 0777, true);
+        }
+        copy($source . '/wp-content/database/.ht.sqlite', $target);
+        exit(0);
+}
+fwrite(STDERR, "unknown fake reprint command: $command\n");
+exit(1);
+PHP
+FAKE_REPRINT_SOURCE="$REMOTE_REPRINT_SOURCE" FAKE_REPRINT_LOG="$FAKE_REPRINT_LOG" \
+  "$BIN" remote --work-dir "$WORK_DIR" clone reprint-prod \
+  --reprint-phar "$FAKE_REPRINT" \
+  --reprint-secret test-secret \
+  --url "https://reprint.example.test/" \
+  --branch remote-reprint-branch \
+  > "$TMP/remote-reprint-clone.out"
+grep -F "forkpress: remote site 'reprint-prod' cloned" "$TMP/remote-reprint-clone.out" >/dev/null
+grep -F "sync:      reprint essential files" "$TMP/remote-reprint-clone.out" >/dev/null
+grep -F "forkpress: remote cache 'reprint-prod' branched to 'remote-reprint-branch'" "$TMP/remote-reprint-clone.out" >/dev/null
+grep -F "files-pull" "$FAKE_REPRINT_LOG" | grep -F -- "--filter=essential-files" >/dev/null
+grep -F "db-apply" "$FAKE_REPRINT_LOG" | grep -F -- "--target-engine=sqlite" >/dev/null
+grep -F "db-apply" "$FAKE_REPRINT_LOG" | grep -F -- "--target-sqlite-path=$WORK_DIR/cow/remote-sites/reprint-prod/cache/wp-content/database/.ht.sqlite" >/dev/null
+test -f "$WORK_DIR/cow/remote-sites/reprint-prod/cache/wp-load.php"
+test -f "$WORK_DIR/cow/remote-sites/reprint-prod/cache/wp-content/remote-reprint-source.txt"
+test ! -e "$WORK_DIR/cow/remote-sites/reprint-prod/cache/wp-content/uploads/2026/05/large-upload.jpg"
+test -f "$WORK/remote-reprint-branch/wp-load.php"
+test -f "$WORK/remote-reprint-branch/wp-content/database/.ht.sqlite"
+test -f "$WORK/remote-reprint-branch/wp-content/remote-reprint-source.txt"
+test ! -e "$WORK/remote-reprint-branch/wp-content/uploads/2026/05/large-upload.jpg"
+test -f "$WORK_DIR/cow/merge/bases/remote-reprint-branch.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/remote-reprint-branch.json"
+autoinc_runtime_request remote-reprint-branch insert "$TMP/autoinc-remote-reprint-insert.json"
+php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-reprint-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-reprint-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-reprint-branch/wp-content/database/.ht.sqlite"
+
 log_step "remote clone imports MySQL-backed WordPress cache before branching"
 REMOTE_MYSQL_SOURCE="$TMP/remote-mysql-source"
 mkdir -p "$REMOTE_MYSQL_SOURCE"

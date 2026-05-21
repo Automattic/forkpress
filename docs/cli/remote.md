@@ -31,7 +31,10 @@ forkpress remote [--work-dir <path>] [--php-bin <path>] <command> [options]
 
 ## `clone`
 
-`remote clone` syncs a remote WordPress root with `rsync` over SSH. If the remote does not already have ForkPress SQLite data, ForkPress exports MySQL over the same SSH connection and imports it into the local cache before branching.
+`remote clone` syncs a remote WordPress root into a ForkPress remote-site cache,
+then can immediately create a normal COW branch from that cache. SSH clones use
+`rsync` and, when needed, export MySQL over SSH. Reprint clones use the Reprint
+exporter plugin over HTTP and do not need SSH access.
 
 ```bash
 forkpress remote clone <name> --ssh <user@host> --path <remote-wp-root> [options]
@@ -40,10 +43,13 @@ forkpress remote clone <name> --ssh <user@host> --path <remote-wp-root> [options
 | Option | Required | Description |
 | --- | --- | --- |
 | `<name>` | Yes | Local name for this remote-site cache. The name is normalized to lowercase ASCII letters, numbers, and dashes. |
-| `--ssh <user@host>` | Yes | SSH target for rsync and optional MySQL export. |
-| `--path <remote-wp-root>` | Yes | Remote WordPress root path. It must contain `wp-load.php`. |
+| `--ssh <user@host>` | SSH mode | SSH target for rsync and optional MySQL export. |
+| `--path <remote-wp-root>` | SSH mode | Remote WordPress root path. It must contain `wp-load.php`. |
 | `--ssh-key <path>` | No | SSH private key to use for rsync and MySQL export. Use a shell-expanded path instead of an unexpanded `~`. |
 | `--ssh-port <port>` | No | SSH port. Defaults to the SSH client default when omitted. |
+| `--reprint-phar <path>` | Reprint mode | Reprint PHAR to run locally. Requires the Reprint exporter plugin and `--reprint-secret`. |
+| `--reprint-secret <secret>` | Reprint mode | Shared secret configured in the remote Reprint exporter plugin. |
+| `--reprint-api-url <url>` | No | Explicit Reprint API endpoint. Defaults to `<--url>/?reprint-api`. |
 | `--branch <branch>` | No | Create or recreate a local ForkPress branch from the synced cache after cloning. Requires COW storage. |
 | `--remote-url <url>` | No | Production site URL to record in the cache manifest. |
 | `--url <url>` | No | Alias for `--remote-url`. |
@@ -67,6 +73,22 @@ forkpress remote clone production \
   --url https://example.com \
   --branch production-main
 ```
+
+Reprint example for hosts without SSH:
+
+```bash
+forkpress remote clone production \
+  --reprint-phar ./reprint.phar \
+  --reprint-secret "$REPRINT_SECRET" \
+  --url https://example.com \
+  --branch production-main
+```
+
+In Reprint mode the first file pull uses Reprint's `essential-files` filter by
+default, so uploads are left in Reprint's skipped-file list instead of being
+downloaded before the branch can boot. Pass `--include-uploads` or
+`--full-sync` only when you intentionally want the initial Reprint pull to
+download all files.
 
 ## `add`
 

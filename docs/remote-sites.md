@@ -54,6 +54,24 @@ same SSH connection, and imports them into the local cache as
 `wp-content/database/.ht.sqlite` before creating the branch. The remote PHP must
 have `mysqli` enabled.
 
+If the host does not provide SSH, install the Reprint exporter plugin on the
+source WordPress site and clone over HTTP instead:
+
+```bash
+forkpress remote clone production \
+  --reprint-phar ./reprint.phar \
+  --reprint-secret "$REPRINT_SECRET" \
+  --url https://example.com \
+  --branch production-main
+```
+
+ForkPress runs Reprint `preflight`, `files-pull`, `db-pull`, `flat-docroot`,
+and `db-apply` into the same remote-site cache layout used by SSH clones. The
+default Reprint file pull uses `--filter=essential-files`, which downloads the
+code, configuration, themes, and plugins needed for boot while leaving uploads
+for a later Reprint sync. `--include-uploads` and `--full-sync` opt into
+downloading all files during the initial clone.
+
 ForkPress uses `rsync` over SSH. By default it creates a boot cache and skips
 large or rebuildable directories:
 

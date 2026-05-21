@@ -639,7 +639,7 @@ struct RemoteArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 enum RemoteCommand {
-    /// Thin-clone a remote WordPress root over SSH and optionally branch from it.
+    /// Thin-clone a remote WordPress root over SSH or Reprint and optionally branch from it.
     Clone(RemoteCloneArgs),
     /// Register an existing remote-site cache.
     Add(RemoteAddArgs),
@@ -656,9 +656,9 @@ struct RemoteCloneArgs {
     /// Local name for this remote-site cache.
     name: String,
 
-    /// Remote SSH target, e.g. user@example.com.
+    /// Remote SSH target, e.g. user@example.com. Omit when using --reprint-phar.
     #[arg(long)]
-    ssh: String,
+    ssh: Option<String>,
 
     /// SSH private key to use for rsync, e.g. ~/.ssh/id_ed25519.
     #[arg(long = "ssh-key")]
@@ -668,9 +668,21 @@ struct RemoteCloneArgs {
     #[arg(long = "ssh-port")]
     ssh_port: Option<u16>,
 
-    /// Remote WordPress root path.
+    /// Remote WordPress root path. Required for SSH clones.
     #[arg(long = "path")]
-    remote_path: String,
+    remote_path: Option<String>,
+
+    /// Reprint PHAR path. When set, ForkPress clones over Reprint's HTTP exporter API instead of SSH.
+    #[arg(long = "reprint-phar")]
+    reprint_phar: Option<PathBuf>,
+
+    /// Shared secret configured in the Reprint exporter plugin.
+    #[arg(long = "reprint-secret")]
+    reprint_secret: Option<String>,
+
+    /// Reprint API URL. Defaults to <remote-url>/?reprint-api.
+    #[arg(long = "reprint-api-url")]
+    reprint_api_url: Option<String>,
 
     /// Branch to create from the synced cache after cloning.
     #[arg(long)]
@@ -703,6 +715,12 @@ struct RemoteCloneArgs {
     /// Replace an existing remote-site registration and, with --branch, recreate the local branch from the remote cache.
     #[arg(long)]
     force: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteCloneSourceKind {
+    Ssh,
+    Reprint,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -2821,6 +2839,7 @@ fn remote_clone_command(
     layout: &Layout,
     args: RemoteCloneArgs,
 ) -> Result<i32> {
+    let source_kind = remote_clone_source_kind(&args)?;
     let cache_root = remote_clone_cache_root(layout, &args.name)?;
     let manifest_path = cache_root
         .parent()
@@ -2863,28 +2882,35 @@ fn remote_clone_command(
             );
         }
     }
-    let rsync_args = remote_clone_rsync_args(&args, &cache_root);
-    let output = Command::new("rsync").args(&rsync_args).output().context(
-        "failed to start rsync; install rsync or use `forkpress remote add --cache-root`",
-    )?;
-    if !output.status.success() {
-        bail!(
-            "{}",
-            remote_clone_rsync_failure_message(
-                &args,
-                &output.status.to_string(),
-                &String::from_utf8_lossy(&output.stderr)
-            )
-        );
+    if source_kind == RemoteCloneSourceKind::Ssh {
+        let rsync_args = remote_clone_rsync_args(&args, &cache_root)?;
+        let output = Command::new("rsync").args(&rsync_args).output().context(
+            "failed to start rsync; install rsync or use `forkpress remote add --cache-root`",
+        )?;
+        if !output.status.success() {
+            bail!(
+                "{}",
+                remote_clone_rsync_failure_message(
+                    &args,
+                    &output.status.to_string(),
+                    &String::from_utf8_lossy(&output.stderr)
+                )?
+            );
+        }
+        write_filtered_output(&output.stdout, &output.stderr)?;
+    } else {
+        prepare_runtime(layout)?;
+        let runtime = PortableRuntime::from_layout(layout);
+        remote_clone_reprint_sync(shared, layout, &runtime, &args, &cache_root)?;
     }
-    write_filtered_output(&output.stdout, &output.stderr)?;
     if !cache_root.join("wp-load.php").is_file() {
         bail!(
             "remote clone did not produce a WordPress root at {}; expected wp-load.php",
             cache_root.display()
         );
     }
-    if !cache_root.join("wp-content/database/.ht.sqlite").is_file()
+    if source_kind == RemoteCloneSourceKind::Ssh
+        && !cache_root.join("wp-content/database/.ht.sqlite").is_file()
         && cache_root.join("wp-config.php").is_file()
     {
         prepare_runtime(layout)?;
@@ -2899,8 +2925,8 @@ fn remote_clone_command(
         layout,
         RemoteSiteAdd {
             name: args.name.clone(),
-            ssh: Some(args.ssh.clone()),
-            remote_path: Some(args.remote_path.clone()),
+            ssh: args.ssh.clone(),
+            remote_path: args.remote_path.clone(),
             remote_url: args.remote_url.clone(),
             local_url: args.local_url.clone(),
             cache_root: Some(cache_root),
@@ -2914,7 +2940,13 @@ fn remote_clone_command(
     println!("  files:     {}", cache.files);
     println!(
         "  sync:      {}",
-        if args.full_sync {
+        if source_kind == RemoteCloneSourceKind::Reprint && args.full_sync {
+            "reprint full tree"
+        } else if source_kind == RemoteCloneSourceKind::Reprint && args.include_uploads {
+            "reprint all files"
+        } else if source_kind == RemoteCloneSourceKind::Reprint {
+            "reprint essential files"
+        } else if args.full_sync {
             "full tree"
         } else if args.include_uploads {
             "boot cache, uploads included"
@@ -2967,13 +2999,21 @@ fn remote_clone_command(
                         });
                     }
                     println!("  boot dep:  fetching {}", missing.display());
-                    remote_clone_fetch_boot_dependency(&args, &manifest.cache_root, &missing)
-                        .with_context(|| {
-                            format!(
-                                "remote clone branch preview needed {}, but ForkPress could not fetch it from the remote",
-                                missing.display()
-                            )
-                        })?;
+                    remote_clone_fetch_boot_dependency(
+                        shared,
+                        layout,
+                        &runtime,
+                        &args,
+                        source_kind,
+                        &manifest.cache_root,
+                        &missing,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "remote clone branch preview needed {}, but ForkPress could not fetch it from the remote",
+                            missing.display()
+                        )
+                    })?;
                     fetched_boot_dependencies.push(missing);
                     replace_existing = true;
                 }
@@ -3006,6 +3046,57 @@ fn remote_clone_command(
     Ok(0)
 }
 
+fn remote_clone_source_kind(args: &RemoteCloneArgs) -> Result<RemoteCloneSourceKind> {
+    let uses_reprint = args.reprint_phar.is_some()
+        || args.reprint_secret.is_some()
+        || args.reprint_api_url.is_some();
+    if uses_reprint {
+        if args.ssh.is_some()
+            || args.remote_path.is_some()
+            || args.ssh_key.is_some()
+            || args.ssh_port.is_some()
+        {
+            bail!("remote clone Reprint mode does not use --ssh, --ssh-key, --ssh-port, or --path");
+        }
+        if args.reprint_phar.is_none() {
+            bail!("remote clone Reprint mode requires --reprint-phar <path>");
+        }
+        if args.reprint_secret.as_deref().unwrap_or("").is_empty() {
+            bail!("remote clone Reprint mode requires --reprint-secret <secret>");
+        }
+        if args.remote_url.as_deref().unwrap_or("").is_empty()
+            && args.reprint_api_url.as_deref().unwrap_or("").is_empty()
+        {
+            bail!(
+                "remote clone Reprint mode requires --url <remote-site-url> or --reprint-api-url <url>"
+            );
+        }
+        if !args.excludes.is_empty() {
+            bail!(
+                "remote clone Reprint mode does not support --exclude; use SSH mode for rsync-specific excludes"
+            );
+        }
+        if args.no_delete {
+            bail!(
+                "remote clone Reprint mode does not support --no-delete; Reprint manages its own resumable state"
+            );
+        }
+        return Ok(RemoteCloneSourceKind::Reprint);
+    }
+
+    if args.ssh.as_deref().unwrap_or("").is_empty() {
+        bail!(
+            "remote clone SSH mode requires --ssh <user@host>, or pass --reprint-phar for HTTP clone"
+        );
+    }
+    if args.remote_path.as_deref().unwrap_or("").is_empty() {
+        bail!(
+            "remote clone SSH mode requires --path <remote-wp-root>, or pass --reprint-phar for HTTP clone"
+        );
+    }
+    Ok(RemoteCloneSourceKind::Ssh)
+}
+
 fn remote_clone_cache_root(layout: &Layout, name: &str) -> Result<PathBuf> {
     let name = sanitize_remote_site_name(name);
     if name.is_empty() {
@@ -3029,11 +3120,19 @@ fn remote_clone_import_mysql_database(
         .with_context(|| format!("failed to create {}", export_path.display()))?;
     let exporter = fs::read_to_string(layout.runtime_dir.join("scripts/cow/mysql_export.php"))
         .context("failed to read bundled MySQL export helper")?;
+    let ssh = args
+        .ssh
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote MySQL import requires --ssh"))?;
+    let remote_path = args
+        .remote_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote MySQL import requires --path"))?;
 
     let mut command = remote_clone_ssh_command(args);
     command
-        .arg(&args.ssh)
-        .arg(format!("php -- {}", shell_quote(&args.remote_path)))
+        .arg(ssh)
+        .arg(format!("php -- {}", shell_quote(remote_path)))
         .stdin(Stdio::piped())
         .stdout(Stdio::from(export_file))
         .stderr(Stdio::piped());
@@ -3087,6 +3186,290 @@ fn remote_clone_import_mysql_database(
     Ok(())
 }
 
+fn remote_clone_reprint_sync(
+    shared: &SharedPaths,
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &RemoteCloneArgs,
+    cache_root: &Path,
+) -> Result<()> {
+    let site_dir = cache_root
+        .parent()
+        .ok_or_else(|| anyhow!("failed to resolve remote cache parent"))?;
+    let state_dir = site_dir.join("reprint-state");
+    let fs_root = site_dir.join("reprint-files");
+    let flat_root = site_dir.join("reprint-flat");
+    let db_path = cache_root.join("wp-content/database/.ht.sqlite");
+
+    fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create {}", state_dir.display()))?;
+    fs::create_dir_all(&fs_root)
+        .with_context(|| format!("failed to create {}", fs_root.display()))?;
+
+    let endpoint = remote_clone_reprint_endpoint(args)?;
+    let filter = if args.full_sync || args.include_uploads {
+        "none"
+    } else {
+        "essential-files"
+    };
+
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "preflight",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &[],
+    )?;
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "files-pull",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &[OsString::from(format!("--filter={filter}"))],
+    )?;
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "db-pull",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &[],
+    )?;
+    if flat_root.exists() {
+        fs::remove_dir_all(&flat_root)
+            .with_context(|| format!("failed to remove {}", flat_root.display()))?;
+    }
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "flat-docroot",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &[
+            OsString::from(format!("--flatten-to={}", flat_root.display())),
+            OsString::from("--force"),
+        ],
+    )?;
+    if cache_root.exists() {
+        fs::remove_dir_all(cache_root)
+            .with_context(|| format!("failed to remove {}", cache_root.display()))?;
+    }
+    remote_clone_materialize_flat_docroot(&flat_root, cache_root)?;
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let mut db_apply_args = vec![
+        OsString::from("--target-engine=sqlite"),
+        OsString::from(format!("--target-sqlite-path={}", db_path.display())),
+        OsString::from("--target-db=forkpress"),
+    ];
+    if let Some((from, to)) = remote_clone_reprint_rewrite_pair(layout, args) {
+        db_apply_args.push(OsString::from("--rewrite-url"));
+        db_apply_args.push(OsString::from(from));
+        db_apply_args.push(OsString::from(to));
+    }
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "db-apply",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &db_apply_args,
+    )?;
+    Ok(())
+}
+
+fn remote_clone_reprint_fetch_skipped_files(
+    shared: &SharedPaths,
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &RemoteCloneArgs,
+    cache_root: &Path,
+) -> Result<()> {
+    let site_dir = cache_root
+        .parent()
+        .ok_or_else(|| anyhow!("failed to resolve remote cache parent"))?;
+    let state_dir = site_dir.join("reprint-state");
+    let fs_root = site_dir.join("reprint-files");
+    let flat_root = site_dir.join("reprint-flat");
+    let endpoint = remote_clone_reprint_endpoint(args)?;
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "files-pull",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &[OsString::from("--filter=skipped-earlier")],
+    )?;
+    if flat_root.exists() {
+        fs::remove_dir_all(&flat_root)
+            .with_context(|| format!("failed to remove {}", flat_root.display()))?;
+    }
+    remote_clone_run_reprint_step(
+        shared,
+        layout,
+        runtime,
+        args,
+        "flat-docroot",
+        &endpoint,
+        &state_dir,
+        &fs_root,
+        &[
+            OsString::from(format!("--flatten-to={}", flat_root.display())),
+            OsString::from("--force"),
+        ],
+    )?;
+    remote_clone_materialize_flat_docroot(&flat_root, cache_root)?;
+    Ok(())
+}
+
+fn remote_clone_run_reprint_step(
+    shared: &SharedPaths,
+    layout: &Layout,
+    runtime: &PortableRuntime,
+    args: &RemoteCloneArgs,
+    step: &str,
+    endpoint: &str,
+    state_dir: &Path,
+    fs_root: &Path,
+    extra_args: &[OsString],
+) -> Result<()> {
+    let phar = args
+        .reprint_phar
+        .as_ref()
+        .ok_or_else(|| anyhow!("remote clone Reprint mode requires --reprint-phar <path>"))?;
+    let secret = args
+        .reprint_secret
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone Reprint mode requires --reprint-secret <secret>"))?;
+    if !phar.is_file() {
+        bail!(
+            "Reprint PHAR does not exist or is not a file: {}",
+            phar.display()
+        );
+    }
+
+    for attempt in 1..=1000 {
+        let mut command = php_base_command(layout, runtime, shared);
+        command
+            .arg(phar)
+            .arg(step)
+            .arg(endpoint)
+            .arg(format!("--state-dir={}", state_dir.display()))
+            .arg(format!("--fs-root={}", fs_root.display()))
+            .arg(format!("--secret={secret}"));
+        for arg in extra_args {
+            command.arg(arg);
+        }
+        let output = command
+            .output()
+            .with_context(|| format!("failed to run Reprint {step}"))?;
+        write_filtered_output(&output.stdout, &output.stderr)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        if output.status.code() == Some(2) {
+            println!("  reprint:  {step} partial; resuming ({attempt})");
+            continue;
+        }
+        bail!("Reprint {step} exited with status {}", output.status);
+    }
+    bail!("Reprint {step} did not finish after 1000 resume attempts")
+}
+
+fn remote_clone_reprint_endpoint(args: &RemoteCloneArgs) -> Result<String> {
+    if let Some(api_url) = &args.reprint_api_url {
+        return Ok(api_url.clone());
+    }
+    let remote_url = args
+        .remote_url
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone Reprint mode requires --url <remote-site-url>"))?;
+    Ok(format!("{}/?reprint-api", remote_url.trim_end_matches('/')))
+}
+
+fn remote_clone_reprint_rewrite_pair(
+    layout: &Layout,
+    args: &RemoteCloneArgs,
+) -> Option<(String, String)> {
+    let from = args.remote_url.clone()?;
+    if let Some(local_url) = &args.local_url {
+        return Some((from, local_url.clone()));
+    }
+    if let Some(branch) = &args.branch {
+        if let Ok((root_host, port)) = branchctl_url_hint(layout) {
+            return Some((from, format!("http://{branch}.{root_host}:{port}")));
+        }
+    }
+    None
+}
+
+fn remote_clone_materialize_flat_docroot(source: &Path, dest: &Path) -> Result<()> {
+    if !source.join("wp-load.php").exists() {
+        bail!(
+            "Reprint flat-docroot did not produce a WordPress root at {}; expected wp-load.php",
+            source.display()
+        );
+    }
+    fs::create_dir_all(dest).with_context(|| format!("failed to create {}", dest.display()))?;
+    remote_clone_copy_following_symlinks(source, dest, source)
+}
+
+fn remote_clone_copy_following_symlinks(
+    root: &Path,
+    dest_root: &Path,
+    current: &Path,
+) -> Result<()> {
+    for entry in
+        fs::read_dir(current).with_context(|| format!("failed to read {}", current.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .with_context(|| format!("{} is not under {}", path.display(), root.display()))?;
+        let out = dest_root.join(rel);
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("failed to stat {}", path.display()))?;
+        if metadata.is_dir() {
+            fs::create_dir_all(&out)
+                .with_context(|| format!("failed to create {}", out.display()))?;
+            remote_clone_copy_following_symlinks(root, dest_root, &path)?;
+        } else if metadata.is_file() {
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::copy(&path, &out).with_context(|| {
+                format!("failed to copy {} to {}", path.display(), out.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn remote_clone_ssh_command(args: &RemoteCloneArgs) -> Command {
     let mut command = Command::new("ssh");
     if let Some(key) = &args.ssh_key {
@@ -3107,7 +3490,15 @@ fn remote_clone_rsync_source(ssh: &str, remote_path: &str) -> String {
     format!("{ssh}:{path}")
 }
 
-fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsString> {
+fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Result<Vec<OsString>> {
+    let ssh = args
+        .ssh
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --ssh <user@host>"))?;
+    let remote_path = args
+        .remote_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --path <remote-wp-root>"))?;
     let mut out = vec![OsString::from("-az")];
     if let Some(ssh_command) = remote_clone_rsync_ssh_command(args) {
         out.push(OsString::from("-e"));
@@ -3126,29 +3517,42 @@ fn remote_clone_rsync_args(args: &RemoteCloneArgs, cache_root: &Path) -> Vec<OsS
         out.push(OsString::from("--exclude"));
         out.push(OsString::from(exclude));
     }
-    out.push(OsString::from(remote_clone_rsync_source(
-        &args.ssh,
-        &args.remote_path,
-    )));
+    out.push(OsString::from(remote_clone_rsync_source(ssh, remote_path)));
     out.push(cache_root.as_os_str().to_os_string());
-    out
+    Ok(out)
 }
 
 fn remote_clone_fetch_boot_dependency(
+    shared: &SharedPaths,
+    layout: &Layout,
+    runtime: &PortableRuntime,
     args: &RemoteCloneArgs,
+    source_kind: RemoteCloneSourceKind,
     cache_root: &Path,
     relative_path: &Path,
 ) -> Result<()> {
-    let rsync_args = remote_clone_boot_dependency_rsync_args(args, cache_root, relative_path);
+    if source_kind == RemoteCloneSourceKind::Reprint {
+        remote_clone_reprint_fetch_skipped_files(shared, layout, runtime, args, cache_root)?;
+        return Ok(());
+    }
+    let rsync_args = remote_clone_boot_dependency_rsync_args(args, cache_root, relative_path)?;
     let output = Command::new("rsync")
         .args(&rsync_args)
         .output()
         .context("failed to start rsync while fetching a branch boot dependency")?;
     if !output.status.success() {
+        let ssh = args
+            .ssh
+            .as_deref()
+            .ok_or_else(|| anyhow!("remote clone SSH mode requires --ssh <user@host>"))?;
+        let remote_path = args
+            .remote_path
+            .as_deref()
+            .ok_or_else(|| anyhow!("remote clone SSH mode requires --path <remote-wp-root>"))?;
         bail!(
             "rsync could not fetch {} from {} ({})\n\nrsync stderr:\n{}",
             relative_path.display(),
-            remote_clone_rsync_source(&args.ssh, &args.remote_path),
+            remote_clone_rsync_source(ssh, remote_path),
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -3161,19 +3565,27 @@ fn remote_clone_boot_dependency_rsync_args(
     args: &RemoteCloneArgs,
     cache_root: &Path,
     relative_path: &Path,
-) -> Vec<OsString> {
+) -> Result<Vec<OsString>> {
+    let ssh = args
+        .ssh
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --ssh <user@host>"))?;
+    let remote_path = args
+        .remote_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --path <remote-wp-root>"))?;
     let mut out = vec![OsString::from("-azR")];
     if let Some(ssh_command) = remote_clone_rsync_ssh_command(args) {
         out.push(OsString::from("-e"));
         out.push(OsString::from(ssh_command));
     }
     out.push(OsString::from(remote_clone_rsync_relative_source(
-        &args.ssh,
-        &args.remote_path,
+        ssh,
+        remote_path,
         relative_path,
     )));
     out.push(cache_root.as_os_str().to_os_string());
-    out
+    Ok(out)
 }
 
 fn remote_clone_rsync_relative_source(
@@ -3206,7 +3618,15 @@ fn remote_clone_rsync_ssh_command(args: &RemoteCloneArgs) -> Option<String> {
     Some(command)
 }
 
-fn remote_clone_ssh_check_command(args: &RemoteCloneArgs) -> String {
+fn remote_clone_ssh_check_command(args: &RemoteCloneArgs) -> Result<String> {
+    let ssh = args
+        .ssh
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --ssh <user@host>"))?;
+    let remote_path = args
+        .remote_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --path <remote-wp-root>"))?;
     let mut command = String::from("ssh");
     if let Some(key) = &args.ssh_key {
         command.push_str(" -i ");
@@ -3219,13 +3639,13 @@ fn remote_clone_ssh_check_command(args: &RemoteCloneArgs) -> String {
     command.push_str(" -o ConnectTimeout=");
     command.push_str(&REMOTE_CLONE_SSH_CONNECT_TIMEOUT_SECONDS.to_string());
     command.push_str(" -o BatchMode=yes ");
-    command.push_str(&shell_quote(&args.ssh));
+    command.push_str(&shell_quote(ssh));
     command.push(' ');
     command.push_str(&shell_quote(&format!(
         "test -f {}",
-        shell_quote(&remote_clone_wp_load_path(&args.remote_path))
+        shell_quote(&remote_clone_wp_load_path(remote_path))
     )));
-    command
+    Ok(command)
 }
 
 fn remote_clone_wp_load_path(remote_path: &str) -> String {
@@ -3238,12 +3658,20 @@ fn remote_clone_rsync_failure_message(
     args: &RemoteCloneArgs,
     status: &str,
     stderr: &str,
-) -> String {
+) -> Result<String> {
+    let ssh = args
+        .ssh
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --ssh <user@host>"))?;
+    let remote_path = args
+        .remote_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("remote clone SSH mode requires --path <remote-wp-root>"))?;
     let trimmed = stderr.trim();
     let lower = trimmed.to_ascii_lowercase();
     let mut message = format!(
         "remote clone could not sync {} with rsync ({status}).",
-        remote_clone_rsync_source(&args.ssh, &args.remote_path)
+        remote_clone_rsync_source(ssh, remote_path)
     );
 
     if lower.contains("operation timed out")
@@ -3252,7 +3680,7 @@ fn remote_clone_rsync_failure_message(
     {
         message.push_str(&format!(
             "\n\nSSH did not connect to {} on port {} before timing out. This is a network/hosting reachability problem, not a WordPress import problem. Check the SSH port, hosting firewall or IP allowlist, VPN/network, and whether SSH is enabled for this site.",
-            args.ssh,
+            ssh,
             args.ssh_port.unwrap_or(22)
         ));
     } else if lower.contains("connection refused") {
@@ -3278,14 +3706,14 @@ fn remote_clone_rsync_failure_message(
     }
 
     message.push_str("\n\nTry this SSH check:\n  ");
-    message.push_str(&remote_clone_ssh_check_command(args));
+    message.push_str(&remote_clone_ssh_check_command(args)?);
     if trimmed.is_empty() {
         message.push_str("\n\nrsync did not print stderr.");
     } else {
         message.push_str("\n\nrsync stderr:\n");
         message.push_str(trimmed);
     }
-    message
+    Ok(message)
 }
 
 fn remote_clone_default_excludes(include_uploads: bool) -> Vec<&'static str> {
@@ -4115,7 +4543,9 @@ fn cow_branch_command(
                 );
             }
             if !apply_reviewed && choice.is_none() {
-                bail!("branch merge-resolve requires --choice source|target|custom or --apply-reviewed");
+                bail!(
+                    "branch merge-resolve requires --choice source|target|custom or --apply-reviewed"
+                );
             }
             if custom_value.is_some() && choice.as_deref() != Some("custom") {
                 bail!("--custom-value can only be used with --choice custom");
@@ -8694,13 +9124,13 @@ mod git_helper_tests {
         };
         assert_eq!(args.shared.work_dir, PathBuf::from(".forkpress"));
         assert_eq!(clone.name, "production");
-        assert_eq!(clone.ssh, "deploy@example.com");
+        assert_eq!(clone.ssh.as_deref(), Some("deploy@example.com"));
         assert_eq!(
             clone.ssh_key.as_deref(),
             Some(Path::new("/Users/alex/.ssh/forkpress id"))
         );
         assert_eq!(clone.ssh_port, Some(2222));
-        assert_eq!(clone.remote_path, "/srv/www/example");
+        assert_eq!(clone.remote_path.as_deref(), Some("/srv/www/example"));
         assert_eq!(clone.branch.as_deref(), Some("prod-main"));
         assert_eq!(clone.remote_url.as_deref(), Some("https://example.com"));
         assert!(!clone.include_uploads);
@@ -8710,7 +9140,8 @@ mod git_helper_tests {
         let rsync = remote_clone_rsync_args(
             &clone,
             Path::new("/tmp/forkpress/.forkpress/cow/remote-sites/production/cache"),
-        );
+        )
+        .unwrap();
         let rsync: Vec<String> = rsync
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -8739,10 +9170,13 @@ mod git_helper_tests {
     fn remote_clone_include_uploads_keeps_other_boot_excludes() {
         let clone = RemoteCloneArgs {
             name: "Production".to_string(),
-            ssh: "deploy@example.com".to_string(),
+            ssh: Some("deploy@example.com".to_string()),
             ssh_key: None,
             ssh_port: None,
-            remote_path: "/srv/www/example/".to_string(),
+            remote_path: Some("/srv/www/example/".to_string()),
+            reprint_phar: None,
+            reprint_secret: None,
+            reprint_api_url: None,
             branch: None,
             remote_url: None,
             local_url: None,
@@ -8752,7 +9186,7 @@ mod git_helper_tests {
             no_delete: true,
             force: false,
         };
-        let rsync = remote_clone_rsync_args(&clone, Path::new("/tmp/cache"));
+        let rsync = remote_clone_rsync_args(&clone, Path::new("/tmp/cache")).unwrap();
         let rsync: Vec<String> = rsync
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -8807,10 +9241,13 @@ mod git_helper_tests {
     fn remote_clone_boot_dependency_rsync_fetches_single_relative_path() {
         let clone = RemoteCloneArgs {
             name: "production".to_string(),
-            ssh: "deploy@example.com".to_string(),
+            ssh: Some("deploy@example.com".to_string()),
             ssh_key: Some(PathBuf::from("/Users/alex/.ssh/forkpress id")),
             ssh_port: Some(2222),
-            remote_path: "/srv/www/example/".to_string(),
+            remote_path: Some("/srv/www/example/".to_string()),
+            reprint_phar: None,
+            reprint_secret: None,
+            reprint_api_url: None,
             branch: Some("production-main".to_string()),
             remote_url: Some("https://example.com".to_string()),
             local_url: None,
@@ -8825,7 +9262,8 @@ mod git_helper_tests {
             &clone,
             Path::new("/tmp/cache"),
             Path::new("wp-content/uploads/forkpress-required/bootstrap.php"),
-        );
+        )
+        .unwrap();
         let rsync: Vec<String> = rsync
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -8870,7 +9308,7 @@ mod git_helper_tests {
         assert!(clone.full_sync);
         assert!(!clone.include_uploads);
 
-        let rsync = remote_clone_rsync_args(&clone, Path::new("/tmp/cache"));
+        let rsync = remote_clone_rsync_args(&clone, Path::new("/tmp/cache")).unwrap();
         let rsync: Vec<String> = rsync
             .into_iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -8887,10 +9325,13 @@ mod git_helper_tests {
     fn remote_clone_rsync_ssh_command_is_omitted_without_credentials() {
         let clone = RemoteCloneArgs {
             name: "production".to_string(),
-            ssh: "deploy@example.com".to_string(),
+            ssh: Some("deploy@example.com".to_string()),
             ssh_key: None,
             ssh_port: None,
-            remote_path: "/srv/www/example".to_string(),
+            remote_path: Some("/srv/www/example".to_string()),
+            reprint_phar: None,
+            reprint_secret: None,
+            reprint_api_url: None,
             branch: None,
             remote_url: None,
             local_url: None,
@@ -8904,13 +9345,88 @@ mod git_helper_tests {
     }
 
     #[test]
+    fn parses_remote_clone_reprint_defaults_to_essential_files() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "remote",
+            "--work-dir",
+            ".forkpress",
+            "clone",
+            "production",
+            "--reprint-phar",
+            "/tmp/reprint.phar",
+            "--reprint-secret",
+            "secret",
+            "--url",
+            "https://example.com",
+            "--branch",
+            "prod-main",
+        ])
+        .unwrap();
+        let Commands::Remote(args) = cli.command else {
+            panic!("expected remote command");
+        };
+        let RemoteCommand::Clone(clone) = args.command else {
+            panic!("expected remote clone command");
+        };
+        assert_eq!(args.shared.work_dir, PathBuf::from(".forkpress"));
+        assert_eq!(
+            remote_clone_source_kind(&clone).unwrap(),
+            RemoteCloneSourceKind::Reprint
+        );
+        assert_eq!(clone.ssh, None);
+        assert_eq!(clone.remote_path, None);
+        assert_eq!(
+            clone.reprint_phar.as_deref(),
+            Some(Path::new("/tmp/reprint.phar"))
+        );
+        assert_eq!(clone.reprint_secret.as_deref(), Some("secret"));
+        assert_eq!(
+            remote_clone_reprint_endpoint(&clone).unwrap(),
+            "https://example.com/?reprint-api"
+        );
+        assert!(!clone.include_uploads);
+        assert!(!clone.full_sync);
+    }
+
+    #[test]
+    fn remote_clone_reprint_rejects_ssh_options() {
+        let cli = Cli::try_parse_from([
+            "forkpress",
+            "remote",
+            "clone",
+            "production",
+            "--reprint-phar",
+            "/tmp/reprint.phar",
+            "--reprint-secret",
+            "secret",
+            "--url",
+            "https://example.com",
+            "--ssh",
+            "deploy@example.com",
+        ])
+        .unwrap();
+        let Commands::Remote(args) = cli.command else {
+            panic!("expected remote command");
+        };
+        let RemoteCommand::Clone(clone) = args.command else {
+            panic!("expected remote clone command");
+        };
+        let err = remote_clone_source_kind(&clone).unwrap_err().to_string();
+        assert!(err.contains("Reprint mode does not use --ssh"));
+    }
+
+    #[test]
     fn remote_clone_mysql_export_ssh_reuses_credentials() {
         let clone = RemoteCloneArgs {
             name: "production".to_string(),
-            ssh: "deploy@example.com".to_string(),
+            ssh: Some("deploy@example.com".to_string()),
             ssh_key: Some(PathBuf::from("/Users/alex/.ssh/forkpress id")),
             ssh_port: Some(2222),
-            remote_path: "/srv/www/example with spaces".to_string(),
+            remote_path: Some("/srv/www/example with spaces".to_string()),
+            reprint_phar: None,
+            reprint_secret: None,
+            reprint_api_url: None,
             branch: None,
             remote_url: None,
             local_url: None,
@@ -8921,9 +9437,11 @@ mod git_helper_tests {
             force: false,
         };
         let mut command = remote_clone_ssh_command(&clone);
+        let ssh = clone.ssh.as_deref().unwrap();
+        let remote_path = clone.remote_path.as_deref().unwrap();
         command
-            .arg(&clone.ssh)
-            .arg(format!("php -- {}", shell_quote(&clone.remote_path)));
+            .arg(ssh)
+            .arg(format!("php -- {}", shell_quote(remote_path)));
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -8947,10 +9465,13 @@ mod git_helper_tests {
     fn remote_clone_rsync_timeout_error_is_actionable() {
         let clone = RemoteCloneArgs {
             name: "production".to_string(),
-            ssh: "deploy@example.com".to_string(),
+            ssh: Some("deploy@example.com".to_string()),
             ssh_key: Some(PathBuf::from("/Users/alex/.ssh/forkpress id")),
             ssh_port: Some(2222),
-            remote_path: "/srv/www/example".to_string(),
+            remote_path: Some("/srv/www/example".to_string()),
+            reprint_phar: None,
+            reprint_secret: None,
+            reprint_api_url: None,
             branch: Some("production-main".to_string()),
             remote_url: Some("https://example.com".to_string()),
             local_url: None,
@@ -8964,7 +9485,8 @@ mod git_helper_tests {
             &clone,
             "exit status: 255",
             "ssh: connect to host example.com port 2222: Operation timed out\nrsync error: unexplained error (code 255)",
-        );
+        )
+        .unwrap();
 
         assert!(message.contains("remote clone could not sync deploy@example.com:/srv/www/example/ with rsync (exit status: 255)."));
         assert!(
@@ -8983,10 +9505,13 @@ mod git_helper_tests {
     fn remote_clone_ssh_check_command_quotes_remote_paths() {
         let clone = RemoteCloneArgs {
             name: "production".to_string(),
-            ssh: "deploy@example.com".to_string(),
+            ssh: Some("deploy@example.com".to_string()),
             ssh_key: None,
             ssh_port: None,
-            remote_path: "/srv/www/example with spaces".to_string(),
+            remote_path: Some("/srv/www/example with spaces".to_string()),
+            reprint_phar: None,
+            reprint_secret: None,
+            reprint_api_url: None,
             branch: None,
             remote_url: None,
             local_url: None,
@@ -8998,7 +9523,7 @@ mod git_helper_tests {
         };
 
         assert_eq!(
-            remote_clone_ssh_check_command(&clone),
+            remote_clone_ssh_check_command(&clone).unwrap(),
             "ssh -o ConnectTimeout=10 -o BatchMode=yes deploy@example.com 'test -f '\\''/srv/www/example with spaces/wp-load.php'\\'''"
         );
     }
