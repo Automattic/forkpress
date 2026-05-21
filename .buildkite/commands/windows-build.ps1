@@ -1,6 +1,6 @@
-# Surfaces a downloadable Windows binary on every CI run as a smoke
-# artifact (no embedded PHP runtime, no signing) so the Windows build
-# path stays verified without waiting for a release cut.
+# Surfaces a downloadable Windows binary on every CI run (no embedded
+# PHP runtime) so the Windows build + Azure Trusted Signing path stays
+# verified without waiting for a release cut.
 
 $ErrorActionPreference = 'Stop'
 
@@ -18,3 +18,7 @@ Use-EmptyRuntimeBundle {
 }
 
 Get-Item "target/$TARGET/release/forkpress.exe" | Format-List Name, Length, LastWriteTime
+
+Write-Output "--- :lock: Signing forkpress.exe ($TARGET)"
+& "$PSScriptRoot\..\..\scripts\windows\sign.ps1" -Files "target/$TARGET/release/forkpress.exe"
+if ($LASTEXITCODE -ne 0) { throw "sign.ps1 failed: $LASTEXITCODE" }
