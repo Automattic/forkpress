@@ -3102,6 +3102,26 @@ function forkpress_render_branch_switcher(): void {
             refreshActionSelects();
         }
 
+        function branchManagerHref(branch) {
+            var managerUrl = branch && typeof branch.managerUrl === 'string' ? branch.managerUrl : '';
+            var branchName = branch && typeof branch.name === 'string' ? branch.name : '';
+            if (managerUrl) {
+                return managerUrl;
+            }
+            try {
+                var sourceUrl = new URL(branch && branch.url ? branch.url : '/_forkpress/branches', window.location.href);
+                sourceUrl.pathname = '/_forkpress/branches';
+                sourceUrl.search = '';
+                sourceUrl.hash = '';
+                if (!branch || !branch.url) {
+                    sourceUrl.searchParams.set('branch', branchName);
+                }
+                return sourceUrl.href;
+            } catch (error) {
+                return '/_forkpress/branches' + (branchName ? '?branch=' + encodeURIComponent(branchName) : '');
+            }
+        }
+
         function showStatus(kind, message) {
             status.className = 'forkpress-switcher-status is-visible is-' + kind;
             status.textContent = message;
@@ -3576,7 +3596,7 @@ function forkpress_render_branch_switcher(): void {
             matches.forEach(function (branch) {
                 var link = document.createElement('a');
                 link.className = 'forkpress-switcher-branch' + (branch.current ? ' is-current' : '');
-                link.href = branch.managerUrl || branch.url;
+                link.href = branchManagerHref(branch);
                 link.role = 'menuitem';
                 link.textContent = branch.name;
                 list.appendChild(link);
@@ -3678,7 +3698,7 @@ function forkpress_render_branch_switcher(): void {
                         setBranches(payload.branches);
                     }
                     if (actionName === 'forkpress_branch_create' && (payload.managerUrl || payload.url)) {
-                        window.location.assign(payload.managerUrl || payload.url);
+                        window.location.assign(branchManagerHref({ name: String(body.get('branch') || ''), managerUrl: payload.managerUrl, url: payload.url }));
                         return;
                     }
                     if (payload.type === 'warning' && payload.run) {
