@@ -140,6 +140,12 @@ jobs:
       AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
       AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
       AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+      MATCH_S3_ACCESS_KEY: ${{ secrets.MATCH_S3_ACCESS_KEY }}
+      MATCH_S3_SECRET_ACCESS_KEY: ${{ secrets.MATCH_S3_SECRET_ACCESS_KEY }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      APP_STORE_CONNECT_API_KEY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY_ID }}
+      APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -251,6 +257,47 @@ jobs:
       - name: Build forkpress
         if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'x86_64-pc-windows-msvc'
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
+
+      - name: Sign and notarize forkpress (mac)
+        if: matrix.os == 'darwin' && matrix.target != 'aarch64-apple-darwin'
+        run: |
+          required=(
+            MATCH_S3_ACCESS_KEY
+            MATCH_S3_SECRET_ACCESS_KEY
+            MATCH_PASSWORD
+            APP_STORE_CONNECT_API_KEY_KEY_ID
+            APP_STORE_CONNECT_API_KEY_ISSUER_ID
+            APP_STORE_CONNECT_API_KEY_KEY
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing macOS signing secret(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          source .buildkite/commands/_lib/setup-fastlane.sh
+          bundle exec fastlane sign_binary binary:"target/${{ matrix.target }}/release/forkpress"
+          bundle exec fastlane notarize_binary binary:"target/${{ matrix.target }}/release/forkpress"
+
+      - name: Verify forkpress signature (mac)
+        if: matrix.os == 'darwin'
+        run: |
+          binary="target/${{ matrix.target }}/release/forkpress"
+          codesign --verify --strict --verbose=2 "$binary"
+          details="$(codesign -dv --verbose=4 "$binary" 2>&1)"
+          printf '%s\n' "$details"
+          if ! grep -Fq 'Authority=Developer ID Application: Automattic, Inc. (PZYM8XX95Q)' <<<"$details"; then
+            echo "forkpress is not signed by the Automattic Developer ID Application certificate." >&2
+            exit 1
+          fi
+          if ! grep -Eq 'flags=.*runtime' <<<"$details"; then
+            echo "forkpress is not signed with hardened runtime." >&2
+            exit 1
+          fi
 
       - name: Warn when Windows installer signing is unavailable
         if: matrix.os == 'windows' && env.AZURE_TENANT_ID == ''
