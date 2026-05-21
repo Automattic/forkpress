@@ -1633,6 +1633,35 @@ test -f "$WORK_DIR/cow/merge/file-bases/remote-reprint-branch.json"
 autoinc_runtime_request remote-reprint-branch insert "$TMP/autoinc-remote-reprint-insert.json"
 php -r '$data = json_decode(file_get_contents($argv[1]), true); $meta = new SQLite3($argv[2]); $branch = new SQLite3($argv[3]); $max = (int)($data["max_id"] ?? 0); $band = $meta->querySingle("SELECT band_start, band_end FROM merge_autoincrement_bands WHERE branch_name = '\''remote-reprint-branch'\'' AND table_name = '\''wp_forkpress_e2e_autoinc'\''", true); $seq = (int)$branch->querySingle("SELECT seq FROM sqlite_sequence WHERE name = '\''wp_forkpress_e2e_autoinc'\''"); exit($band && $max >= (int)$band["band_start"] && $max <= (int)$band["band_end"] && $seq === $max ? 0 : 1);' "$TMP/autoinc-remote-reprint-insert.json" "$WORK_DIR/cow/merge/metadata.sqlite" "$WORK/remote-reprint-branch/wp-content/database/.ht.sqlite"
 
+log_step "reprint remote clone fetches skipped boot dependencies"
+REMOTE_REPRINT_BOOT_SOURCE="$TMP/remote-reprint-boot-source"
+cp -R "$WORK/main/." "$REMOTE_REPRINT_BOOT_SOURCE/"
+mkdir -p "$REMOTE_REPRINT_BOOT_SOURCE/wp-content/mu-plugins" "$REMOTE_REPRINT_BOOT_SOURCE/wp-content/uploads/2026/05"
+cat > "$REMOTE_REPRINT_BOOT_SOURCE/wp-content/mu-plugins/forkpress-e2e-reprint-boot-dep.php" <<'PHP'
+<?php
+require_once WP_CONTENT_DIR . '/uploads/2026/05/reprint-boot-required.php';
+PHP
+cat > "$REMOTE_REPRINT_BOOT_SOURCE/wp-content/uploads/2026/05/reprint-boot-required.php" <<'PHP'
+<?php
+define('FORKPRESS_E2E_REPRINT_BOOT_DEP_LOADED', true);
+PHP
+: > "$FAKE_REPRINT_LOG"
+FAKE_REPRINT_SOURCE="$REMOTE_REPRINT_BOOT_SOURCE" FAKE_REPRINT_LOG="$FAKE_REPRINT_LOG" \
+  "$BIN" remote --work-dir "$WORK_DIR" clone reprint-boot-prod \
+  --reprint-phar "$FAKE_REPRINT" \
+  --reprint-secret test-secret \
+  --url "https://reprint-boot.example.test/" \
+  --branch remote-reprint-boot-branch \
+  > "$TMP/remote-reprint-boot-clone.out"
+grep -F "boot dep:  fetching wp-content/uploads/2026/05/reprint-boot-required.php" "$TMP/remote-reprint-boot-clone.out" >/dev/null
+grep -F "forkpress: recreated branch 'remote-reprint-boot-branch' after fetching 1 boot dependency file(s)" "$TMP/remote-reprint-boot-clone.out" >/dev/null
+grep -F "files-pull" "$FAKE_REPRINT_LOG" | grep -F -- "--filter=essential-files" >/dev/null
+grep -F "files-pull" "$FAKE_REPRINT_LOG" | grep -F -- "--filter=skipped-earlier" >/dev/null
+test -f "$WORK_DIR/cow/remote-sites/reprint-boot-prod/cache/wp-content/uploads/2026/05/reprint-boot-required.php"
+test -f "$WORK/remote-reprint-boot-branch/wp-content/uploads/2026/05/reprint-boot-required.php"
+test -f "$WORK_DIR/cow/merge/bases/remote-reprint-boot-branch.sqlite"
+test -f "$WORK_DIR/cow/merge/file-bases/remote-reprint-boot-branch.json"
+
 log_step "remote clone imports MySQL-backed WordPress cache before branching"
 REMOTE_MYSQL_SOURCE="$TMP/remote-mysql-source"
 mkdir -p "$REMOTE_MYSQL_SOURCE"
