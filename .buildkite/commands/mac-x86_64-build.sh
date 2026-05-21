@@ -2,13 +2,6 @@
 
 set -euo pipefail
 
-# a8c BK has no Intel mac queue, so we cross-compile from Apple Silicon.
-# The output isn't end-to-end testable here (no Rosetta) — it's a build-
-# path smoke check, not a shippable binary; the release pipeline owns
-# the real Intel binary with embedded runtime. FORKPRESS_RUNTIME_BUNDLE=
-# /dev/null is needed because spc can't cleanly cross-build PHP from
-# aarch64.
-
 TARGET=x86_64-apple-darwin
 
 echo "--- :crab: Installing Rust via rustup"
@@ -16,8 +9,19 @@ echo "--- :crab: Installing Rust via rustup"
 source "$(dirname "$0")/_lib/install-rust.sh"
 rustup target add "$TARGET"
 
-echo "--- :crab: cargo build --release forkpress ($TARGET, empty runtime)"
-FORKPRESS_RUNTIME_BUNDLE=/dev/null cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
+echo "--- :beer: Installing macOS runtime build tools ($TARGET)"
+bash scripts/dev/install-macos-runtime-tools.sh "$TARGET"
+
+echo "--- :hammer: Pre-running spc doctor --auto-fix ($TARGET)"
+# shellcheck source=_lib/spc-doctor-prerun.sh
+source "$(dirname "$0")/_lib/spc-doctor-prerun.sh"
+spc_doctor_prerun "$TARGET"
+
+echo "--- :package: Building static PHP runtime bundle ($TARGET)"
+FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
+
+echo "--- :crab: cargo build --release forkpress ($TARGET)"
+cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
 
 ls -lh "target/$TARGET/release/forkpress"
 file "target/$TARGET/release/forkpress" || true
@@ -25,9 +29,18 @@ file "target/$TARGET/release/forkpress" || true
 # shellcheck source=_lib/setup-fastlane.sh
 source "$(dirname "$0")/_lib/setup-fastlane.sh"
 
-# Sign as a smoke check on the codesign chain, but skip notarization —
-# this binary has no embedded runtime (built with FORKPRESS_RUNTIME_BUNDLE=
-# /dev/null above) and is unrunnable, so notarizing it would waste the
-# notary API quota on a non-shippable artifact.
 echo "--- :lock: Codesigning forkpress ($TARGET)"
 bundle exec fastlane sign_binary binary:"target/$TARGET/release/forkpress"
+
+echo "--- :test_tube: forkpress smoke ($TARGET)"
+arch -x86_64 "target/$TARGET/release/forkpress" --version
+
+echo "--- :cow: COW strategy e2e (APFS sparsebundle, $TARGET)"
+FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE=1 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
+
+if [ "${FORKPRESS_SKIP_NOTARIZE:-0}" = "1" ]; then
+  echo "--- :apple: Skipping notarization (FORKPRESS_SKIP_NOTARIZE=1)"
+else
+  echo "--- :apple: Notarizing forkpress ($TARGET)"
+  bundle exec fastlane notarize_binary binary:"target/$TARGET/release/forkpress"
+fi

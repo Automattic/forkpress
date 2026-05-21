@@ -113,13 +113,14 @@ for the passed Buildkite build for the exact release commit and downloads these
 signed artifacts before packaging the GitHub release assets:
 
 - `aarch64-apple-darwin`: signed and notarized `forkpress`
+- `x86_64-apple-darwin`: signed and notarized `forkpress`
 - `x86_64-pc-windows-msvc`: signed `forkpress.exe`, which GitHub Actions wraps
   into the release zip and installer
 
-Linux and `x86_64-apple-darwin` release targets are still built in GitHub
-Actions until their Buildkite artifacts are release-grade. The current
-Buildkite macOS x86_64 job runs on Apple Silicon with an empty runtime as a
-cross-build smoke check because there is no Intel mac queue.
+Linux release targets are still built in GitHub Actions until their Buildkite
+artifacts are release-grade. The Buildkite macOS x86_64 job runs on Apple
+Silicon under Rosetta because there is no Intel mac queue; mac agents need
+Rosetta plus Intel Homebrew under `/usr/local`.
 
 Windows signing is currently optional:
 

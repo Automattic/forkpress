@@ -102,10 +102,9 @@ steps:
       - github_commit_status:
           context: "Buildkite / Mac aarch64 build"
 
-  # Cross-build the x86_64 mac binary from the aarch64 queue. a8c BK
-  # has no Intel mac queue, so this step trades end-to-end coverage for
-  # compile-only coverage. The resulting binary is a smoke artifact —
-  # the release pipeline owns shippable Intel binaries.
+  # Build the x86_64 mac binary from the aarch64 queue under Rosetta.
+  # a8c BK has no Intel mac queue, so this step requires Intel Homebrew
+  # under /usr/local and Rosetta on the mac agent.
   - label: ":apple: Mac x86_64 cross-build"
     key: mac-x86_64-build
     depends_on: mac-aarch64-tests
