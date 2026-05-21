@@ -87,12 +87,14 @@ declare -a files=()
 while IFS= read -r path; do
   [ -n "$path" ] && files+=("$path")
 done < <(
-  {
-    git diff --name-only --diff-filter=ACMRT "$BASE"...HEAD
-    git diff --name-only --diff-filter=ACMRT
-    git diff --cached --name-only --diff-filter=ACMRT
-    git ls-files --others --exclude-standard
-  } | sort -u
+	{
+		git diff --name-only --diff-filter=ACMRT "$BASE"...HEAD
+		git diff --name-only --diff-filter=ACMRT
+		git diff --cached --name-only --diff-filter=ACMRT
+		if [ -z "${CI:-}" ] && [ -z "${BUILDKITE:-}" ] && [ -z "${GITHUB_ACTIONS:-}" ]; then
+			git ls-files --others --exclude-standard
+		fi
+	} | sort -u
 )
 
 if [ "${#files[@]}" -eq 0 ]; then
@@ -105,11 +107,13 @@ declare -a commands=()
 add_cmd() {
   local cmd="$1"
   local existing
-  for existing in "${commands[@]}"; do
-    if [ "$existing" = "$cmd" ]; then
-      return
-    fi
-  done
+  if [ "${#commands[@]}" -gt 0 ]; then
+    for existing in "${commands[@]}"; do
+      if [ "$existing" = "$cmd" ]; then
+        return
+      fi
+    done
+  fi
   commands+=("$cmd")
 }
 
@@ -229,7 +233,7 @@ fi
 
 if [ "$JOBS" -eq 1 ] || [ "${#commands[@]}" -le 1 ]; then
   for cmd in "${commands[@]}"; do
-    bash -lc "$cmd"
+    bash -c "$cmd"
   done
   exit 0
 fi
@@ -250,7 +254,7 @@ start_command() {
   local index="$1"
   local log="$logs_dir/$index.log"
   (
-    bash -lc "${commands[$index]}"
+    bash -c "${commands[$index]}"
   ) >"$log" 2>&1 &
   pids[$index]=$!
   running_indices+=("$index")

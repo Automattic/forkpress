@@ -8,6 +8,11 @@ steps:
   - label: ":mag: COW changed preflight"
     key: cow-changed-preflight
     command: .buildkite/commands/cow-changed-preflight.sh
+    env:
+      # Avoid stale checkout directories left behind by canceled/root-owned
+      # Docker writes from prior builds. The Docker cleanup trap still repairs
+      # the current workspace before any same-build reuse.
+      BUILDKITE_BUILD_CHECKOUT_PATH: "$BUILDKITE_BUILD_PATH/$BUILDKITE_AGENT_NAME/$BUILDKITE_ORGANIZATION_SLUG/$BUILDKITE_PIPELINE_SLUG-$BUILDKITE_BUILD_NUMBER"
     plugins: [$CI_TOOLKIT_PLUGIN]
     agents:
       queue: default
@@ -18,6 +23,8 @@ steps:
   - label: ":crab: Linux tests (workspace + CLI)"
     key: linux-tests
     command: .buildkite/commands/linux-tests.sh
+    env:
+      BUILDKITE_BUILD_CHECKOUT_PATH: "$BUILDKITE_BUILD_PATH/$BUILDKITE_AGENT_NAME/$BUILDKITE_ORGANIZATION_SLUG/$BUILDKITE_PIPELINE_SLUG-$BUILDKITE_BUILD_NUMBER"
     plugins:
       - $CI_TOOLKIT_PLUGIN
       - $DOCKER_PLUGIN:
@@ -45,6 +52,8 @@ steps:
     key: linux-build
     depends_on: linux-tests
     command: .buildkite/commands/linux-build.sh
+    env:
+      BUILDKITE_BUILD_CHECKOUT_PATH: "$BUILDKITE_BUILD_PATH/$BUILDKITE_AGENT_NAME/$BUILDKITE_ORGANIZATION_SLUG/$BUILDKITE_PIPELINE_SLUG-$BUILDKITE_BUILD_NUMBER"
     artifact_paths:
       - "target/x86_64-unknown-linux-musl/release/forkpress"
       - "target/x86_64-unknown-linux-musl/release/forkpress-dev"
@@ -136,6 +145,8 @@ steps:
   - label: ":books: Docs validate"
     key: docs-validate
     command: .buildkite/commands/docs-validate.sh
+    env:
+      BUILDKITE_BUILD_CHECKOUT_PATH: "$BUILDKITE_BUILD_PATH/$BUILDKITE_AGENT_NAME/$BUILDKITE_ORGANIZATION_SLUG/$BUILDKITE_PIPELINE_SLUG-$BUILDKITE_BUILD_NUMBER"
     artifact_paths:
       - "docs-dist/**/*"
     plugins:
