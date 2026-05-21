@@ -26,5 +26,23 @@ FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
 echo "--- :crab: cargo build --release forkpress ($TARGET)"
 cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
 
+# shellcheck source=_lib/setup-fastlane.sh
+source "$(dirname "$0")/_lib/setup-fastlane.sh"
+
+# Sign before the e2e so the test exercises the same hardened-runtime
+# binary the artifact upload ships.
+echo "--- :lock: Codesigning forkpress ($TARGET)"
+bundle exec fastlane sign_binary binary:"target/$TARGET/release/forkpress"
+
 echo "--- :cow: COW strategy e2e (APFS sparsebundle)"
 FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE=1 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
+
+# `FORKPRESS_SKIP_NOTARIZE=1` opts out of the ~minutes-long notary
+# round-trip and lets branches without App Store Connect creds in scope
+# still produce a signed (un-notarized) binary.
+if [ "${FORKPRESS_SKIP_NOTARIZE:-0}" = "1" ]; then
+  echo "--- :apple: Skipping notarization (FORKPRESS_SKIP_NOTARIZE=1)"
+else
+  echo "--- :apple: Notarizing forkpress ($TARGET)"
+  bundle exec fastlane notarize_binary binary:"target/$TARGET/release/forkpress"
+fi

@@ -1,0 +1,107 @@
+# frozen_string_literal: true
+
+UI.user_error!('Please run fastlane via `bundle exec`') unless FastlaneCore::Helper.bundler?
+
+REPO_ROOT = File.expand_path('..', __dir__)
+APPLE_TEAM_ID = 'PZYM8XX95Q'
+ENTITLEMENTS_PATH = File.join(REPO_ROOT, 'scripts/macos/entitlements.plist')
+
+CODE_SIGNING_STORAGE_OPTIONS = {
+  storage_mode: 's3',
+  s3_bucket: 'a8c-fastlane-match',
+  s3_region: 'us-east-2'
+}.freeze
+
+CODE_SIGNING_ENV_VARS = %w[
+  MATCH_S3_ACCESS_KEY
+  MATCH_S3_SECRET_ACCESS_KEY
+  MATCH_PASSWORD
+].freeze
+
+ASC_API_KEY_ENV_VARS = %w[
+  APP_STORE_CONNECT_API_KEY_KEY_ID
+  APP_STORE_CONNECT_API_KEY_ISSUER_ID
+  APP_STORE_CONNECT_API_KEY_KEY
+].freeze
+
+require 'fastlane/plugin/wpmreleasetoolkit'
+
+EnvManager = Fastlane::Wpmreleasetoolkit::EnvManager
+
+before_all do
+  setup_ci
+  EnvManager.set_up(env_file_name: 'forkpress.env')
+end
+
+desc 'Fetch the Developer ID Application certificate into the keychain'
+lane :set_up_signing do |readonly: true|
+  EnvManager.require_env_vars!(*CODE_SIGNING_ENV_VARS)
+  EnvManager.require_env_vars!(*ASC_API_KEY_ENV_VARS) unless readonly
+
+  sync_code_signing(
+    type: 'developer_id',
+    platform: 'macos',
+    team_id: APPLE_TEAM_ID,
+    app_identifier: [],
+    api_key: readonly ? nil : app_store_connect_api_key,
+    readonly: readonly,
+    **CODE_SIGNING_STORAGE_OPTIONS
+  )
+end
+
+desc 'Codesign a macOS binary with Developer ID + hardened runtime'
+lane :sign_binary do |binary:|
+  # Fastlane runs `sh` from the `fastlane/` directory; resolve the
+  # caller's `binary:<path>` argument against the repo root so the
+  # cargo output path (`target/...`) makes sense to codesign.
+  binary = File.expand_path(binary, REPO_ROOT)
+
+  identity = `security find-identity -v -p codesigning | awk -v team='(#{APPLE_TEAM_ID})' '/Developer ID Application:/ && index($0, team) { sub(/^[^"]*"/, ""); sub(/"[^"]*$/, ""); print; exit }'`.strip
+  UI.user_error!("No Developer ID Application identity for team #{APPLE_TEAM_ID} in keychain") if identity.empty?
+
+  args = ['codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', identity]
+  args += ['--entitlements', ENTITLEMENTS_PATH] if File.file?(ENTITLEMENTS_PATH)
+  args << binary
+
+  UI.message("Codesigning #{binary} as #{identity}")
+  sh(*args)
+  sh('codesign', '--verify', '--strict', '--verbose=2', binary)
+end
+
+desc 'Submit a signed macOS binary to Apple notary service'
+lane :notarize_binary do |binary:|
+  binary = File.expand_path(binary, REPO_ROOT)
+  EnvManager.require_env_vars!(*ASC_API_KEY_ENV_VARS)
+
+  # notarytool only accepts .zip / .pkg / .dmg; ditto-zip the raw Mach-O.
+  # Stapling is skipped because the ticket can't be attached to a raw
+  # binary anyway — Gatekeeper resolves it online via the binary's
+  # code-signature hash.
+  zip_path = "#{binary}-notarize.zip"
+  sh('ditto', '-c', '-k', binary, zip_path)
+  begin
+    # `bundle_id` is required when the package is a raw .zip — fastlane's
+    # notarize action otherwise tries to read it from an `.app/Info.plist`
+    # inside and errors out. notarytool itself only uses it as a label on
+    # the submission record, so any stable identifier works.
+    #
+    # `verbose: false` is load-bearing: with `use_notarytool: true`,
+    # fastlane invokes notarytool with `--output-format json` AND
+    # `--verbose`, which interleaves debug lines with the JSON document
+    # and then crashes the action's `JSON.parse` on the submit response
+    # — even though notarization itself succeeded. We keep
+    # `print_log: true` so the action still pulls the diagnostic log on
+    # `Invalid`/`Rejected` status.
+    notarize(
+      package: zip_path,
+      use_notarytool: true,
+      api_key: app_store_connect_api_key,
+      bundle_id: 'com.automattic.forkpress',
+      skip_stapling: true,
+      print_log: true,
+      verbose: false
+    )
+  ensure
+    File.delete(zip_path) if File.exist?(zip_path)
+  end
+end
