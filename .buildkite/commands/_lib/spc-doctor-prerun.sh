@@ -29,8 +29,8 @@ spc_doctor_prerun() {
       echo "ERROR: x86_64-apple-darwin spc doctor pre-run requires Rosetta." >&2
       return 1
     fi
-    if [ ! -d /usr/local/bin ]; then
-      echo "ERROR: x86_64-apple-darwin spc doctor pre-run requires Intel Homebrew under /usr/local." >&2
+    if [ ! -x /usr/local/bin/brew ]; then
+      echo "ERROR: x86_64-apple-darwin spc doctor pre-run requires Intel Homebrew at /usr/local/bin/brew." >&2
       return 1
     fi
     export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
