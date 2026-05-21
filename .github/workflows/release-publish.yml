@@ -131,7 +131,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             os: windows
     runs-on: ${{ matrix.runner }}
+    environment: buildkite
     env:
+      BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -150,8 +152,6 @@ jobs:
 
       - name: Download signed forkpress from Buildkite
         if: matrix.target == 'aarch64-apple-darwin'
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
         run: |
           node scripts/release-download-buildkite-artifact.mjs \
             --commit "${{ needs.preflight.outputs.checkout_ref }}" \
@@ -167,8 +167,6 @@ jobs:
       - name: Download signed forkpress.exe from Buildkite
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
         run: |
           node scripts/release-download-buildkite-artifact.mjs `
             --commit "${{ needs.preflight.outputs.checkout_ref }}" `
