@@ -128,10 +128,10 @@ export async function waitForBuildArtifact(client, options) {
 			.sort((left, right) => right.number - left.number);
 
 		for (const build of matchingBuilds) {
-			const artifacts = await listBuildArtifacts(client, {
+			const artifacts = await listArtifactsForBuild(client, {
 				org: options.org,
 				pipeline: options.pipeline,
-				buildNumber: build.number,
+				build,
 			});
 			const artifact = findFinishedArtifact(artifacts, options.artifactPath);
 			if (artifact) {
@@ -207,6 +207,34 @@ export async function listBuildsForCommit(client, options) {
 
 export async function listBuildArtifacts(client, { org, pipeline, buildNumber }) {
 	return client.getJson(`/organizations/${org}/pipelines/${pipeline}/builds/${buildNumber}/artifacts?per_page=100`);
+}
+
+export async function listArtifactsForBuild(client, { org, pipeline, build }) {
+	const artifacts = await listBuildArtifacts(client, {
+		org,
+		pipeline,
+		buildNumber: build.number,
+	});
+	const seen = new Set(artifacts.map((artifact) => artifact.id || `${artifact.job_id}:${artifact.path}`));
+
+	for (const job of build.jobs || []) {
+		const jobArtifactsUrl = job.artifact_url || (job.id
+			? `/organizations/${org}/pipelines/${pipeline}/builds/${build.number}/jobs/${job.id}/artifacts?per_page=100`
+			: null);
+		if (!jobArtifactsUrl) {
+			continue;
+		}
+		const jobArtifacts = await client.getJson(jobArtifactsUrl);
+		for (const artifact of jobArtifacts) {
+			const key = artifact.id || `${artifact.job_id}:${artifact.path}`;
+			if (!seen.has(key)) {
+				seen.add(key);
+				artifacts.push(artifact);
+			}
+		}
+	}
+
+	return artifacts;
 }
 
 export async function downloadArtifact(client, artifact, output) {
