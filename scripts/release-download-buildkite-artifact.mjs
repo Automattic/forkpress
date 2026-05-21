@@ -219,6 +219,9 @@ export function createBuildkiteClient({ token, apiBase }) {
 			const url = path.startsWith('http') ? path : `${apiBase}${path}`;
 			const response = await fetch(url, { headers });
 			if (!response.ok) {
+				if (response.status === 403 && path.includes('/artifacts')) {
+					throw new BuildkiteArtifactError(`Buildkite artifact API request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
+				}
 				throw new BuildkiteArtifactError(`Buildkite API request failed: ${response.status} ${response.statusText} ${url}`);
 			}
 			return response.json();
@@ -237,6 +240,9 @@ export function createBuildkiteClient({ token, apiBase }) {
 				if (body?.url) {
 					return body.url;
 				}
+			}
+			if (response.status === 403) {
+				throw new BuildkiteArtifactError(`Buildkite artifact download request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
 			}
 			throw new BuildkiteArtifactError(`Buildkite artifact download request failed: ${response.status} ${response.statusText} ${url}`);
 		},
