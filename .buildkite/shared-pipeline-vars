@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# This file is `source`'d before `buildkite-agent pipeline upload` and exports
+# variables that are interpolated into the pipeline YAML before upload.
+
+CI_TOOLKIT_PLUGIN_VERSION='6.1.0'
+DOCKER_PLUGIN_VERSION='v5.13.0'
+RUST_IMAGE_TAG='1.95-trixie'
+NODE_IMAGE_TAG='24-bookworm'
+# Parse the first non-empty line of `.xcode-version`, strip a leading
+# `~>` (Fastlane-style pin), and trim surrounding whitespace. Reading
+# the whole file with command substitution would collapse any trailing
+# blank line into a stray space inside `IMAGE_ID`.
+XCODE_VERSION=$(awk 'NF { sub(/^~> ?/, ""); gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit }' .xcode-version)
+if [ -z "$XCODE_VERSION" ]; then
+  echo "error: could not parse Xcode version from .xcode-version" >&2
+  exit 1
+fi
+
+export IMAGE_ID="xcode-$XCODE_VERSION"
+export CI_TOOLKIT_PLUGIN="automattic/a8c-ci-toolkit#$CI_TOOLKIT_PLUGIN_VERSION"
+export DOCKER_PLUGIN="docker#$DOCKER_PLUGIN_VERSION"
+export DOCKER_RUST_IMAGE="public.ecr.aws/docker/library/rust:$RUST_IMAGE_TAG"
+export DOCKER_NODE_IMAGE="public.ecr.aws/docker/library/node:$NODE_IMAGE_TAG"

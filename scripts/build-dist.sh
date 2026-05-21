@@ -10,6 +10,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=shared/static-php-cli.sh
+source "$REPO_ROOT/scripts/shared/static-php-cli.sh"
+
 require_static_php_build_tools() {
   local missing=()
   local required=(git composer php re2c automake bison pkg-config)
@@ -37,19 +40,6 @@ require_static_php_build_tools() {
   fi
   echo "Refusing to let static-php-cli auto-install prerequisites during the release bundle build." >&2
   exit 1
-}
-
-ensure_static_php_cli_checkout() {
-  mkdir -p "$BUILD_DIR"
-  if [ ! -d "$SPC_DIR/.git" ]; then
-    rm -rf "$SPC_DIR"
-    git clone --no-checkout https://github.com/crazywhalecc/static-php-cli.git "$SPC_DIR"
-  fi
-
-  git -C "$SPC_DIR" fetch --depth 1 origin "$SPC_REF"
-  git -C "$SPC_DIR" checkout --detach FETCH_HEAD
-  git -C "$SPC_DIR" reset --hard FETCH_HEAD
-  printf '%s\n' "$SPC_REF" > "$SPC_REF_MARKER"
 }
 
 # --- Target detection ------------------------------------------------------
@@ -85,7 +75,7 @@ fi
 DIST_DIR="${FORKPRESS_DIST_DIR:-$REPO_ROOT/dist/$DIST_NAME}"
 BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$DIST_NAME}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
-SPC_REF="${FORKPRESS_STATIC_PHP_CLI_REF:-8d038f435da7845926ba425dfbae0278cd0e0746}"
+# `$SPC_REF` is set by `scripts/shared/static-php-cli.sh` (sourced above).
 SPC_REF_MARKER="$SPC_DIR/.forkpress-static-php-cli-ref"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
@@ -160,13 +150,9 @@ fi
 if [ "$NEED_PHP_BUILD" = "1" ]; then
   echo "==> Building static PHP via static-php-cli (first-time: 3-5 minutes)"
   require_static_php_build_tools
-  ensure_static_php_cli_checkout
+  ensure_static_php_cli_checkout "$SPC_DIR"
+  install_static_php_cli_composer_deps "$SPC_DIR"
   cd "$SPC_DIR"
-  # --ignore-platform-reqs skips strict checking of the PHP version constraint
-  # in static-php-cli's composer.lock (which can float up to PHP >= 8.4 as
-  # deps update). static-php-cli itself works fine on PHP 8.3, which is the
-  # baseline we can rely on (ubuntu-24.04, macos-14 via brew).
-  composer install --no-dev --prefer-dist --ignore-platform-reqs
 
   # Some upstream source entries include a single hardcoded alternate mirror.
   # If that mirror is unavailable, static-php-cli will not try its default

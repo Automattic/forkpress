@@ -1,0 +1,154 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/buildkite/pipeline-schema/main/schema.json
+---
+
+env:
+  IMAGE_ID: $IMAGE_ID
+
+steps:
+  - label: ":mag: COW changed preflight"
+    key: cow-changed-preflight
+    command: .buildkite/commands/cow-changed-preflight.sh
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: default
+    notify:
+      - github_commit_status:
+          context: "Buildkite / COW changed preflight"
+
+  - label: ":crab: Linux tests (workspace + CLI)"
+    key: linux-tests
+    command: .buildkite/commands/linux-tests.sh
+    plugins:
+      - $CI_TOOLKIT_PLUGIN
+      - $DOCKER_PLUGIN:
+          image: "$DOCKER_RUST_IMAGE"
+          propagate-environment: true
+          # a8c BK has `DOCKER_USERNS_REMAP=true`, which would otherwise
+          # make container root map to an unprivileged subuid on the
+          # host (e.g. 100000). Anything we write under `.build/` then
+          # ends up owned by 100000:100000 on the host; the agent's
+          # `git clean -ffxdq` (run as `buildkite-agent`) can't remove
+          # those files and falls over on the next checkout. Forcing
+          # `--userns=host` keeps container root = host root, so the
+          # chown trap in our script actually restores
+          # `buildkite-agent` ownership before exit.
+          userns: host
+          environment:
+            - "CARGO_TERM_COLOR=always"
+    agents:
+      queue: default
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Linux tests"
+
+  - label: ":crab: Linux build (workspace + CLI)"
+    key: linux-build
+    depends_on: linux-tests
+    command: .buildkite/commands/linux-build.sh
+    artifact_paths:
+      - "target/x86_64-unknown-linux-musl/release/forkpress"
+      - "target/x86_64-unknown-linux-musl/release/forkpress-dev"
+    plugins:
+      - $CI_TOOLKIT_PLUGIN
+      - $DOCKER_PLUGIN:
+          image: "$DOCKER_RUST_IMAGE"
+          propagate-environment: true
+          # See `linux-tests` for why `userns: host` is required.
+          userns: host
+          # static-php-cli queries `api.github.com/repos/.../releases` for
+          # every dependency to discover the latest source URL. Unauth
+          # requests share the agent's NAT IP rate limit (60/hr); after a
+          # few builds the API returns 403 and spc gives up. Pass through
+          # the agent's GITHUB_TOKEN (loaded from a8c secrets in the
+          # environment hook) so spc hits the 5000/hr authenticated quota.
+          environment:
+            - "CARGO_TERM_COLOR=always"
+            - "GITHUB_TOKEN"
+    agents:
+      queue: default
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Linux build"
+
+  - label: ":apple: Mac aarch64 tests"
+    key: mac-aarch64-tests
+    command: .buildkite/commands/mac-aarch64-tests.sh
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: mac
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Mac aarch64 tests"
+
+  - label: ":apple: Mac aarch64 build"
+    key: mac-aarch64-build
+    depends_on: mac-aarch64-tests
+    command: .buildkite/commands/mac-aarch64-build.sh
+    artifact_paths:
+      - "target/aarch64-apple-darwin/release/forkpress"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: mac
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Mac aarch64 build"
+
+  # Cross-build the x86_64 mac binary from the aarch64 queue. a8c BK
+  # has no Intel mac queue, so this step trades end-to-end coverage for
+  # compile-only coverage. The resulting binary is a smoke artifact —
+  # the release pipeline owns shippable Intel binaries.
+  - label: ":apple: Mac x86_64 cross-build"
+    key: mac-x86_64-build
+    depends_on: mac-aarch64-tests
+    command: .buildkite/commands/mac-x86_64-build.sh
+    artifact_paths:
+      - "target/x86_64-apple-darwin/release/forkpress"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: mac
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Mac x86_64 cross-build"
+
+  - label: ":windows: Windows tests"
+    key: windows-tests
+    command: ".buildkite\\commands\\windows-tests.ps1"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: windows
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Windows tests"
+
+  - label: ":windows: Windows build"
+    key: windows-build
+    depends_on: windows-tests
+    command: ".buildkite\\commands\\windows-build.ps1"
+    artifact_paths:
+      - "target/x86_64-pc-windows-msvc/release/forkpress.exe"
+    plugins: [$CI_TOOLKIT_PLUGIN]
+    agents:
+      queue: windows
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Windows build"
+
+  - label: ":books: Docs validate"
+    key: docs-validate
+    command: .buildkite/commands/docs-validate.sh
+    artifact_paths:
+      - "docs-dist/**/*"
+    plugins:
+      - $CI_TOOLKIT_PLUGIN
+      - $DOCKER_PLUGIN:
+          image: "$DOCKER_NODE_IMAGE"
+          propagate-environment: true
+          # See `linux-tests` for why `userns: host` is required —
+          # without it `node_modules/` ends up owned by an unmapped
+          # subuid that the agent can't clean up.
+          userns: host
+    agents:
+      queue: default
+    notify:
+      - github_commit_status:
+          context: "Buildkite / Docs validate"
