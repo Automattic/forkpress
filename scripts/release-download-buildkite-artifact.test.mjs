@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	artifactPathMatches,
 	BuildkiteArtifactError,
+	findFinishedArtifact,
 	parseArgs,
 	selectArtifact,
 	selectPassedBuild,
@@ -78,5 +80,35 @@ test('selectArtifact rejects missing artifacts', () => {
 	assert.throws(
 		() => selectArtifact([{ path: 'forkpress', state: 'finished' }], 'missing'),
 		(error) => error instanceof BuildkiteArtifactError && error.message.includes('Buildkite artifact not found'),
+	);
+});
+
+test('findFinishedArtifact returns null while the artifact is not available yet', () => {
+	assert.equal(
+		findFinishedArtifact(
+			[
+				{ path: 'target/aarch64-apple-darwin/release/forkpress', state: 'uploading' },
+				{ path: 'target/x86_64-apple-darwin/release/forkpress', state: 'finished' },
+			],
+			'target/aarch64-apple-darwin/release/forkpress',
+		),
+		null,
+	);
+});
+
+test('artifactPathMatches accepts Buildkite path normalization differences', () => {
+	assert.equal(
+		artifactPathMatches(
+			'.\\target\\x86_64-pc-windows-msvc\\release\\forkpress.exe',
+			'target/x86_64-pc-windows-msvc/release/forkpress.exe',
+		),
+		true,
+	);
+	assert.equal(
+		artifactPathMatches(
+			'/var/lib/buildkite-agent/builds/forkpress/target/aarch64-apple-darwin/release/forkpress',
+			'target/aarch64-apple-darwin/release/forkpress',
+		),
+		true,
 	);
 });

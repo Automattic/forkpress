@@ -24,13 +24,7 @@ export async function main(argv) {
 			throw new BuildkiteArtifactError('BUILDKITE_API_TOKEN is required to download Buildkite artifacts.');
 		}
 		const client = createBuildkiteClient({ token, apiBase: options.apiBase });
-		const build = await waitForPassedBuild(client, options);
-		const artifacts = await listBuildArtifacts(client, {
-			org: options.org,
-			pipeline: options.pipeline,
-			buildNumber: build.number,
-		});
-		const artifact = selectArtifact(artifacts, options.artifactPath);
+		const { build, artifact } = await waitForBuildArtifact(client, options);
 		await downloadArtifact(client, artifact, options.output);
 		console.log(`Downloaded ${artifact.path} from Buildkite build #${build.number} to ${options.output}.`);
 	} catch (error) {
@@ -122,6 +116,47 @@ export async function waitForPassedBuild(client, options) {
 	}
 }
 
+export async function waitForBuildArtifact(client, options) {
+	const deadline = Date.now() + options.waitSeconds * 1000;
+	let lastSeen = [];
+
+	while (true) {
+		const builds = await listBuildsForCommit(client, options);
+		lastSeen = builds;
+		const matchingBuilds = builds
+			.filter((build) => build.commit === options.commit)
+			.sort((left, right) => right.number - left.number);
+
+		for (const build of matchingBuilds) {
+			const artifacts = await listArtifactsForBuild(client, {
+				org: options.org,
+				pipeline: options.pipeline,
+				build,
+			});
+			const artifact = findFinishedArtifact(artifacts, options.artifactPath);
+			if (artifact) {
+				return { build, artifact };
+			}
+			if (artifacts.length > 0) {
+				console.log(`Buildkite build #${build.number} artifacts: ${describeArtifacts(artifacts)}`);
+			}
+		}
+
+		const terminal = matchingBuilds.filter((build) => ['passed', 'failed', 'canceled', 'skipped'].includes(build.state));
+		const active = matchingBuilds.filter((build) => ['scheduled', 'running', 'not_run', 'waiting', 'waiting_failed'].includes(build.state));
+		if (terminal.length > 0 && active.length === 0) {
+			const summary = terminal.map((build) => `#${build.number} ${build.state} ${build.web_url || ''}`.trim()).join(', ');
+			throw new BuildkiteArtifactError(`Buildkite artifact not found for ${options.commit}: ${options.artifactPath}; terminal builds: ${summary}`);
+		}
+		if (Date.now() >= deadline) {
+			const summary = lastSeen.length > 0 ? lastSeen.map((build) => `#${build.number} ${build.state}`).join(', ') : 'none';
+			throw new BuildkiteArtifactError(`Timed out waiting for Buildkite artifact ${options.artifactPath} for ${options.commit}; seen builds: ${summary}`);
+		}
+		console.log(`Waiting for Buildkite artifact ${options.artifactPath} for ${options.commit}; seen ${builds.length || 0} build(s).`);
+		await sleep(options.pollSeconds * 1000);
+	}
+}
+
 export function selectPassedBuild(builds, commit) {
 	return builds
 		.filter((build) => build.commit === commit && build.state === 'passed')
@@ -129,7 +164,7 @@ export function selectPassedBuild(builds, commit) {
 }
 
 export function selectArtifact(artifacts, artifactPath) {
-	const matches = artifacts.filter((artifact) => artifact.path === artifactPath && artifact.state === 'finished');
+	const matches = artifacts.filter((artifact) => artifactPathMatches(artifact.path, artifactPath) && artifact.state === 'finished');
 	if (matches.length === 0) {
 		const available = artifacts.map((artifact) => `${artifact.path} (${artifact.state})`).join(', ');
 		throw new BuildkiteArtifactError(`Buildkite artifact not found: ${artifactPath}. Available artifacts: ${available || 'none'}`);
@@ -138,6 +173,28 @@ export function selectArtifact(artifacts, artifactPath) {
 		throw new BuildkiteArtifactError(`Buildkite artifact matched more than once: ${artifactPath}`);
 	}
 	return matches[0];
+}
+
+export function findFinishedArtifact(artifacts, artifactPath) {
+	const matches = artifacts.filter((artifact) => artifactPathMatches(artifact.path, artifactPath) && artifact.state === 'finished');
+	if (matches.length > 1) {
+		throw new BuildkiteArtifactError(`Buildkite artifact matched more than once: ${artifactPath}`);
+	}
+	return matches[0] || null;
+}
+
+export function artifactPathMatches(actualPath, expectedPath) {
+	const actual = normalizeArtifactPath(actualPath);
+	const expected = normalizeArtifactPath(expectedPath);
+	return actual === expected || actual.endsWith(`/${expected}`);
+}
+
+export function normalizeArtifactPath(path) {
+	return String(path).replaceAll('\\', '/').replace(/^\.\/+/, '').replace(/^\/+/, '');
+}
+
+export function describeArtifacts(artifacts) {
+	return artifacts.map((artifact) => `${artifact.path} (${artifact.state})`).join(', ');
 }
 
 export async function listBuildsForCommit(client, options) {
@@ -150,6 +207,34 @@ export async function listBuildsForCommit(client, options) {
 
 export async function listBuildArtifacts(client, { org, pipeline, buildNumber }) {
 	return client.getJson(`/organizations/${org}/pipelines/${pipeline}/builds/${buildNumber}/artifacts?per_page=100`);
+}
+
+export async function listArtifactsForBuild(client, { org, pipeline, build }) {
+	const artifacts = await listBuildArtifacts(client, {
+		org,
+		pipeline,
+		buildNumber: build.number,
+	});
+	const seen = new Set(artifacts.map((artifact) => artifact.id || `${artifact.job_id}:${artifact.path}`));
+
+	for (const job of build.jobs || []) {
+		const jobArtifactsUrl = job.artifact_url || (job.id
+			? `/organizations/${org}/pipelines/${pipeline}/builds/${build.number}/jobs/${job.id}/artifacts?per_page=100`
+			: null);
+		if (!jobArtifactsUrl) {
+			continue;
+		}
+		const jobArtifacts = await client.getJson(jobArtifactsUrl);
+		for (const artifact of jobArtifacts) {
+			const key = artifact.id || `${artifact.job_id}:${artifact.path}`;
+			if (!seen.has(key)) {
+				seen.add(key);
+				artifacts.push(artifact);
+			}
+		}
+	}
+
+	return artifacts;
 }
 
 export async function downloadArtifact(client, artifact, output) {
@@ -179,6 +264,9 @@ export function createBuildkiteClient({ token, apiBase }) {
 			const url = path.startsWith('http') ? path : `${apiBase}${path}`;
 			const response = await fetch(url, { headers });
 			if (!response.ok) {
+				if (response.status === 403 && path.includes('/artifacts')) {
+					throw new BuildkiteArtifactError(`Buildkite artifact API request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
+				}
 				throw new BuildkiteArtifactError(`Buildkite API request failed: ${response.status} ${response.statusText} ${url}`);
 			}
 			return response.json();
@@ -197,6 +285,9 @@ export function createBuildkiteClient({ token, apiBase }) {
 				if (body?.url) {
 					return body.url;
 				}
+			}
+			if (response.status === 403) {
+				throw new BuildkiteArtifactError(`Buildkite artifact download request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
 			}
 			throw new BuildkiteArtifactError(`Buildkite artifact download request failed: ${response.status} ${response.statusText} ${url}`);
 		},
