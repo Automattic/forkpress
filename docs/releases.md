@@ -108,16 +108,33 @@ intervention.
 `HOMEBREW_TAP_TOKEN` is required for stable publish runs because stable releases
 update `Automattic/homebrew-tap`.
 
+`BUILDKITE_API_TOKEN` is required for publish runs. The publish workflow waits
+for the passed Buildkite build for the exact release commit and downloads these
+signed artifacts before packaging the GitHub release assets:
+
+- `aarch64-apple-darwin`: signed and notarized `forkpress`
+- `x86_64-pc-windows-msvc`: signed `forkpress.exe`, which GitHub Actions wraps
+  into the release zip and installer
+
+Linux and `x86_64-apple-darwin` release targets are still built in GitHub
+Actions until their Buildkite artifacts are release-grade. The current
+Buildkite macOS x86_64 job runs on Apple Silicon with an empty runtime as a
+cross-build smoke check because there is no Intel mac queue.
+
 Windows signing is currently optional:
 
 | Secret | Purpose |
 | --- | --- |
-| `WINDOWS_CODESIGN_CERT_BASE64` | Base64-encoded PFX certificate used for Authenticode signing. |
-| `WINDOWS_CODESIGN_PASSWORD` | Password for the PFX certificate. |
+| `AZURE_TENANT_ID` | Azure tenant for Trusted Signing. |
+| `AZURE_CLIENT_ID` | Azure client used by Trusted Signing. |
+| `AZURE_CLIENT_SECRET` | Azure client secret used by Trusted Signing. |
+| `AZURE_ENDPOINT` | Azure Trusted Signing endpoint. |
+| `AZURE_CODE_SIGNING_ACCOUNT` | Azure Trusted Signing account name. |
+| `AZURE_CERTIFICATE_PROFILE` | Azure certificate profile name. |
 
-When both Windows signing secrets are present, the workflow signs
-`forkpress.exe` and `ForkPressSetup.exe`. When either is missing, the workflow
-warns and publishes unsigned Windows artifacts.
+When the Azure signing secrets are present, the workflow signs `forkpress.exe`
+and `ForkPressSetup.exe`. When they are missing, the workflow warns and
+publishes unsigned Windows artifacts.
 
 Production credential and code-signing follow-up is tracked in
 [issue #59](https://github.com/Automattic/forkpress/issues/59).
