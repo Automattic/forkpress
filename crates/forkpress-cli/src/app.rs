@@ -3745,17 +3745,49 @@ fn remote_clone_missing_boot_dependency_from_error(
         message.push_str(&cause.to_string());
         message.push('\n');
     }
+    let branch_roots = remote_clone_branch_roots(layout, branch);
     remote_clone_missing_boot_dependency(
         &message,
-        &cow_branch_root(layout, branch),
+        &branch_roots,
         args.include_uploads,
         args.full_sync,
     )
 }
 
+fn remote_clone_branch_roots(layout: &Layout, branch: &str) -> Vec<PathBuf> {
+    let mut roots = vec![
+        cow_branch_root(layout, branch),
+        layout.macos_cow_branches_dir.join(branch),
+        layout.linux_xfs_branches_dir.join(branch),
+    ];
+    if let Ok(Some(manifest)) = read_site_manifest(layout) {
+        if let Some(file_view) = manifest.file_view {
+            roots.push(match file_view {
+                FileViewStrategy::MacosApfsSparsebundle => {
+                    layout.macos_cow_branches_dir.join(branch)
+                }
+                FileViewStrategy::LinuxXfsLoop => layout.linux_xfs_branches_dir.join(branch),
+                FileViewStrategy::Reflink | FileViewStrategy::Copy => {
+                    cow_branch_root(layout, branch)
+                }
+            });
+        }
+    }
+    let mut canonical_roots = Vec::new();
+    for root in &roots {
+        if let Ok(canonical) = fs::canonicalize(root) {
+            canonical_roots.push(canonical);
+        }
+    }
+    roots.extend(canonical_roots);
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 fn remote_clone_missing_boot_dependency(
     message: &str,
-    branch_root: &Path,
+    branch_roots: &[PathBuf],
     include_uploads: bool,
     full_sync: bool,
 ) -> Option<PathBuf> {
@@ -3768,9 +3800,11 @@ fn remote_clone_missing_boot_dependency(
     for ch in message.chars() {
         if ch == '\'' {
             if quoted {
-                if let Some(relative) =
-                    remote_clone_recoverable_boot_dependency(&current, branch_root, include_uploads)
-                {
+                if let Some(relative) = remote_clone_recoverable_boot_dependency(
+                    &current,
+                    branch_roots,
+                    include_uploads,
+                ) {
                     return Some(relative);
                 }
                 current.clear();
@@ -3785,11 +3819,13 @@ fn remote_clone_missing_boot_dependency(
 
 fn remote_clone_recoverable_boot_dependency(
     candidate: &str,
-    branch_root: &Path,
+    branch_roots: &[PathBuf],
     include_uploads: bool,
 ) -> Option<PathBuf> {
     let path = Path::new(candidate);
-    let relative = path.strip_prefix(branch_root).ok()?;
+    let relative = branch_roots
+        .iter()
+        .find_map(|branch_root| path.strip_prefix(branch_root).ok())?;
     if !remote_clone_relative_path_is_safe(relative) {
         return None;
     }
@@ -9201,38 +9237,56 @@ mod git_helper_tests {
 
     #[test]
     fn remote_clone_detects_missing_excluded_upload_boot_dependency() {
-        let branch_root = Path::new("/tmp/forkpress/site/feature");
+        let branch_roots = vec![PathBuf::from("/tmp/forkpress/site/feature")];
         let message = "branch preview PHP exception while booting http://feature.wp.localhost:18080/: Failed opening required '/tmp/forkpress/site/feature/wp-content/uploads/forkpress-required/bootstrap.php' (include_path='.:') in /tmp/forkpress/site/feature/wp-content/plugins/forkpress-upload-loader/forkpress-upload-loader.php:5";
 
         assert_eq!(
-            remote_clone_missing_boot_dependency(message, branch_root, false, false).as_deref(),
+            remote_clone_missing_boot_dependency(message, &branch_roots, false, false).as_deref(),
             Some(Path::new(
                 "wp-content/uploads/forkpress-required/bootstrap.php"
             ))
         );
         assert_eq!(
-            remote_clone_missing_boot_dependency(message, branch_root, true, false),
+            remote_clone_missing_boot_dependency(message, &branch_roots, true, false),
             None
         );
         assert_eq!(
-            remote_clone_missing_boot_dependency(message, branch_root, false, true),
+            remote_clone_missing_boot_dependency(message, &branch_roots, false, true),
             None
         );
     }
 
     #[test]
+    fn remote_clone_detects_mount_backed_boot_dependency_path() {
+        let branch_roots = vec![
+            PathBuf::from("/tmp/forkpress/site/feature"),
+            PathBuf::from(
+                "/private/tmp/forkpress/site/.forkpress/macos-cow/mount/branches/feature",
+            ),
+        ];
+        let message = "branch preview PHP exception while booting http://feature.wp.localhost:18080/: Failed opening required '/private/tmp/forkpress/site/.forkpress/macos-cow/mount/branches/feature/wp-content/uploads/forkpress-required/bootstrap.php' (include_path='.:') in /private/tmp/forkpress/site/.forkpress/macos-cow/mount/branches/feature/wp-content/mu-plugins/forkpress-loader.php:2";
+
+        assert_eq!(
+            remote_clone_missing_boot_dependency(message, &branch_roots, false, false).as_deref(),
+            Some(Path::new(
+                "wp-content/uploads/forkpress-required/bootstrap.php"
+            ))
+        );
+    }
+
+    #[test]
     fn remote_clone_missing_boot_dependency_ignores_unmanaged_paths() {
-        let branch_root = Path::new("/tmp/forkpress/site/feature");
+        let branch_roots = vec![PathBuf::from("/tmp/forkpress/site/feature")];
         let plugin_message = "Failed opening required '/tmp/forkpress/site/feature/wp-content/plugins/plugin/vendor/autoload.php'";
         let outside_message =
             "Failed opening required '/tmp/forkpress/site/other/wp-content/uploads/file.php'";
 
         assert_eq!(
-            remote_clone_missing_boot_dependency(plugin_message, branch_root, false, false),
+            remote_clone_missing_boot_dependency(plugin_message, &branch_roots, false, false),
             None
         );
         assert_eq!(
-            remote_clone_missing_boot_dependency(outside_message, branch_root, false, false),
+            remote_clone_missing_boot_dependency(outside_message, &branch_roots, false, false),
             None
         );
     }
