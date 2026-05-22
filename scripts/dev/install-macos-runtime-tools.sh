@@ -18,9 +18,9 @@ retry() {
 }
 
 ensure_intel_homebrew() {
-  if [ -x /usr/local/bin/brew ]; then
-    return
-  fi
+	if [ -x /usr/local/bin/brew ]; then
+		return
+	fi
 
   echo "Intel Homebrew not found at /usr/local/bin/brew; installing under Rosetta."
   env NONINTERACTIVE=1 CI=1 arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
@@ -28,18 +28,33 @@ ensure_intel_homebrew() {
   if [ ! -x /usr/local/bin/brew ]; then
     echo "ERROR: Intel Homebrew installation completed but /usr/local/bin/brew is still missing." >&2
     exit 1
-  fi
+	fi
+}
+
+ensure_rosetta() {
+	if arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+		return
+	fi
+
+	echo "Rosetta is not available; installing Rosetta for x86_64 macOS runtime builds."
+	if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+		sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+	else
+		/usr/sbin/softwareupdate --install-rosetta --agree-to-license
+	fi
+
+	if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+		echo "ERROR: Rosetta installation completed but x86_64 execution still fails." >&2
+		exit 1
+	fi
 }
 
 target="${1:-${FORKPRESS_TARGET:-}}"
 brew_cmd=(brew)
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] && [ "$target" = "x86_64-apple-darwin" ]; then
-  if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
-    echo "ERROR: x86_64-apple-darwin runtime builds on Apple Silicon require Rosetta." >&2
-    exit 1
-  fi
-  ensure_intel_homebrew
-  brew_cmd=(arch -x86_64 /usr/local/bin/brew)
+	ensure_rosetta
+	ensure_intel_homebrew
+	brew_cmd=(arch -x86_64 /usr/local/bin/brew)
 fi
 
 retry "${brew_cmd[@]}" update

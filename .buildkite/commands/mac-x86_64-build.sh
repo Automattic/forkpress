@@ -5,7 +5,7 @@ set -euo pipefail
 TARGET=x86_64-apple-darwin
 
 allow_pr_fallback() {
-  [ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]
+  [ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ] && [ "${FORKPRESS_ALLOW_MAC_X86_SMOKE_FALLBACK:-0}" = "1" ]
 }
 
 run_empty_runtime_smoke_build() {
