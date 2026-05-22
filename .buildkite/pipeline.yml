@@ -109,6 +109,7 @@ steps:
     key: mac-x86_64-build
     depends_on: mac-aarch64-tests
     command: .buildkite/commands/mac-x86_64-build.sh
+    timeout_in_minutes: 60
     artifact_paths:
       - "target/x86_64-apple-darwin/release/forkpress"
     plugins: [$CI_TOOLKIT_PLUGIN]
