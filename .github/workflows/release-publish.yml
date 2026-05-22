@@ -140,24 +140,18 @@ jobs:
       AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
       AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
       AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
-      MATCH_S3_ACCESS_KEY: ${{ secrets.MATCH_S3_ACCESS_KEY }}
-      MATCH_S3_SECRET_ACCESS_KEY: ${{ secrets.MATCH_S3_SECRET_ACCESS_KEY }}
-      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-      APP_STORE_CONNECT_API_KEY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY_ID }}
-      APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
-      APP_STORE_CONNECT_API_KEY_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
 
       - uses: actions/setup-node@v6
-        if: matrix.target == 'aarch64-apple-darwin'
+        if: matrix.os == 'darwin'
         with:
           node-version: 24
 
       - name: Download signed forkpress from Buildkite
-        if: matrix.target == 'aarch64-apple-darwin'
+        if: matrix.os == 'darwin'
         run: |
           node scripts/release-download-buildkite-artifact.mjs \
             --commit "${{ needs.preflight.outputs.checkout_ref }}" \
@@ -192,10 +186,6 @@ jobs:
         if: matrix.os != 'windows'
         run: make test-release
 
-      - name: Install toolchain (mac)
-        if: matrix.os == 'darwin' && matrix.target != 'aarch64-apple-darwin'
-        run: bash scripts/dev/install-macos-runtime-tools.sh
-
       - name: Install toolchain (linux)
         if: matrix.os == 'linux'
         run: |
@@ -224,7 +214,7 @@ jobs:
       # and the PHP/lib compilation when inputs haven't changed. Cache key
       # includes every input that affects the produced binaries.
       - name: Cache .build
-        if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.os != 'darwin' && matrix.target != 'x86_64-pc-windows-msvc'
         uses: actions/cache@v5
         with:
           path: .build
@@ -236,12 +226,12 @@ jobs:
             ) }}
 
       - uses: dtolnay/rust-toolchain@stable
-        if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.os != 'darwin' && matrix.target != 'x86_64-pc-windows-msvc'
         with:
           targets: ${{ matrix.target }}
 
       - name: Build production dist bundle
-        if: matrix.os != 'windows' && matrix.target != 'aarch64-apple-darwin'
+        if: matrix.os == 'linux'
         run: scripts/build-dist.sh
         env:
           FORKPRESS_TARGET: ${{ matrix.target }}
@@ -255,33 +245,8 @@ jobs:
           FORKPRESS_TARGET: ${{ matrix.target }}
 
       - name: Build forkpress
-        if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.os != 'darwin' && matrix.target != 'x86_64-pc-windows-msvc'
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
-
-      - name: Sign and notarize forkpress (mac)
-        if: matrix.os == 'darwin' && matrix.target != 'aarch64-apple-darwin'
-        run: |
-          required=(
-            MATCH_S3_ACCESS_KEY
-            MATCH_S3_SECRET_ACCESS_KEY
-            MATCH_PASSWORD
-            APP_STORE_CONNECT_API_KEY_KEY_ID
-            APP_STORE_CONNECT_API_KEY_ISSUER_ID
-            APP_STORE_CONNECT_API_KEY_KEY
-          )
-          missing=()
-          for name in "${required[@]}"; do
-            if [ -z "${!name}" ]; then
-              missing+=("$name")
-            fi
-          done
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Missing macOS signing secret(s): %s\n' "${missing[*]}" >&2
-            exit 1
-          fi
-          source .buildkite/commands/_lib/setup-fastlane.sh
-          bundle exec fastlane sign_binary binary:"target/${{ matrix.target }}/release/forkpress"
-          bundle exec fastlane notarize_binary binary:"target/${{ matrix.target }}/release/forkpress"
 
       - name: Verify forkpress signature (mac)
         if: matrix.os == 'darwin'

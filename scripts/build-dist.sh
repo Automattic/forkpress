@@ -149,6 +149,21 @@ fi
 
 if [ "$NEED_PHP_BUILD" = "1" ]; then
   echo "==> Building static PHP via static-php-cli (first-time: 3-5 minutes)"
+  SPC_RUN_UNDER_X86_64=0
+  if [ "$UNAME_S" = "Darwin" ] && [ "$TRIPLE" = "x86_64-apple-darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+    if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+      echo "ERROR: x86_64-apple-darwin dist builds on Apple Silicon require Rosetta." >&2
+      exit 1
+    fi
+    if [ ! -d /usr/local/bin ]; then
+      echo "ERROR: x86_64-apple-darwin dist builds on Apple Silicon require Intel Homebrew under /usr/local." >&2
+      exit 1
+    fi
+    export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+    SPC_RUN_UNDER_X86_64=1
+  fi
+
   require_static_php_build_tools
   ensure_static_php_cli_checkout "$SPC_DIR"
   install_static_php_cli_composer_deps "$SPC_DIR"
@@ -189,8 +204,9 @@ if ($changed) {
     ln -sf "$(command -v gpatch)" bin/bin-shim/patch
     export PATH="$SPC_DIR/bin/bin-shim:$PATH"
   fi
-  # Ensure Apple Silicon homebrew is preferred over any Intel brew symlinks.
-  if [ -d /opt/homebrew/bin ]; then
+  # Ensure Apple Silicon homebrew is preferred over any Intel brew symlinks
+  # unless this is an x86_64 runtime build running under Rosetta.
+  if [ "$SPC_RUN_UNDER_X86_64" = "0" ] && [ -d /opt/homebrew/bin ]; then
     export PATH="/opt/homebrew/bin:$PATH"
   fi
 
@@ -211,7 +227,9 @@ if ($changed) {
   fi
 
   run_spc() {
-    if [ "$SPC_RUN_UNDER_ARM64" = "1" ]; then
+    if [ "$SPC_RUN_UNDER_X86_64" = "1" ]; then
+      arch -x86_64 ./bin/spc "$@"
+    elif [ "$SPC_RUN_UNDER_ARM64" = "1" ]; then
       arch -arm64 ./bin/spc "$@"
     else
       ./bin/spc "$@"
