@@ -9,6 +9,8 @@ const DEFAULT_ORG = 'automattic';
 const DEFAULT_PIPELINE = 'forkpress';
 const DEFAULT_POLL_SECONDS = 30;
 const DEFAULT_WAIT_SECONDS = 45 * 60;
+const DEFAULT_API_RETRIES = 3;
+const DEFAULT_API_RETRY_DELAY_MS = 1000;
 
 export class BuildkiteArtifactError extends Error {}
 
@@ -254,7 +256,14 @@ export async function downloadArtifact(client, artifact, output) {
 	writeFileSync(output, bytes);
 }
 
-export function createBuildkiteClient({ token, apiBase }) {
+export function createBuildkiteClient({
+	token,
+	apiBase,
+	fetchImpl = fetch,
+	retries = DEFAULT_API_RETRIES,
+	retryDelayMs = DEFAULT_API_RETRY_DELAY_MS,
+	sleepImpl = sleep,
+}) {
 	const headers = {
 		Authorization: `Bearer ${token}`,
 		Accept: 'application/json',
@@ -262,36 +271,70 @@ export function createBuildkiteClient({ token, apiBase }) {
 	return {
 		async getJson(path) {
 			const url = path.startsWith('http') ? path : `${apiBase}${path}`;
-			const response = await fetch(url, { headers });
-			if (!response.ok) {
+			for (let attempt = 0; attempt <= retries; attempt += 1) {
+				const response = await fetchImpl(url, { headers });
+				if (response.ok) {
+					return response.json();
+				}
 				if (response.status === 403 && path.includes('/artifacts')) {
 					throw new BuildkiteArtifactError(`Buildkite artifact API request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
 				}
+				if (attempt < retries && isTransientBuildkiteStatus(response.status)) {
+					await waitBeforeBuildkiteRetry({
+						action: `Buildkite API request failed: ${response.status} ${response.statusText} ${url}`,
+						attempt,
+						retries,
+						retryDelayMs,
+						sleepImpl,
+					});
+					continue;
+				}
 				throw new BuildkiteArtifactError(`Buildkite API request failed: ${response.status} ${response.statusText} ${url}`);
 			}
-			return response.json();
 		},
 		async getRedirectLocation(url) {
-			const response = await fetch(url, { headers, redirect: 'manual' });
-			if (response.status === 302 || response.status === 303) {
-				const location = response.headers.get('location');
-				if (!location) {
-					throw new BuildkiteArtifactError(`Buildkite artifact download did not return a Location header for ${url}`);
+			for (let attempt = 0; attempt <= retries; attempt += 1) {
+				const response = await fetchImpl(url, { headers, redirect: 'manual' });
+				if (response.status === 302 || response.status === 303) {
+					const location = response.headers.get('location');
+					if (!location) {
+						throw new BuildkiteArtifactError(`Buildkite artifact download did not return a Location header for ${url}`);
+					}
+					return location;
 				}
-				return location;
-			}
-			if (response.ok) {
-				const body = await response.json().catch(() => null);
-				if (body?.url) {
-					return body.url;
+				if (response.ok) {
+					const body = await response.json().catch(() => null);
+					if (body?.url) {
+						return body.url;
+					}
 				}
+				if (response.status === 403) {
+					throw new BuildkiteArtifactError(`Buildkite artifact download request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
+				}
+				if (attempt < retries && isTransientBuildkiteStatus(response.status)) {
+					await waitBeforeBuildkiteRetry({
+						action: `Buildkite artifact download request failed: ${response.status} ${response.statusText} ${url}`,
+						attempt,
+						retries,
+						retryDelayMs,
+						sleepImpl,
+					});
+					continue;
+				}
+				throw new BuildkiteArtifactError(`Buildkite artifact download request failed: ${response.status} ${response.statusText} ${url}`);
 			}
-			if (response.status === 403) {
-				throw new BuildkiteArtifactError(`Buildkite artifact download request failed: 403 Forbidden ${url}. Ensure BUILDKITE_API_TOKEN has the read_artifacts REST API scope.`);
-			}
-			throw new BuildkiteArtifactError(`Buildkite artifact download request failed: ${response.status} ${response.statusText} ${url}`);
 		},
 	};
+}
+
+export function isTransientBuildkiteStatus(status) {
+	return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+async function waitBeforeBuildkiteRetry({ action, attempt, retries, retryDelayMs, sleepImpl }) {
+	const attemptNumber = attempt + 1;
+	console.warn(`${action}; retrying ${attemptNumber}/${retries} in ${retryDelayMs}ms.`);
+	await sleepImpl(retryDelayMs);
 }
 
 function readValue(argv, index, option) {

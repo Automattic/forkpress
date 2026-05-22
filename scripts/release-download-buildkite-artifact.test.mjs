@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import {
 	artifactPathMatches,
 	BuildkiteArtifactError,
+	createBuildkiteClient,
 	findFinishedArtifact,
+	isTransientBuildkiteStatus,
 	parseArgs,
 	selectArtifact,
 	selectPassedBuild,
@@ -111,4 +113,64 @@ test('artifactPathMatches accepts Buildkite path normalization differences', () 
 		),
 		true,
 	);
+});
+
+test('isTransientBuildkiteStatus identifies retryable API responses', () => {
+	for (const status of [429, 500, 502, 503, 504]) {
+		assert.equal(isTransientBuildkiteStatus(status), true, `${status} should be retryable`);
+	}
+	for (const status of [400, 401, 403, 404, 422]) {
+		assert.equal(isTransientBuildkiteStatus(status), false, `${status} should not be retryable`);
+	}
+});
+
+test('getJson retries transient Buildkite API failures', async () => {
+	const calls = [];
+	const client = createBuildkiteClient({
+		token: 'token',
+		apiBase: 'https://buildkite.example/v2',
+		retryDelayMs: 0,
+		sleepImpl: async () => {},
+		fetchImpl: async (url, options) => {
+			calls.push({ url, options });
+			if (calls.length === 1) {
+				return {
+					ok: false,
+					status: 500,
+					statusText: 'Internal Server Error',
+				};
+			}
+			return {
+				ok: true,
+				json: async () => ({ passed: true }),
+			};
+		},
+	});
+
+	assert.deepEqual(await client.getJson('/organizations/automattic/pipelines/forkpress/builds'), { passed: true });
+	assert.equal(calls.length, 2);
+	assert.equal(calls[0].url, 'https://buildkite.example/v2/organizations/automattic/pipelines/forkpress/builds');
+	assert.equal(calls[0].options.headers.Authorization, 'Bearer token');
+});
+
+test('getJson keeps artifact permission failures non-retryable', async () => {
+	let calls = 0;
+	const client = createBuildkiteClient({
+		token: 'token',
+		apiBase: 'https://buildkite.example/v2',
+		fetchImpl: async () => {
+			calls += 1;
+			return {
+				ok: false,
+				status: 403,
+				statusText: 'Forbidden',
+			};
+		},
+	});
+
+	await assert.rejects(
+		() => client.getJson('/organizations/automattic/pipelines/forkpress/builds/1/artifacts?per_page=100'),
+		(error) => error instanceof BuildkiteArtifactError && error.message.includes('read_artifacts REST API scope'),
+	);
+	assert.equal(calls, 1);
 });
