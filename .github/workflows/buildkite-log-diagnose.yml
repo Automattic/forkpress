@@ -1,0 +1,45 @@
+name: "Diagnostic: Buildkite log"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Buildkite build number"
+        required: true
+        type: string
+      job_id:
+        description: "Buildkite job id"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    environment: buildkite
+    env:
+      BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+      BUILDKITE_ORG: automattic
+      BUILDKITE_PIPELINE: forkpress
+      BUILDKITE_BUILD_NUMBER: ${{ inputs.build_number }}
+      BUILDKITE_JOB_ID: ${{ inputs.job_id }}
+    steps:
+      - name: Fetch Buildkite job log
+        run: |
+          set -euo pipefail
+          api="https://api.buildkite.com/v2/organizations/${BUILDKITE_ORG}/pipelines/${BUILDKITE_PIPELINE}/builds/${BUILDKITE_BUILD_NUMBER}"
+          auth_header="Authorization: Bearer ${BUILDKITE_API_TOKEN}"
+
+          echo "Buildkite build: ${BUILDKITE_BUILD_NUMBER}"
+          echo "Buildkite job: ${BUILDKITE_JOB_ID}"
+
+          curl -fsS -H "$auth_header" "${api}" > build.json
+          jq -r '.jobs[] | [.id, .name, .state, (.started_at // ""), (.finished_at // "")] | @tsv' build.json
+
+          echo "--- selected job"
+          jq -r --arg job_id "$BUILDKITE_JOB_ID" '.jobs[] | select(.id == $job_id)' build.json
+
+          echo "--- log"
+          curl -fsS -H "$auth_header" "${api}/jobs/${BUILDKITE_JOB_ID}/log" | jq -r '.content // .'
