@@ -67,16 +67,9 @@ if [ "$rust_status" -ne 0 ]; then
   exit "$rust_status"
 fi
 
-echo "--- :beer: Installing macOS runtime build tools ($TARGET)"
-require_release_grade_step "Installing macOS runtime build tools" run_with_heartbeat "install macOS runtime build tools ($TARGET)" bash scripts/dev/install-macos-runtime-tools.sh "$TARGET"
-
-echo "--- :hammer: Pre-running spc doctor --auto-fix ($TARGET)"
-# shellcheck source=_lib/spc-doctor-prerun.sh
-source "$(dirname "$0")/_lib/spc-doctor-prerun.sh"
-require_release_grade_step "Pre-running spc doctor --auto-fix" run_with_heartbeat "spc doctor $TARGET" spc_doctor_prerun "$TARGET"
-
-echo "--- :package: Building static PHP runtime bundle ($TARGET)"
-run_with_heartbeat "build static PHP runtime bundle ($TARGET)" env FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
+echo "--- :package: Downloading static PHP runtime bundle ($TARGET)"
+require_release_grade_step "Downloading static PHP runtime bundle" run_with_heartbeat "download static PHP runtime bundle ($TARGET)" buildkite-agent artifact download "dist/$TARGET/**" . --step mac-x86_64-runtime
+ls -lh "dist/$TARGET/bin/php"
 
 echo "--- :crab: cargo build --release forkpress ($TARGET)"
 run_with_heartbeat "cargo build forkpress ($TARGET)" cargo build --release --target "$TARGET" -p forkpress-cli --bin forkpress --locked
