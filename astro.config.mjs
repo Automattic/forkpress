@@ -32,7 +32,7 @@ export default defineConfig({
 		starlight({
 			title: 'ForkPress',
 			description:
-				'Branch, preview, and merge WordPress file and database changes with local copy-on-write worktrees.',
+				'ForkPress branches local WordPress sites into isolated previews, then merges file and database changes back with audit trails for safer parallel work.',
 			editLink: {
 				baseUrl: 'https://github.com/Automattic/forkpress/edit/trunk/',
 			},
