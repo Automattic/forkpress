@@ -134,7 +134,7 @@ runtime_input_fingerprint() {
   } | shasum -a 256 | awk '{ print $1 }'
 }
 
-RUNTIME_INPUTS_FINGERPRINT="$(runtime_input_fingerprint)"
+RUNTIME_INPUTS_FINGERPRINT=""
 
 # --- 1. Static PHP via static-php-cli --------------------------------------
 # Production builds a plain static PHP CLI for the materialized COW runtime.
@@ -149,6 +149,7 @@ if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
     PHP_READY_CHECK='exit(extension_loaded("branchfs") ? 1 : 0);'
   fi
   if "$SPC_DIR/buildroot/bin/php" -r "$PHP_READY_CHECK" >/dev/null 2>&1; then
+    RUNTIME_INPUTS_FINGERPRINT="$(runtime_input_fingerprint)"
     NEED_PHP_BUILD=0
     if [ -f "$RUNTIME_INPUTS_MARKER" ]; then
       if [ "$(cat "$RUNTIME_INPUTS_MARKER")" != "$RUNTIME_INPUTS_FINGERPRINT" ]; then
@@ -319,6 +320,9 @@ file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
   cd "$REPO_ROOT"
 fi
 
+if [ -z "$RUNTIME_INPUTS_FINGERPRINT" ]; then
+  RUNTIME_INPUTS_FINGERPRINT="$(runtime_input_fingerprint)"
+fi
 printf '%s\n' "$RUNTIME_INPUTS_FINGERPRINT" > "$RUNTIME_INPUTS_MARKER"
 
 install -m 0755 "$SPC_DIR/buildroot/bin/php" "$DIST_DIR/bin/php"
