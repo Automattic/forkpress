@@ -140,12 +140,6 @@ jobs:
       AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
       AZURE_CODE_SIGNING_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
       AZURE_CERTIFICATE_PROFILE: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
-      MATCH_S3_ACCESS_KEY: ${{ secrets.MATCH_S3_ACCESS_KEY }}
-      MATCH_S3_SECRET_ACCESS_KEY: ${{ secrets.MATCH_S3_SECRET_ACCESS_KEY }}
-      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
-      APP_STORE_CONNECT_API_KEY_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY_ID }}
-      APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ISSUER_ID }}
-      APP_STORE_CONNECT_API_KEY_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_KEY }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -259,33 +253,13 @@ jobs:
         if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'x86_64-pc-windows-msvc'
         run: cargo build --release --target ${{ matrix.target }} -p forkpress-cli --bin forkpress
 
-      - name: Sign and notarize forkpress (mac)
-        if: matrix.os == 'darwin' && matrix.target != 'aarch64-apple-darwin'
+      - name: Warn mac Intel artifact is unsigned
+        if: matrix.target == 'x86_64-apple-darwin'
         run: |
-          required=(
-            MATCH_S3_ACCESS_KEY
-            MATCH_S3_SECRET_ACCESS_KEY
-            MATCH_PASSWORD
-            APP_STORE_CONNECT_API_KEY_KEY_ID
-            APP_STORE_CONNECT_API_KEY_ISSUER_ID
-            APP_STORE_CONNECT_API_KEY_KEY
-          )
-          missing=()
-          for name in "${required[@]}"; do
-            if [ -z "${!name}" ]; then
-              missing+=("$name")
-            fi
-          done
-          if [ "${#missing[@]}" -gt 0 ]; then
-            printf 'Missing macOS signing secret(s): %s\n' "${missing[*]}" >&2
-            exit 1
-          fi
-          source .buildkite/commands/_lib/setup-fastlane.sh
-          bundle exec fastlane sign_binary binary:"target/${{ matrix.target }}/release/forkpress"
-          bundle exec fastlane notarize_binary binary:"target/${{ matrix.target }}/release/forkpress"
+          echo "::warning::Publishing unsigned mac Intel artifact; signing secrets are not available in GitHub Actions."
 
-      - name: Verify forkpress signature (mac)
-        if: matrix.os == 'darwin'
+      - name: Verify forkpress signature (mac arm)
+        if: matrix.target == 'aarch64-apple-darwin'
         run: |
           binary="target/${{ matrix.target }}/release/forkpress"
           codesign --verify --strict --verbose=2 "$binary"
