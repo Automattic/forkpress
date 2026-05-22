@@ -156,7 +156,8 @@ jobs:
           node scripts/release-download-buildkite-artifact.mjs \
             --commit "${{ needs.preflight.outputs.checkout_ref }}" \
             --artifact-path "target/${{ matrix.target }}/release/forkpress" \
-            --output "target/${{ matrix.target }}/release/forkpress"
+            --output "target/${{ matrix.target }}/release/forkpress" \
+            --wait-seconds 7200
           chmod +x "target/${{ matrix.target }}/release/forkpress"
 
       - uses: actions/setup-node@v6
