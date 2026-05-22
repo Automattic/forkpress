@@ -3,7 +3,7 @@
 #define SourceDir "."
 #endif
 #ifndef AppVersion
-#define AppVersion "0.1.52"
+#define AppVersion "0.1.53"
 #endif
 
 [Setup]
