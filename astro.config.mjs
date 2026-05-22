@@ -14,6 +14,7 @@ const socialPreviewImage = new URL(
 	`${normalizedBase}/social-preview.png?v=${socialPreviewImageVersion}`,
 	site,
 ).href;
+const socialPreviewTitle = 'ForkPress: Branch WordPress like code';
 
 export default defineConfig({
 	site,
@@ -37,6 +38,7 @@ export default defineConfig({
 				baseUrl: 'https://github.com/Automattic/forkpress/edit/trunk/',
 			},
 			head: [
+				{ tag: 'meta', attrs: { property: 'og:title', content: socialPreviewTitle } },
 				{ tag: 'meta', attrs: { property: 'og:image', content: socialPreviewImage } },
 				{ tag: 'meta', attrs: { property: 'og:image:secure_url', content: socialPreviewImage } },
 				{ tag: 'meta', attrs: { property: 'og:image:type', content: 'image/png' } },
@@ -50,6 +52,7 @@ export default defineConfig({
 							'ForkPress: Branch WordPress like code. Preview isolated changes and merge files and databases with audit trails.',
 					},
 				},
+				{ tag: 'meta', attrs: { name: 'twitter:title', content: socialPreviewTitle } },
 				{ tag: 'meta', attrs: { name: 'twitter:image', content: socialPreviewImage } },
 				{
 					tag: 'meta',
