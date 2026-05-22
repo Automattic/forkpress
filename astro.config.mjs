@@ -9,7 +9,7 @@ import removePageTitleHeading from './src/remark-remove-page-title-heading.mjs';
 const site = process.env.DOCS_SITE ?? 'https://automattic.github.io';
 const base = process.env.DOCS_BASE ?? '/forkpress';
 const normalizedBase = base.replace(/\/$/, '');
-const socialPreviewImageVersion = '2026-05-22';
+const socialPreviewImageVersion = '2026-05-22-2x';
 const socialPreviewImage = new URL(
 	`${normalizedBase}/social-preview.png?v=${socialPreviewImageVersion}`,
 	site,
@@ -42,8 +42,8 @@ export default defineConfig({
 				{ tag: 'meta', attrs: { property: 'og:image', content: socialPreviewImage } },
 				{ tag: 'meta', attrs: { property: 'og:image:secure_url', content: socialPreviewImage } },
 				{ tag: 'meta', attrs: { property: 'og:image:type', content: 'image/png' } },
-				{ tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
-				{ tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+				{ tag: 'meta', attrs: { property: 'og:image:width', content: '2400' } },
+				{ tag: 'meta', attrs: { property: 'og:image:height', content: '1260' } },
 				{
 					tag: 'meta',
 					attrs: {
