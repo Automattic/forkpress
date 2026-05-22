@@ -48,9 +48,24 @@ require_release_grade_step() {
 }
 
 echo "--- :crab: Installing Rust via rustup"
-# shellcheck source=_lib/install-rust.sh
-source "$(dirname "$0")/_lib/install-rust.sh"
-rustup target add "$TARGET"
+(
+  while true; do
+    sleep 60
+    echo "--- :hourglass_flowing_sand: Still running: install Rust toolchain ($TARGET)"
+  done
+) &
+rust_heartbeat_pid=$!
+rust_status=0
+{
+  # shellcheck source=_lib/install-rust.sh
+  source "$(dirname "$0")/_lib/install-rust.sh"
+  rustup target add "$TARGET"
+} || rust_status=$?
+kill "$rust_heartbeat_pid" >/dev/null 2>&1 || true
+wait "$rust_heartbeat_pid" >/dev/null 2>&1 || true
+if [ "$rust_status" -ne 0 ]; then
+  exit "$rust_status"
+fi
 
 echo "--- :beer: Installing macOS runtime build tools ($TARGET)"
 require_release_grade_step "Installing macOS runtime build tools" run_with_heartbeat "install macOS runtime build tools ($TARGET)" bash scripts/dev/install-macos-runtime-tools.sh "$TARGET"
