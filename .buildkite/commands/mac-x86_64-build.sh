@@ -75,8 +75,7 @@ bundle exec fastlane sign_binary binary:"target/$TARGET/release/forkpress"
 echo "--- :test_tube: forkpress smoke ($TARGET)"
 arch -x86_64 "target/$TARGET/release/forkpress" --version
 
-echo "--- :cow: COW strategy e2e (APFS sparsebundle, $TARGET)"
-FORKPRESS_FORCE_MACOS_APFS_SPARSEBUNDLE=1 tests/cow/e2e.sh "target/$TARGET/release/forkpress"
+echo "--- :cow: Skipping COW e2e; covered by GitHub Actions mac-cow-e2e ($TARGET)"
 
 if [ "${FORKPRESS_SKIP_NOTARIZE:-0}" = "1" ]; then
   echo "--- :apple: Skipping notarization (FORKPRESS_SKIP_NOTARIZE=1)"
