@@ -77,6 +77,7 @@ BUILD_DIR="${FORKPRESS_BUILD_DIR:-$REPO_ROOT/.build/$DIST_NAME}"
 SPC_DIR="$BUILD_DIR/static-php-cli"
 # `$SPC_REF` is set by `scripts/shared/static-php-cli.sh` (sourced above).
 SPC_REF_MARKER="$SPC_DIR/.forkpress-static-php-cli-ref"
+RUNTIME_INPUTS_MARKER="$SPC_DIR/.forkpress-runtime-inputs.sha256"
 CAS_TARGET_DIR="$BUILD_DIR/cas-ffi-target"
 CAS_LIB_DIR="$CAS_TARGET_DIR/$TRIPLE/release"
 SPC_DOWNLOAD_RETRIES="${FORKPRESS_STATIC_PHP_CLI_DOWNLOAD_RETRIES:-3}"
@@ -115,6 +116,26 @@ if [ "$PROFILE" = "dev" ]; then
   export SPC_EXTRA_LIBS="${SPC_EXTRA_LIBS:-} $CAS_STATIC_LIB"
 fi
 
+runtime_input_fingerprint() {
+  local deps=( "$REPO_ROOT/scripts/build-dist.sh" "$REPO_ROOT/scripts/shared/static-php-cli.sh" )
+  if [ "$PROFILE" = "dev" ]; then
+    deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.c" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.h" "$REPO_ROOT/experiments/branchfs/build/spc-patch.php" )
+  fi
+
+  {
+    printf 'triple=%s\n' "$TRIPLE"
+    printf 'profile=%s\n' "$PROFILE"
+    printf 'spc_ref=%s\n' "$SPC_REF"
+    printf 'extensions=%s\n' "$EXTENSIONS"
+    for dep in "${deps[@]}"; do
+      printf 'file=%s\n' "${dep#$REPO_ROOT/}"
+      shasum -a 256 "$dep"
+    done
+  } | shasum -a 256 | awk '{ print $1 }'
+}
+
+RUNTIME_INPUTS_FINGERPRINT="$(runtime_input_fingerprint)"
+
 # --- 1. Static PHP via static-php-cli --------------------------------------
 # Production builds a plain static PHP CLI for the materialized COW runtime.
 # The dev profile additionally builds branchfs into PHP as a builtin extension
@@ -129,18 +150,14 @@ if [ -x "$SPC_DIR/buildroot/bin/php" ]; then
   fi
   if "$SPC_DIR/buildroot/bin/php" -r "$PHP_READY_CHECK" >/dev/null 2>&1; then
     NEED_PHP_BUILD=0
-    deps=( "$REPO_ROOT/scripts/build-dist.sh" )
-    if [ "$PROFILE" = "dev" ]; then
-      deps+=( "$CAS_STATIC_LIB" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.c" "$REPO_ROOT/experiments/branchfs/php-ext/branchfs.h" "$REPO_ROOT/experiments/branchfs/build/spc-patch.php" )
-    fi
-    for dep in "${deps[@]}"; do
-      if [ "$dep" -nt "$SPC_DIR/buildroot/bin/php" ]; then
+    if [ -f "$RUNTIME_INPUTS_MARKER" ]; then
+      if [ "$(cat "$RUNTIME_INPUTS_MARKER")" != "$RUNTIME_INPUTS_FINGERPRINT" ]; then
         NEED_PHP_BUILD=1
-        break
       fi
-    done
-    if [ ! -f "$SPC_REF_MARKER" ] || [ "$(cat "$SPC_REF_MARKER")" != "$SPC_REF" ]; then
+    elif [ ! -f "$SPC_REF_MARKER" ] || [ "$(cat "$SPC_REF_MARKER")" != "$SPC_REF" ]; then
       NEED_PHP_BUILD=1
+    else
+      echo "==> Reusing legacy cached static PHP runtime; writing input fingerprint"
     fi
   else
     rm -f "$SPC_DIR/buildroot/bin/php"
@@ -301,6 +318,8 @@ file_put_contents($p, json_encode($c, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
   fi
   cd "$REPO_ROOT"
 fi
+
+printf '%s\n' "$RUNTIME_INPUTS_FINGERPRINT" > "$RUNTIME_INPUTS_MARKER"
 
 install -m 0755 "$SPC_DIR/buildroot/bin/php" "$DIST_DIR/bin/php"
 

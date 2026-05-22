@@ -196,7 +196,9 @@ export function normalizeArtifactPath(path) {
 }
 
 export function describeArtifacts(artifacts) {
-	return artifacts.map((artifact) => `${artifact.path} (${artifact.state})`).join(', ');
+	const shown = artifacts.slice(0, 20).map((artifact) => `${artifact.path} (${artifact.state})`);
+	const remaining = artifacts.length - shown.length;
+	return remaining > 0 ? `${shown.join(', ')}, ... ${remaining} more` : shown.join(', ');
 }
 
 export async function listBuildsForCommit(client, options) {
