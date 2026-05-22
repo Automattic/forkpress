@@ -3,6 +3,7 @@
 set -euo pipefail
 
 TARGET=x86_64-apple-darwin
+BUILD_CACHE_DIR="${FORKPRESS_MAC_X86_BUILD_CACHE_DIR:-$HOME/.cache/forkpress/build/$TARGET}"
 
 # shellcheck source=_lib/heartbeat.sh
 source "$(dirname "$0")/_lib/heartbeat.sh"
@@ -28,6 +29,10 @@ source "$(dirname "$0")/_lib/spc-doctor-prerun.sh"
 require_release_grade_step "spc doctor $TARGET" spc_doctor_prerun "$TARGET"
 
 echo "--- :package: Building static PHP runtime bundle ($TARGET)"
-run_with_heartbeat "build static PHP runtime bundle ($TARGET)" env FORKPRESS_TARGET="$TARGET" scripts/build-dist.sh
+mkdir -p "$BUILD_CACHE_DIR"
+run_with_heartbeat "build static PHP runtime bundle ($TARGET)" env \
+  FORKPRESS_TARGET="$TARGET" \
+  FORKPRESS_BUILD_DIR="$BUILD_CACHE_DIR" \
+  scripts/build-dist.sh
 
 ls -lh "dist/$TARGET/bin/php"
