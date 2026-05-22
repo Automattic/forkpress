@@ -272,7 +272,22 @@ export function createBuildkiteClient({
 		async getJson(path) {
 			const url = path.startsWith('http') ? path : `${apiBase}${path}`;
 			for (let attempt = 0; attempt <= retries; attempt += 1) {
-				const response = await fetchImpl(url, { headers });
+				let response;
+				try {
+					response = await fetchImpl(url, { headers });
+				} catch (error) {
+					if (attempt < retries) {
+						await waitBeforeBuildkiteRetry({
+							action: `Buildkite API request failed: ${formatBuildkiteFetchError(error)} ${url}`,
+							attempt,
+							retries,
+							retryDelayMs,
+							sleepImpl,
+						});
+						continue;
+					}
+					throw new BuildkiteArtifactError(`Buildkite API request failed: ${formatBuildkiteFetchError(error)} ${url}`);
+				}
 				if (response.ok) {
 					return response.json();
 				}
@@ -294,7 +309,22 @@ export function createBuildkiteClient({
 		},
 		async getRedirectLocation(url) {
 			for (let attempt = 0; attempt <= retries; attempt += 1) {
-				const response = await fetchImpl(url, { headers, redirect: 'manual' });
+				let response;
+				try {
+					response = await fetchImpl(url, { headers, redirect: 'manual' });
+				} catch (error) {
+					if (attempt < retries) {
+						await waitBeforeBuildkiteRetry({
+							action: `Buildkite artifact download request failed: ${formatBuildkiteFetchError(error)} ${url}`,
+							attempt,
+							retries,
+							retryDelayMs,
+							sleepImpl,
+						});
+						continue;
+					}
+					throw new BuildkiteArtifactError(`Buildkite artifact download request failed: ${formatBuildkiteFetchError(error)} ${url}`);
+				}
 				if (response.status === 302 || response.status === 303) {
 					const location = response.headers.get('location');
 					if (!location) {
@@ -329,6 +359,11 @@ export function createBuildkiteClient({
 
 export function isTransientBuildkiteStatus(status) {
 	return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function formatBuildkiteFetchError(error) {
+	const message = error?.message || String(error);
+	return error?.cause?.code ? `${message} (${error.cause.code})` : message;
 }
 
 async function waitBeforeBuildkiteRetry({ action, attempt, retries, retryDelayMs, sleepImpl }) {

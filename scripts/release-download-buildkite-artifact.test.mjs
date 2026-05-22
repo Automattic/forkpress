@@ -153,6 +153,31 @@ test('getJson retries transient Buildkite API failures', async () => {
 	assert.equal(calls[0].options.headers.Authorization, 'Bearer token');
 });
 
+test('getJson retries transient Buildkite network failures', async () => {
+	let calls = 0;
+	const networkError = new TypeError('fetch failed');
+	networkError.cause = { code: 'UND_ERR_CONNECT_TIMEOUT' };
+	const client = createBuildkiteClient({
+		token: 'token',
+		apiBase: 'https://buildkite.example/v2',
+		retryDelayMs: 0,
+		sleepImpl: async () => {},
+		fetchImpl: async () => {
+			calls += 1;
+			if (calls === 1) {
+				throw networkError;
+			}
+			return {
+				ok: true,
+				json: async () => [{ number: 476 }],
+			};
+		},
+	});
+
+	assert.deepEqual(await client.getJson('/organizations/automattic/pipelines/forkpress/builds'), [{ number: 476 }]);
+	assert.equal(calls, 2);
+});
+
 test('getJson keeps artifact permission failures non-retryable', async () => {
 	let calls = 0;
 	const client = createBuildkiteClient({
