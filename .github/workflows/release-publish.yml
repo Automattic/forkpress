@@ -157,7 +157,7 @@ jobs:
             --commit "${{ needs.preflight.outputs.checkout_ref }}" \
             --artifact-path "target/${{ matrix.target }}/release/forkpress" \
             --output "target/${{ matrix.target }}/release/forkpress" \
-            --wait-seconds 10800
+            --wait-seconds 21600
           chmod +x "target/${{ matrix.target }}/release/forkpress"
 
       - uses: actions/setup-node@v6
