@@ -1,6 +1,6 @@
 # [ForkPress](https://automattic.github.io/forkpress/)
 
-ForkPress is a single-binary WordPress branching environment for agentic work.
+ForkPress is an **experimental** single-binary WordPress branching environment for agentic work.
 
 At a glance:
 
