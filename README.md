@@ -1,6 +1,31 @@
 # [ForkPress](https://automattic.github.io/forkpress/)
 
-ForkPress is an **experimental** single-binary WordPress branching environment for agentic work.
+> [!IMPORTANT]
+> ForkPress is archived.
+>
+> This project was a useful exploration of local WordPress branching for
+> agentic work. It proved that a single binary can run WordPress locally,
+> create cheap copy-on-write branches, expose branch previews, and make parts
+> of the workflow feel Git-like.
+>
+> It also showed where the idea breaks down: generic merging of WordPress
+> database branches is not a tooling problem that can be solved reliably from
+> outside WordPress. WordPress stores application state in rows whose meaning
+> depends on core behavior, plugin behavior, options, post types, post meta,
+> taxonomies, and ad-hoc conventions. A merge tool can detect that rows
+> changed, but it cannot reliably know the semantic intent of those changes or
+> produce a safe combined result for arbitrary sites.
+>
+> Making this work for real would require explicit data modeling and merge
+> semantics in WordPress core, plus APIs that plugins can participate in. Without
+> that, a generic branch-and-merge layer can be impressive as a prototype but
+> cannot be made dependable enough for production WordPress sites.
+>
+> The repository remains available as a record of the experiment and the
+> implementation ideas that were useful along the way.
+
+ForkPress was an experimental single-binary WordPress branching environment for
+agentic work.
 
 At a glance:
 
