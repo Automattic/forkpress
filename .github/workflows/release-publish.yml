@@ -230,7 +230,7 @@ jobs:
               'crates/forkpress-cli/build.rs'
             ) }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'x86_64-pc-windows-msvc'
         with:
           targets: ${{ matrix.target }}
@@ -459,7 +459,7 @@ jobs:
             exit 1
           fi
 
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           target_commitish: ${{ needs.preflight.outputs.checkout_ref }}
