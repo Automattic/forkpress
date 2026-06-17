@@ -48,6 +48,7 @@ audit queues, stale reviews, and source/target/apply-reviewed choices, see
 | `forkpress pull` | Pull with rebase and autostash. |
 | `forkpress agents [dir]` | Create agent branches and Git worktrees. |
 | `forkpress remote clone <name> --ssh <host> --ssh-key <key> --ssh-port <port> --path <wp-root> --url <url> --branch <branch> [--force]` | Thin-clone a boot-ready remote WordPress root over SSH, import MySQL into the local SQLite sidecar when needed, then create a local COW branch. `--force` updates the cache and recreates an existing target branch. |
+| `forkpress remote clone <name> --reprint-phar <phar> --reprint-secret <secret> --url <url> --branch <branch> [--force]` | Clone through the Reprint exporter plugin over HTTP when SSH is unavailable. The initial Reprint pull uses `essential-files` unless `--include-uploads` or `--full-sync` is passed. |
 | `forkpress remote add <name> --cache-root <dir>` | Register an existing local remote-site cache. |
 | `forkpress remote branch <name> <branch>` | Create a local COW branch from a registered remote cache. |
 
